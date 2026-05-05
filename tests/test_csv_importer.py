@@ -14,20 +14,20 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.enums import OLBonusType, OLGearSlot
-from nikke_copilot.data.models import (
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.enums import OLBonusType, OLGearSlot
+from nikke_optimizer.data.models import (
     BuffSummaryLine,
     Character,
     Cube,
     OLGear,
     OwnedCharacter,
 )
-from nikke_copilot.data.scrapers.refresh import upsert_character
-from nikke_copilot.data.scrapers.prydwen import normalize_character_node
-from nikke_copilot.roster.costumes import parse_costumes
-from nikke_copilot.roster.csv_importer import import_csv
-from nikke_copilot.roster.csv_parsers import (
+from nikke_optimizer.data.scrapers.refresh import upsert_character
+from nikke_optimizer.data.scrapers.prydwen import normalize_character_node
+from nikke_optimizer.roster.costumes import parse_costumes
+from nikke_optimizer.roster.csv_importer import import_csv
+from nikke_optimizer.roster.csv_parsers import (
     parse_burst_cooldown_from_description,
     parse_cube_stats,
     parse_effect,
@@ -58,7 +58,7 @@ def _seed_characters(engine) -> None:
             upsert_character(session, norm)
         # Stub characters for full-roster CSV rows we touch but don't have
         # cached JSON for. The importer just needs the name to resolve.
-        from nikke_copilot.data.enums import (
+        from nikke_optimizer.data.enums import (
             BurstType, Element, Manufacturer, Rarity, WeaponClass,
         )
         stubs = [
@@ -205,7 +205,7 @@ def test_import_full_roster_csv():
     _seed_characters(engine)
 
     # Patch the importer's engine — it reads from default_db_path otherwise.
-    import nikke_copilot.roster.csv_importer as importer_mod
+    import nikke_optimizer.roster.csv_importer as importer_mod
 
     orig_make_engine = importer_mod.make_engine
 
@@ -308,8 +308,8 @@ def test_import_full_roster_csv():
 
 def _seed_for_namematcher(engine):
     """Seed Characters covering each ``_find_character`` fallback case."""
-    from nikke_copilot.data.models import Character
-    from nikke_copilot.data.enums import (
+    from nikke_optimizer.data.models import Character
+    from nikke_optimizer.data.enums import (
         BurstType, Element, Manufacturer, Rarity, WeaponClass,
     )
     db_chars = [
@@ -344,8 +344,8 @@ def _seed_for_namematcher(engine):
 
 def _resolve_csv_name(engine, csv_name: str) -> tuple[str | None, list[str]]:
     """Helper: invoke ``_find_character`` and return (resolved_name, warnings)."""
-    from nikke_copilot.data.models import Character
-    from nikke_copilot.roster.csv_importer import (
+    from nikke_optimizer.data.models import Character
+    from nikke_optimizer.roster.csv_importer import (
         ImportReport, _find_character,
     )
     report = ImportReport()

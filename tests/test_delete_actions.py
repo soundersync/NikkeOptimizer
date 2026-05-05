@@ -23,12 +23,12 @@ for _missing in ("fastapi", "sqlmodel", "PIL"):
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlmodel import select  # noqa: E402
 
-from nikke_copilot.data.db import get_session, init_db, make_engine  # noqa: E402
-from nikke_copilot.data.models import ArenaMatch  # noqa: E402
-from nikke_copilot.roster.arena_importer import (  # noqa: E402
+from nikke_optimizer.data.db import get_session, init_db, make_engine  # noqa: E402
+from nikke_optimizer.data.models import ArenaMatch  # noqa: E402
+from nikke_optimizer.roster.arena_importer import (  # noqa: E402
     SESSION_KIND_PARTIAL,
 )
-from nikke_copilot.web.app import create_app  # noqa: E402
+from nikke_optimizer.web.app import create_app  # noqa: E402
 
 
 def _make_uploads_dir(db_path: Path) -> Path:

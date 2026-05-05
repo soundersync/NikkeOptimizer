@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.models import Cube
-from nikke_copilot.roster.cube_extractor import extract_cube
-from nikke_copilot.roster.cube_importer import import_cubes
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.models import Cube
+from nikke_optimizer.roster.cube_extractor import extract_cube
+from nikke_optimizer.roster.cube_importer import import_cubes
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Apple Vision OCR required (macOS only)"

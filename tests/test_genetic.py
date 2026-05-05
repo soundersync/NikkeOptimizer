@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.enums import (
     BurstType, Element, Manufacturer, Rarity, WeaponClass,
 )
-from nikke_copilot.optimizer.genetic import (
+from nikke_optimizer.optimizer.genetic import (
     GASearchResult, genetic_search, _crossover, _mutate, _random_valid_team,
 )
-from nikke_copilot.optimizer.models import CharacterView
-from nikke_copilot.optimizer.scoring import ATTACK_WEIGHTS, score_team
+from nikke_optimizer.optimizer.models import CharacterView
+from nikke_optimizer.optimizer.scoring import ATTACK_WEIGHTS, score_team
 
 
 def _v(name: str, burst: BurstType, element: Element = Element.IRON, power: int = 200_000) -> CharacterView:

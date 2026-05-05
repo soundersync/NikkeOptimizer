@@ -42,14 +42,14 @@ pytestmark = pytest.mark.skipif(
 
 def test_title_detect_routes_to_battle_records():
     from PIL import Image
-    from nikke_copilot.roster.arena import detect_title
+    from nikke_optimizer.roster.arena import detect_title
     img = Image.open(_ROUND_FIXTURES[0]).convert("RGB")
     mode, _ = detect_title(img)
     assert mode == "champion_battle_record"
 
 
 def test_extract_battle_records_round_returns_round_number():
-    from nikke_copilot.roster.arena import extract_battle_records_round
+    from nikke_optimizer.roster.arena import extract_battle_records_round
     header = extract_battle_records_round(_ROUND_FIXTURES[0])
     assert header is not None
     # Round number should match the filename.
@@ -57,7 +57,7 @@ def test_extract_battle_records_round_returns_round_number():
 
 
 def test_extract_full_payload_returns_5_matchups():
-    from nikke_copilot.roster.battle_records import extract_battle_records
+    from nikke_optimizer.roster.battle_records import extract_battle_records
     br = extract_battle_records(_ROUND_FIXTURES[0])
     assert br is not None
     assert len(br.matchups) == 5
@@ -67,7 +67,7 @@ def test_extracted_names_are_not_all_the_same():
     """Slice #136 regression: BR rows used to store ['Eunhwa']*5 because
     the right-column portrait box was wrong. Confirm at least 2 distinct
     Nikkes appear across all matchups in any one round."""
-    from nikke_copilot.roster.battle_records import extract_battle_records
+    from nikke_optimizer.roster.battle_records import extract_battle_records
     # Pull known names from the test DB so the OCR-name lookup works.
     import sqlite3
     db_path = "/tmp/nikke_test.sqlite3"
@@ -98,7 +98,7 @@ def test_numeric_extraction_hits_threshold():
     disconnected cells should yield ≥ 1 numeric value. OCR noise is
     expected; threshold is intentionally permissive — the validator
     handles missing values defensively."""
-    from nikke_copilot.roster.battle_records import extract_battle_records
+    from nikke_optimizer.roster.battle_records import extract_battle_records
     total_cells = 0
     cells_with_numbers = 0
     for path in _ROUND_FIXTURES:

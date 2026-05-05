@@ -8,16 +8,16 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.enums import (
     BurstType,
     Element,
     Manufacturer,
     Rarity,
     WeaponClass,
 )
-from nikke_copilot.data.models import Character, OwnedCharacter
-from nikke_copilot.optimizer.constraints import (
+from nikke_optimizer.data.models import Character, OwnedCharacter
+from nikke_optimizer.optimizer.constraints import (
     DEFAULT_MIN_SKILL_SUM,
     effective_min_skill_sum,
     has_burst_chain,
@@ -26,11 +26,11 @@ from nikke_copilot.optimizer.constraints import (
     is_correct_size,
     is_valid_team,
 )
-from nikke_copilot.optimizer.loader import filter_eligible, load_owned
-from nikke_copilot.optimizer.models import CharacterView
-from nikke_copilot.optimizer.scoring import DEFAULT_WEIGHTS, score_team
-from nikke_copilot.optimizer.search import beam_search_top_teams, local_search_improve
-from nikke_copilot.optimizer.rookie import recommend_rookie
+from nikke_optimizer.optimizer.loader import filter_eligible, load_owned
+from nikke_optimizer.optimizer.models import CharacterView
+from nikke_optimizer.optimizer.scoring import DEFAULT_WEIGHTS, score_team
+from nikke_optimizer.optimizer.search import beam_search_top_teams, local_search_improve
+from nikke_optimizer.optimizer.rookie import recommend_rookie
 
 
 def _view(name: str, burst: BurstType, element: Element = Element.IRON, power: int = 100_000) -> CharacterView:
@@ -180,7 +180,7 @@ def test_effective_min_skill_sum_default():
 
 def test_effective_min_skill_sum_env_override(monkeypatch):
     """Env override flows into the floor read by call sites."""
-    monkeypatch.setenv("NIKKE_COPILOT_MIN_SKILL_SUM", "9")
+    monkeypatch.setenv("NIKKE_OPTIMIZER_MIN_SKILL_SUM", "9")
     assert effective_min_skill_sum() == 9
     # And a 4/4/4 member (sum 12) now passes.
     team = [
@@ -194,13 +194,13 @@ def test_effective_min_skill_sum_env_override(monkeypatch):
 
 
 def test_effective_min_skill_sum_invalid_env_falls_back(monkeypatch):
-    monkeypatch.setenv("NIKKE_COPILOT_MIN_SKILL_SUM", "not-an-int")
+    monkeypatch.setenv("NIKKE_OPTIMIZER_MIN_SKILL_SUM", "not-an-int")
     assert effective_min_skill_sum() == DEFAULT_MIN_SKILL_SUM
 
 
 def test_effective_min_skill_sum_zero_disables_floor(monkeypatch):
     """Power-user escape hatch: ``=0`` disables the veto entirely."""
-    monkeypatch.setenv("NIKKE_COPILOT_MIN_SKILL_SUM", "0")
+    monkeypatch.setenv("NIKKE_OPTIMIZER_MIN_SKILL_SUM", "0")
     team = [
         _view("A", BurstType.I),
         _undertrained(_view("Rapunzel: Pure Grace", BurstType.I)),
@@ -327,10 +327,10 @@ def test_route_treasure_forms_substitutes_when_unlocked(tmp_path, monkeypatch):
     """``_route_treasure_forms`` swaps base name → ``<name> (Treasure)``
     when the user's roster shows SSR rarity + phase >= 1 AND the
     registry has the Treasure-form library entry."""
-    from nikke_copilot.simulator.evaluator import _route_treasure_forms
+    from nikke_optimizer.simulator.evaluator import _route_treasure_forms
 
     db = tmp_path / "treasures.sqlite3"
-    monkeypatch.setenv("NIKKE_COPILOT_DB", str(db))
+    monkeypatch.setenv("NIKKE_OPTIMIZER_DB", str(db))
     engine = make_engine(db)
     init_db(engine)
     with get_session(engine) as s:
@@ -372,10 +372,10 @@ def test_route_treasure_forms_skips_when_no_treasure_form_in_registry(
     """When the registry doesn't have a ``(Treasure)`` library entry
     for the char, routing falls back to the base form even if the user
     has Treasure unlocked. Avoids None lookups in the registry."""
-    from nikke_copilot.simulator.evaluator import _route_treasure_forms
+    from nikke_optimizer.simulator.evaluator import _route_treasure_forms
 
     db = tmp_path / "no-treasure-form.sqlite3"
-    monkeypatch.setenv("NIKKE_COPILOT_DB", str(db))
+    monkeypatch.setenv("NIKKE_OPTIMIZER_DB", str(db))
     engine = make_engine(db)
     init_db(engine)
     with get_session(engine) as s:
@@ -404,7 +404,7 @@ def test_optimizer_context_caches_per_db_path(tmp_path):
     advances (simulating a CSV re-import)."""
     import os
     import time
-    from nikke_copilot.optimizer.loader import (
+    from nikke_optimizer.optimizer.loader import (
         get_context, invalidate_context_cache,
     )
 
@@ -428,7 +428,7 @@ def test_optimizer_context_caches_per_db_path(tmp_path):
 
 def test_optimizer_context_no_path_means_no_cache(tmp_path):
     """No ``db_path`` → no caching (used by tests with in-memory engines)."""
-    from nikke_copilot.optimizer.loader import get_context, invalidate_context_cache
+    from nikke_optimizer.optimizer.loader import get_context, invalidate_context_cache
 
     invalidate_context_cache()
     db_path = tmp_path / "fresh.sqlite3"
@@ -442,11 +442,11 @@ def test_optimizer_context_no_path_means_no_cache(tmp_path):
 
 def test_recommend_counter_accepts_context(tmp_path, monkeypatch):
     """Pre-supplied context skips DB load — exercised end-to-end."""
-    from nikke_copilot.optimizer.counter import recommend_counter
-    from nikke_copilot.optimizer.loader import OptimizerContext
+    from nikke_optimizer.optimizer.counter import recommend_counter
+    from nikke_optimizer.optimizer.loader import OptimizerContext
 
     db_path = tmp_path / "rc.sqlite3"
-    monkeypatch.setenv("NIKKE_COPILOT_DB", str(db_path))
+    monkeypatch.setenv("NIKKE_OPTIMIZER_DB", str(db_path))
     engine = make_engine(db_path)
     init_db(engine)
     with get_session(engine) as s:
@@ -468,10 +468,10 @@ def test_load_owned_stats_returns_owned_totals(tmp_path, monkeypatch):
     """``_load_owned_stats`` pulls per-Nikke ATK/HP/DEF from OwnedCharacter
     into the dict consumed by ``evaluate_team``. Owned-with-stats →
     populated; unowned or stat-less → omitted."""
-    from nikke_copilot.simulator.evaluator import _load_owned_stats
+    from nikke_optimizer.simulator.evaluator import _load_owned_stats
 
     db_path = tmp_path / "stats.sqlite3"
-    monkeypatch.setenv("NIKKE_COPILOT_DB", str(db_path))
+    monkeypatch.setenv("NIKKE_OPTIMIZER_DB", str(db_path))
     engine = make_engine(db_path)
     init_db(engine)
     with get_session(engine) as s:
@@ -531,9 +531,9 @@ def test_load_owned_stats_returns_owned_totals(tmp_path, monkeypatch):
 def test_load_owned_stats_returns_empty_dict_when_db_unavailable(monkeypatch):
     """No DB at the path → empty dict, no crash. Tests the defensive
     fallback that keeps simulator-only tests passing without a DB."""
-    from nikke_copilot.simulator.evaluator import _load_owned_stats
+    from nikke_optimizer.simulator.evaluator import _load_owned_stats
 
-    monkeypatch.setenv("NIKKE_COPILOT_DB", "/nonexistent/path/no.sqlite3")
+    monkeypatch.setenv("NIKKE_OPTIMIZER_DB", "/nonexistent/path/no.sqlite3")
     assert _load_owned_stats(["Crown", "Liter"]) == {}
 
 
@@ -557,7 +557,7 @@ def test_loader_filter_eligible_min_power():
 
 
 def test_element_advantage_table():
-    from nikke_copilot.optimizer.counter import has_element_advantage
+    from nikke_optimizer.optimizer.counter import has_element_advantage
 
     # Cycle: Fire > Wind > Iron > Electric > Water > Fire
     assert has_element_advantage(Element.FIRE, Element.WIND)
@@ -576,7 +576,7 @@ def test_element_coverage_counts_covered_opponent_elements():
     """``element_coverage`` returns (covered, distinct) where covered
     is the count of opponent elements at least one team member has
     advantage over."""
-    from nikke_copilot.optimizer.counter import element_coverage
+    from nikke_optimizer.optimizer.counter import element_coverage
 
     # Opponent: 3 distinct elements (Wind, Iron, Electric).
     opp = [
@@ -600,7 +600,7 @@ def test_element_coverage_counts_covered_opponent_elements():
 
 
 def test_score_counter_adds_element_bonus():
-    from nikke_copilot.optimizer.counter import CounterContext, score_counter
+    from nikke_optimizer.optimizer.counter import CounterContext, score_counter
 
     fire_team = [
         _view("F1", BurstType.I, Element.FIRE),
@@ -636,8 +636,8 @@ def test_score_counter_adds_element_bonus():
 def test_recommend_counter_end_to_end():
     """Counter-pick on the actual rookie capture stored in the dev DB."""
     from sqlmodel import select
-    from nikke_copilot.data.models import ArenaMatch
-    from nikke_copilot.optimizer.counter import recommend_counter
+    from nikke_optimizer.data.models import ArenaMatch
+    from nikke_optimizer.optimizer.counter import recommend_counter
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -659,7 +659,7 @@ def test_recommend_counter_end_to_end():
 
 
 def test_compute_coverage_perfect():
-    from nikke_copilot.optimizer.coverage import compute_coverage
+    from nikke_optimizer.optimizer.coverage import compute_coverage
 
     # Build 5 teams, one for each element. Every element should be covered.
     teams = []
@@ -680,7 +680,7 @@ def test_compute_coverage_perfect():
 
 
 def test_compute_coverage_uncovered():
-    from nikke_copilot.optimizer.coverage import compute_coverage
+    from nikke_optimizer.optimizer.coverage import compute_coverage
 
     # All 5 teams are pure Fire — Fire counters Wind, so Wind is covered, but
     # the other 4 elements (Water counters Fire, etc.) aren't.
@@ -705,7 +705,7 @@ def test_compute_coverage_uncovered():
 
 def test_recommend_champions_end_to_end():
     """Champions Arena returns 5 pairwise-disjoint teams (≤25 unique Nikkes)."""
-    from nikke_copilot.optimizer.champions import recommend_champions
+    from nikke_optimizer.optimizer.champions import recommend_champions
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -733,7 +733,7 @@ def test_recommend_sp_arena_end_to_end():
     Attack and defense are searched separately with role-specific weights,
     so the two lists may surface different Nikkes.
     """
-    from nikke_copilot.optimizer.sp_arena import recommend_sp_arena
+    from nikke_optimizer.optimizer.sp_arena import recommend_sp_arena
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -766,8 +766,8 @@ def test_recommend_sp_counter_against_real_capture():
     """SP-counter on the real captured rookie defense should produce 3
     distinct round counters."""
     from sqlmodel import select
-    from nikke_copilot.data.models import ArenaMatch
-    from nikke_copilot.optimizer.sp_counter import recommend_sp_counter
+    from nikke_optimizer.data.models import ArenaMatch
+    from nikke_optimizer.optimizer.sp_counter import recommend_sp_counter
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -796,7 +796,7 @@ def test_recommend_sp_counter_against_real_capture():
 def test_explain_character_existing():
     """Explain mode on a known character returns a valid team containing
     them and a finite score delta."""
-    from nikke_copilot.optimizer.explain import explain_character
+    from nikke_optimizer.optimizer.explain import explain_character
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -819,7 +819,7 @@ def test_explain_character_existing():
 
 def test_explain_character_not_found():
     """Explain mode on an unknown name returns no results."""
-    from nikke_copilot.optimizer.explain import explain_character
+    from nikke_optimizer.optimizer.explain import explain_character
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -835,9 +835,9 @@ def test_synergy_table_under_represented_count_below_threshold():
     coverage. As we encode more characters, ensure at least N% of
     encoded chars have 2+ synergy pairs. Threshold is 'half', generous
     enough to allow encoding faster than synergy fills."""
-    from nikke_copilot.optimizer.scoring import SYNERGY_PAIRS
-    from nikke_copilot.optimizer.synergy_audit import audit_synergy_coverage
-    from nikke_copilot.simulator.registry import all_encoded_names
+    from nikke_optimizer.optimizer.scoring import SYNERGY_PAIRS
+    from nikke_optimizer.optimizer.synergy_audit import audit_synergy_coverage
+    from nikke_optimizer.simulator.registry import all_encoded_names
 
     encoded = all_encoded_names()
     report = audit_synergy_coverage(encoded, SYNERGY_PAIRS)
@@ -859,7 +859,7 @@ def test_synergy_pairs_contain_no_unknown_character_names():
     """Guard against typos in SYNERGY_PAIRS — every name in the table
     must resolve to a known DB character, or be on the explicit allowlist
     for hypothetical / unreleased chars."""
-    from nikke_copilot.optimizer.scoring import SYNERGY_PAIRS
+    from nikke_optimizer.optimizer.scoring import SYNERGY_PAIRS
 
     engine = _real_db_engine()
     with get_session(engine) as session:
@@ -885,7 +885,7 @@ def test_synergy_pairs_contain_no_unknown_character_names():
 def test_synergy_audit_counts_pairs_per_character():
     """``audit_synergy_coverage`` returns the right per-character pair
     count and groups characters into tiers."""
-    from nikke_copilot.optimizer.synergy_audit import audit_synergy_coverage
+    from nikke_optimizer.optimizer.synergy_audit import audit_synergy_coverage
 
     encoded = ["Crown", "Liter", "Red Hood", "Modernia", "Lonely"]
     pairs = {
@@ -915,8 +915,8 @@ def test_select_diverse_top_k_zero_lambda_takes_top_scores():
     """``mmr_lambda=0`` means no diversity penalty — take top-K by score
     among distinct teams (dedup is always applied to avoid returning
     identical compositions multiple times)."""
-    from nikke_copilot.optimizer.search import select_diverse_top_k
-    from nikke_copilot.optimizer.models import ScoreBreakdown, TeamCandidate
+    from nikke_optimizer.optimizer.search import select_diverse_top_k
+    from nikke_optimizer.optimizer.models import ScoreBreakdown, TeamCandidate
 
     a = _view("A", BurstType.I); b = _view("B", BurstType.I)
     c = _view("C", BurstType.II); d = _view("D", BurstType.III)
@@ -946,8 +946,8 @@ def test_select_diverse_top_k_zero_lambda_takes_top_scores():
 def test_select_diverse_top_k_high_lambda_prefers_disjoint():
     """High ``mmr_lambda`` should prefer a lower-score team if the
     higher-score team shares all members with one already chosen."""
-    from nikke_copilot.optimizer.search import select_diverse_top_k
-    from nikke_copilot.optimizer.models import ScoreBreakdown, TeamCandidate
+    from nikke_optimizer.optimizer.search import select_diverse_top_k
+    from nikke_optimizer.optimizer.models import ScoreBreakdown, TeamCandidate
 
     a = _view("A", BurstType.I); b = _view("B", BurstType.I)
     c = _view("C", BurstType.II); d = _view("D", BurstType.III)
@@ -974,8 +974,8 @@ def test_select_diverse_top_k_high_lambda_prefers_disjoint():
 def test_select_diverse_top_k_moderate_lambda_allows_partial_overlap():
     """λ=2.0: a team with 1 shared member at +5 over a disjoint team
     should still beat the disjoint one."""
-    from nikke_copilot.optimizer.search import select_diverse_top_k
-    from nikke_copilot.optimizer.models import ScoreBreakdown, TeamCandidate
+    from nikke_optimizer.optimizer.search import select_diverse_top_k
+    from nikke_optimizer.optimizer.models import ScoreBreakdown, TeamCandidate
 
     # Pre-build views so ScoringWeights validation isn't tripped on them.
     a = _view("A", BurstType.I); b = _view("B", BurstType.I)
@@ -1012,7 +1012,7 @@ def test_recommend_rookie_end_to_end():
     for t in rec.attack:
         assert len(t.members) == 5
         # Burst chain is the headline hard constraint.
-        from nikke_copilot.optimizer.constraints import has_burst_chain
+        from nikke_optimizer.optimizer.constraints import has_burst_chain
         assert has_burst_chain(list(t.members))
         assert t.score > 0
         # Members must be unique within a team.

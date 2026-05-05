@@ -18,14 +18,14 @@ if importlib.util.find_spec("sqlmodel") is None:  # pragma: no cover
     pytest.skip("sqlmodel not available", allow_module_level=True)
 
 
-from nikke_copilot.data.models import ArenaMatch  # noqa: E402
-from nikke_copilot.roster.arena_importer import (  # noqa: E402
+from nikke_optimizer.data.models import ArenaMatch  # noqa: E402
+from nikke_optimizer.roster.arena_importer import (  # noqa: E402
     SESSION_KIND_COMPLETE,
     SESSION_KIND_PARTIAL,
     SESSION_KIND_PREDICTIONS,
     compute_session_kind,
 )
-from nikke_copilot.web.capture_warnings import (  # noqa: E402
+from nikke_optimizer.web.capture_warnings import (  # noqa: E402
     session_completeness,
     session_completeness_warnings,
 )

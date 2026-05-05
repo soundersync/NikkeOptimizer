@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.tools.crop_tool import (
+from nikke_optimizer.tools.crop_tool import (
     ViewTransform,
     clamp_selection_to_image,
     format_relative_coords,

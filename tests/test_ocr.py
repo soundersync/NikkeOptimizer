@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from nikke_copilot.roster.ocr import recognize, regions_in_bbox
+from nikke_optimizer.roster.ocr import recognize, regions_in_bbox
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Apple Vision OCR requires macOS"

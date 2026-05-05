@@ -9,20 +9,20 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.enums import (
     BurstType,
     Element,
     Manufacturer,
     Rarity,
     WeaponClass,
 )
-from nikke_copilot.optimizer.models import (
+from nikke_optimizer.optimizer.models import (
     CharacterView,
     ScoreBreakdown,
     TeamCandidate,
 )
-from nikke_copilot.simulator.evaluator import TeamEvaluation
-from nikke_copilot.web.evaluator_helper import MissingEncoding, evaluations_for
+from nikke_optimizer.simulator.evaluator import TeamEvaluation
+from nikke_optimizer.web.evaluator_helper import MissingEncoding, evaluations_for
 
 
 def _view(name: str) -> CharacterView:

@@ -1,0 +1,1972 @@
+"""Minimal FastAPI app — manual-correction UI for cubes + arena captures.
+
+Pages:
+  GET  /                           dashboard (counts + links)
+  GET  /cubes                      list every Cube row
+  GET  /cubes/{id}                 edit form for one Cube
+  POST /cubes/{id}                 save edits
+  GET  /captures                   list ArenaMatch rows (filterable)
+  GET  /captures/{id}              per-cell review for one capture
+  POST /captures/{id}/cell         override a single cell's character
+
+Server-rendered HTML only — no JS framework. Forms submit and redirect.
+
+Launch with: ``nikkeoptimizer web --db <path> --library <portraits>``
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from sqlmodel import select
+
+from ..data.db import default_db_path, get_session, init_db, make_engine
+from ..data.models import ArenaMatch, Character, Cube, OwnedCharacter
+from ..roster.portrait_matcher import PortraitMatcher
+
+log = logging.getLogger(__name__)
+
+
+_THIS_DIR = Path(__file__).parent
+_TEMPLATES_DIR = _THIS_DIR / "templates"
+_STATIC_DIR = _THIS_DIR / "static"
+
+
+def create_app(
+    *,
+    db_path: Optional[Path] = None,
+    portrait_library: Optional[Path] = None,
+) -> FastAPI:
+    """Build a configured FastAPI instance bound to a specific DB.
+
+    The portrait library is loaded once at startup (~30 seconds for 335
+    embeddings) and reused for every per-cell rerun request.
+    """
+    app = FastAPI(title="NikkeOptimizer")
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    # Slice #114 — split team notes into synergy lines vs everything else
+    # so templates can render them in separate panels for clarity.
+    def _synergy_notes(notes: list[str]) -> list[str]:
+        return [n for n in (notes or []) if n.startswith("synergy:")]
+
+    def _other_notes(notes: list[str]) -> list[str]:
+        return [n for n in (notes or []) if not n.startswith("synergy:")]
+
+    templates.env.filters["synergy_notes"] = _synergy_notes
+    templates.env.filters["other_notes"] = _other_notes
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    engine = make_engine(db_path)
+    init_db(engine)
+    app.state.engine = engine
+    app.state.db_path = db_path
+    app.state.matcher = None
+    app.state.portrait_library = portrait_library
+
+    # Slice #121 — robust screenshot path resolution. The DB stores
+    # whatever path the importer was handed (often a relative
+    # ``tests/fixtures/...`` path or an absolute path under
+    # ``~/Library/Application Support/NikkeOptimizer/screenshots/``).
+    # Files get moved/trimmed; the web server's cwd may not match the
+    # import-time cwd. Fall through known dirs by basename + mode
+    # before reporting 404.
+    _MODE_TO_DIR = {
+        "rookie": "Rookie_Arena",
+        "special": "Special_Arena",
+        "champion": "Champion_Arena",
+    }
+
+    def _resolve_screenshot_path(stored: str, mode: Optional[str]) -> Optional[Path]:
+        candidates: list[Path] = []
+        # 1. The path as stored — direct match if file is there.
+        candidates.append(Path(stored))
+        # 2. Same path but resolved relative to project root (handles
+        # the "imported from project root, served from elsewhere" case).
+        try:
+            project_root = _THIS_DIR.parent.parent.parent  # web/.. = nikke_optimizer/.. = src/.. = root
+            candidates.append(project_root / stored)
+        except Exception:
+            pass
+        basename = Path(stored).name
+        # Resolve the user-data dir from the active DB path (not
+        # default_db_path) so tests with tmp DBs see their own dirs.
+        try:
+            db = app.state.db_path or default_db_path()
+            data_dir = Path(db).parent
+        except Exception:
+            data_dir = None
+        # 3. User's organized screenshots dir for this mode.
+        if data_dir is not None:
+            user_screens = data_dir / "screenshots"
+            mode_dir = _MODE_TO_DIR.get((mode or "").lower())
+            if mode_dir:
+                candidates.append(user_screens / mode_dir / basename)
+            # And a flat search across all mode dirs in case mode is wrong.
+            for sub in _MODE_TO_DIR.values():
+                candidates.append(user_screens / sub / basename)
+            candidates.append(user_screens / "loose" / basename)
+            # 4. Uploads dir under the resolved DB path (real-user uploads).
+            candidates.append(data_dir / "uploads" / basename)
+        for candidate in candidates:
+            if candidate and candidate.is_file():
+                return candidate.resolve()
+        return None
+
+    def _matcher() -> Optional[PortraitMatcher]:
+        if app.state.matcher is not None or app.state.portrait_library is None:
+            return app.state.matcher
+        with get_session(app.state.engine) as session:
+            app.state.matcher = PortraitMatcher.from_portrait_library(
+                app.state.portrait_library, session=session
+            )
+        log.info("loaded matcher with %d portraits", len(app.state.matcher))
+        return app.state.matcher
+
+    # ------------------------------------------------------------------
+    # Dashboard
+    # ------------------------------------------------------------------
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard(request: Request) -> Response:
+        from ..data.config import detect_self_username, get_self_username
+        from .capture_warnings import session_completeness_warnings
+
+        configured_username = get_self_username()
+        detected_username: Optional[tuple[str, int]] = None
+        with get_session(engine) as session:
+            n_chars = len(session.exec(select(Character)).all())
+            n_cubes = len(session.exec(select(Cube)).all())
+            captures = list(session.exec(select(ArenaMatch)).all())
+            n_review = sum(1 for c in captures if c.needs_review)
+            # First-run UX: when no username is configured but captures
+            # exist, offer to auto-detect from the most-common
+            # user_username value across rows.
+            if configured_username is None and captures:
+                detected_username = detect_self_username(session)
+        # Session breakdown — drives the "Awaiting results" dashboard
+        # tile so the user can spot pending predictions at a glance.
+        session_matrices = session_completeness_warnings(
+            captures, user_username=configured_username,
+        )
+        n_predictions_awaiting = sum(
+            1 for sc in session_matrices.values()
+            if sc.session_kind == "predictions"
+        )
+        n_complete_sessions = sum(
+            1 for sc in session_matrices.values()
+            if sc.session_kind == "complete"
+        )
+        return templates.TemplateResponse(
+            request,
+            "dashboard.html",
+            {
+                "db_path": str(app.state.db_path or default_db_path()),
+                "n_chars": n_chars,
+                "n_cubes": n_cubes,
+                "n_captures": len(captures),
+                "n_review": n_review,
+                "n_predictions_awaiting": n_predictions_awaiting,
+                "n_complete_sessions": n_complete_sessions,
+                "portrait_library": app.state.portrait_library,
+                "configured_username": configured_username,
+                "detected_username": detected_username,
+            },
+        )
+
+    @app.post("/config/username")
+    def config_save_username(name: str = Form(...)) -> Response:
+        """Save the user's in-game name to ``config.json``."""
+        from ..data.config import set_self_username
+
+        cleaned = name.strip()
+        if not cleaned:
+            raise HTTPException(400, "username must not be empty")
+        set_self_username(cleaned)
+        return RedirectResponse(url="/", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Roster
+    # ------------------------------------------------------------------
+
+    @app.post("/roster/snapshot")
+    def roster_snapshot() -> Response:
+        """Save a snapshot of the current OwnedCharacter state to
+        ``<user_data_dir>/snapshots/<timestamp>.json`` for later diffing."""
+        from ..roster.snapshots import take_snapshot
+        with get_session(engine) as session:
+            path = take_snapshot(session, label="manual")
+        return RedirectResponse(
+            url=f"/roster?snapshot_saved={path.name}", status_code=303
+        )
+
+    @app.get("/roster", response_class=HTMLResponse)
+    def roster_list(
+        request: Request,
+        sort: str = "power",
+        element: Optional[str] = None,
+        burst: Optional[str] = None,
+        snapshot_saved: Optional[str] = None,
+    ) -> Response:
+        """Browse owned characters. Sortable by power / name / sync; filterable by element/burst."""
+        with get_session(engine) as session:
+            owned = list(session.exec(select(OwnedCharacter)).all())
+            chars = {c.id: c for c in session.exec(select(Character)).all()}
+            cubes = {c.id: c for c in session.exec(select(Cube)).all()}
+
+        # Join + flatten into row dicts the template can render directly.
+        rows: list[dict] = []
+        for o in owned:
+            ch = chars.get(o.character_id)
+            if ch is None:
+                continue
+            row = {
+                "name": ch.name,
+                "element": (ch.element.value if ch.element else "?"),
+                "weapon": (ch.weapon_class.value if ch.weapon_class else "?"),
+                "burst": (ch.burst_type.value if ch.burst_type else "?"),
+                "manufacturer": (
+                    ch.manufacturer.value if ch.manufacturer else "?"
+                ),
+                "power": o.power or 0,
+                "sync_level": o.sync_level,
+                "core": o.core,
+                "limit_break": o.limit_break,
+                "skill1": o.skill1_level,
+                "skill2": o.skill2_level,
+                "burst_skill": o.burst_skill_level,
+                "arena_cube": (
+                    cubes[o.arena_cube_id].name
+                    if o.arena_cube_id and o.arena_cube_id in cubes
+                    else None
+                ),
+                "battle_cube": (
+                    cubes[o.battle_cube_id].name
+                    if o.battle_cube_id and o.battle_cube_id in cubes
+                    else None
+                ),
+                "doll": o.treasure_name,
+                "doll_phase": o.treasure_phase,
+            }
+            rows.append(row)
+
+        # Compute dropdown options from the *unfiltered* set so options
+        # don't disappear when one filter is active (UX fix).
+        all_elements = sorted({r["element"] for r in rows if r["element"] != "?"})
+        all_bursts = sorted({str(r["burst"]) for r in rows if r["burst"] != "?"})
+
+        # Filters
+        if element:
+            rows = [r for r in rows if r["element"].lower() == element.lower()]
+        if burst:
+            rows = [r for r in rows if str(r["burst"]).upper() == burst.upper()]
+
+        # Sort
+        sort_keys = {
+            "power": lambda r: -r["power"],
+            "name": lambda r: r["name"].lower(),
+            "sync": lambda r: -(r["sync_level"] or 0),
+            "burst": lambda r: (r["burst"], r["name"].lower()),
+            "element": lambda r: (r["element"], -r["power"]),
+        }
+        rows.sort(key=sort_keys.get(sort, sort_keys["power"]))
+
+        return templates.TemplateResponse(
+            request,
+            "roster_list.html",
+            {
+                "rows": rows,
+                "sort": sort,
+                "element": element,
+                "burst": burst,
+                "all_elements": all_elements,
+                "all_bursts": all_bursts,
+                "total_owned": len(owned),
+                "snapshot_saved": snapshot_saved,
+            },
+        )
+
+    @app.get("/roster/advisor", response_class=HTMLResponse)
+    def roster_advisor(
+        request: Request,
+        role: str = "attack",
+        target_skill: int = 7,
+        max_recs: int = 10,
+        top_k: int = 5,
+    ) -> Response:
+        """"Who should I level up next?" — slice #106.
+
+        For each owned-but-undertrained Nikke (skill_sum below the
+        investment floor), simulates upgrading her skills to
+        ``target_skill`` and re-runs the optimizer. Ranks by score lift
+        across the top-K teams. Surfaces the same ROI ranking as the
+        ``nikkeoptimizer advisor`` CLI but in the web UI.
+        """
+        from ..optimizer.investment_advisor import recommend_investment
+        from ..optimizer.scoring import (
+            ATTACK_WEIGHTS, BALANCED_WEIGHTS, DEFENSE_WEIGHTS,
+        )
+
+        weights_for = {
+            "attack": ATTACK_WEIGHTS,
+            "defense": DEFENSE_WEIGHTS,
+            "balanced": BALANCED_WEIGHTS,
+        }
+        weights = weights_for.get(role, ATTACK_WEIGHTS)
+        with get_session(engine) as session:
+            recs = recommend_investment(
+                session, weights=weights, top_k=top_k,
+                target_skill=target_skill, max_recommendations=max_recs,
+            )
+        return templates.TemplateResponse(
+            request,
+            "roster_advisor.html",
+            {
+                "recs": recs,
+                "role": role,
+                "target_skill": target_skill,
+                "max_recs": max_recs,
+                "top_k": top_k,
+            },
+        )
+
+    @app.get("/roster/diff", response_class=HTMLResponse)
+    def roster_diff(
+        request: Request,
+        snapshot: Optional[str] = None,
+        days_ago: int = 7,
+    ) -> Response:
+        """Compare the current roster to a saved snapshot.
+
+        With no parameters: picks the snapshot from at least 7 days ago.
+        Pass ``?snapshot=<filename>`` to compare against a specific one,
+        or ``?days_ago=N`` to use a different cutoff.
+        """
+        from ..roster.snapshots import (
+            diff_against, latest_snapshot_before, list_snapshots,
+        )
+        from pathlib import Path as _Path
+
+        all_snaps = list_snapshots()
+        if snapshot:
+            from ..data.db import default_db_path as _ddp
+            base = _Path(_ddp()).parent / "snapshots"
+            target = base / snapshot
+            if not target.is_file():
+                target = None
+        else:
+            target = latest_snapshot_before(days_ago)
+        diff = None
+        if target is not None:
+            with get_session(engine) as session:
+                diff = diff_against(session, target)
+        return templates.TemplateResponse(
+            request,
+            "roster_diff.html",
+            {
+                "diff": diff,
+                "all_snapshots": [p.name for p in all_snaps],
+                "selected": target.name if target else None,
+                "days_ago": days_ago,
+            },
+        )
+
+    @app.get("/characters/{name}", response_class=HTMLResponse)
+    def character_detail(request: Request, name: str) -> Response:
+        """Per-character detail page — Prydwen prose + owned investment."""
+        from ..data.scrapers.prydwen import flatten_rich_text
+        with get_session(engine) as session:
+            ch = session.exec(
+                select(Character).where(Character.name == name)
+            ).one_or_none()
+            if ch is None:
+                raise HTTPException(404, f"character {name!r} not found")
+            owned = session.exec(
+                select(OwnedCharacter).where(OwnedCharacter.character_id == ch.id)
+            ).one_or_none()
+        # Flatten the rich text fields for display. The web template
+        # could render the full AST but plain prose is enough for now —
+        # the JSON is preserved on the model for a future richer view.
+        return templates.TemplateResponse(
+            request,
+            "character_detail.html",
+            {
+                "char": ch,
+                "owned": owned,
+                "pros_text": flatten_rich_text(ch.pros_raw),
+                "cons_text": flatten_rich_text(ch.cons_raw),
+                "review_text": flatten_rich_text(ch.review_raw),
+                "skill_analysis_text": flatten_rich_text(ch.skill_analysis_raw),
+                "harmony_cubes_text": flatten_rich_text(ch.harmony_cubes_info_raw),
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Cubes
+    # ------------------------------------------------------------------
+
+    @app.get("/cubes", response_class=HTMLResponse)
+    def cubes_list(request: Request) -> Response:
+        from .cube_warnings import compute_cube_warnings
+        with get_session(engine) as session:
+            rows = list(session.exec(select(Cube)).all())
+            rows.sort(key=lambda c: (-(c.level or 0), c.name))
+        warnings = compute_cube_warnings(rows)
+        return templates.TemplateResponse(
+            request, "cubes_list.html", {"cubes": rows, "warnings": warnings}
+        )
+
+    @app.get("/cubes/{cube_id}", response_class=HTMLResponse)
+    def cubes_edit(request: Request, cube_id: int) -> Response:
+        with get_session(engine) as session:
+            cube = session.get(Cube, cube_id)
+            if cube is None:
+                raise HTTPException(404, f"cube {cube_id} not found")
+        return templates.TemplateResponse(
+            request, "cube_edit.html", {"cube": cube}
+        )
+
+    @app.post("/cubes/{cube_id}")
+    def cubes_save(
+        cube_id: int,
+        name: str = Form(...),
+        level: Optional[int] = Form(None),
+        atk: Optional[int] = Form(None),
+        hp: Optional[int] = Form(None),
+        def_: Optional[int] = Form(None, alias="def"),
+        equipping_count_equipped: Optional[int] = Form(None),
+        equipping_count_owned: Optional[int] = Form(None),
+    ) -> Response:
+        with get_session(engine) as session:
+            cube = session.get(Cube, cube_id)
+            if cube is None:
+                raise HTTPException(404, f"cube {cube_id} not found")
+            cube.name = name.strip()
+            cube.level = level
+            cube.atk = atk
+            cube.hp = hp
+            cube.def_ = def_
+            cube.equipping_count_equipped = equipping_count_equipped
+            cube.equipping_count_owned = equipping_count_owned
+            session.add(cube)
+            session.commit()
+        return RedirectResponse(url="/cubes", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Arena captures
+    # ------------------------------------------------------------------
+
+    @app.get("/captures", response_class=HTMLResponse)
+    def captures_list(
+        request: Request,
+        review_only: bool = False,
+        mode: Optional[str] = None,
+        outcome: Optional[str] = None,
+        # Session filtering (slice #135).
+        # session_kind: 'predictions' | 'partial' | 'complete'
+        # since: '7d' | '30d' | 'all' — bound on captured_at for filtering
+        session_kind: Optional[str] = None,
+        since: Optional[str] = None,
+        uploaded: Optional[int] = None,
+        rookie: Optional[int] = None,
+        special: Optional[int] = None,
+        champion: Optional[int] = None,
+        skipped: Optional[int] = None,
+        review: Optional[int] = None,
+        upload_error: Optional[str] = None,
+    ) -> Response:
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from .capture_warnings import (
+            per_row_warnings,
+            session_completeness_warnings,
+            set_completeness_warnings,
+        )
+
+        with get_session(engine) as session:
+            # Set completeness needs the FULL capture set (not the filter
+            # subset) so rounds present in unfiltered captures still
+            # contribute to set membership.
+            all_caps = list(session.exec(select(ArenaMatch)).all())
+            set_warnings = set_completeness_warnings(all_caps)
+            session_matrices = session_completeness_warnings(all_caps)
+
+            query = select(ArenaMatch)
+            if review_only:
+                query = query.where(ArenaMatch.needs_review == True)  # noqa: E712
+            if mode:
+                query = query.where(ArenaMatch.mode == mode)
+            if session_kind in ("predictions", "partial", "complete"):
+                query = query.where(ArenaMatch.session_kind == session_kind)
+            rows = list(session.exec(query).all())
+            # Outcome filter (slice #105). The model has no index on
+            # ``outcome``, but the result set is small (~tens of captures),
+            # so an in-Python filter is fine. ``"untagged"`` matches rows
+            # with NULL outcome — useful for finding which captures still
+            # need a manual win/loss tag for damage-formula validation.
+            if outcome == "untagged":
+                rows = [r for r in rows if not r.outcome]
+            elif outcome in ("win", "loss", "timeout"):
+                rows = [r for r in rows if r.outcome == outcome]
+            # Time-window filter for the "Awaiting results" workflow.
+            if since in ("7d", "30d"):
+                days = 7 if since == "7d" else 30
+                cutoff = _dt.now(_tz.utc) - _td(days=days)
+                # ``captured_at`` may be naive on legacy rows — normalize.
+                def _aware(d):
+                    if d.tzinfo is None:
+                        return d.replace(tzinfo=_tz.utc)
+                    return d
+                rows = [r for r in rows if _aware(r.captured_at) >= cutoff]
+            rows.sort(key=lambda r: r.id or 0, reverse=True)
+            row_warnings = {r.id: per_row_warnings(r) for r in rows if r.id is not None}
+
+            # Session-grouped view: when filtering by session_kind, surface
+            # the unique sessions (one row per session_id, with summary
+            # counts) above the per-row table so users can act on whole
+            # sessions instead of scrolling through 11+ rows each.
+            session_summaries: list[dict] = []
+            if session_kind:
+                seen: set[str] = set()
+                for r in rows:
+                    sid = r.session_id or ""
+                    if not sid or sid in seen:
+                        continue
+                    seen.add(sid)
+                    sc = session_matrices.get(sid)
+                    if sc is None:
+                        continue
+                    session_summaries.append({
+                        "session_id": sid,
+                        "session_label": sc.session_label,
+                        "session_kind": sc.session_kind,
+                        "loadouts": sum(
+                            (1 if r.p1_loadout.captured else 0)
+                            + (1 if r.p2_loadout.captured else 0)
+                            for r in sc.rounds
+                        ),
+                        "results": sum(
+                            1 for r in sc.rounds if r.round_result.captured
+                        ),
+                        "duel_result": sc.duel_result.captured,
+                        "warnings": sc.warnings,
+                    })
+
+            # Slice #136: when review_only is set, group rows by session_id
+            # so the user can collapse / expand each Champions Duel as a
+            # unit rather than scrolling 11+ unrelated rows. Sessions
+            # without an ID get bucketed under the empty-string key
+            # ("Unsessioned captures") so legacy data still appears.
+            review_groups: list[dict] = []
+            if review_only:
+                from collections import defaultdict as _dd
+                by_session: dict[str, list[ArenaMatch]] = _dd(list)
+                for r in rows:
+                    by_session[r.session_id or ""].append(r)
+                # Sort: real sessions first by most-recent capture, then
+                # the unsessioned bucket at the bottom.
+                def _group_sort_key(item: tuple[str, list[ArenaMatch]]):
+                    sid, sess_rows = item
+                    most_recent = max(
+                        (r.id or 0 for r in sess_rows), default=0
+                    )
+                    return (sid == "", -most_recent)
+                for sid, sess_rows in sorted(by_session.items(), key=_group_sort_key):
+                    sc = session_matrices.get(sid) if sid else None
+                    review_groups.append({
+                        "session_id": sid,
+                        "session_label": (
+                            sc.session_label if sc else None
+                        ) or (
+                            "Unsessioned captures" if not sid
+                            else f"session {sid[:8]}…"
+                        ),
+                        "session_kind": sc.session_kind if sc else None,
+                        "rows": sorted(
+                            sess_rows, key=lambda r: r.id or 0,
+                        ),
+                        "review_count": sum(
+                            1 for r in sess_rows if r.needs_review
+                        ),
+                    })
+        upload_summary = None
+        if uploaded is not None:
+            upload_summary = {
+                "uploaded": uploaded or 0,
+                "rookie": rookie or 0,
+                "special": special or 0,
+                "champion": champion or 0,
+                "skipped": skipped or 0,
+                "review": review or 0,
+            }
+        # Counts for the in-page filter chips (predictions awaiting results).
+        n_pred_sessions = sum(
+            1 for sc in session_matrices.values()
+            if sc.session_kind == "predictions"
+        )
+        return templates.TemplateResponse(
+            request,
+            "captures_list.html",
+            {
+                "captures": rows,
+                "review_only": review_only,
+                "mode": mode,
+                "outcome": outcome,
+                "session_kind": session_kind,
+                "since": since,
+                "row_warnings": row_warnings,
+                "set_warnings": set_warnings,
+                "session_summaries": session_summaries,
+                "review_groups": review_groups,
+                "upload_summary": upload_summary,
+                "upload_error": upload_error,
+                "matcher_loaded": _matcher() is not None,
+                "n_predictions_awaiting": n_pred_sessions,
+            },
+        )
+
+    @app.get("/captures/{capture_id}", response_class=HTMLResponse)
+    def captures_detail(request: Request, capture_id: int) -> Response:
+        from .capture_warnings import per_row_warnings, set_completeness_warnings
+
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            char_names = [c.name for c in session.exec(select(Character)).all()]
+            row_w = per_row_warnings(cap)
+            all_caps = list(session.exec(select(ArenaMatch)).all())
+            set_w = set_completeness_warnings(all_caps).get(capture_id, [])
+        return templates.TemplateResponse(
+            request,
+            "capture_detail.html",
+            {
+                "capture": cap,
+                "char_names": sorted(char_names),
+                "row_warnings": row_w,
+                "set_warnings": set_w,
+            },
+        )
+
+    @app.post("/captures/upload", response_class=HTMLResponse)
+    async def captures_upload(
+        request: Request,
+        files: list[UploadFile] = File(...),
+        mode_hint: str = Form(""),  # '', 'rookie', 'sp', 'champions'
+        session_label: str = Form(""),
+        # When supplied, the upload merges into an existing session
+        # (used by the "Add results" workflow to attach Battle Records to
+        # an earlier predictions-only session). Empty = create a new one.
+        existing_session_id: str = Form(""),
+    ) -> Response:
+        """Upload one or more arena screenshots.
+
+        Saves each file under ``<db_dir>/uploads/`` (persistent so
+        FileResponse can re-serve them), runs the arena import
+        pipeline, and redirects to ``/uploads/preview/{session_id}``
+        with the matrix view so the user can verify completeness
+        before navigating away.
+
+        Requires the server to have been started with ``--library``
+        — the portrait matcher needs an indexed library to identify
+        cells. Returns ``upload_error=no_matcher`` if missing.
+        """
+        from ..roster.arena_importer import import_arena_screenshots
+
+        matcher = _matcher()
+        if matcher is None:
+            return RedirectResponse(
+                url="/captures?upload_error=no_matcher",
+                status_code=303,
+            )
+
+        from pathlib import Path as _Path
+        from ..data.config import get_self_username
+        from ..data.db import default_db_path
+        import time
+
+        db_path = (
+            _Path(app.state.db_path)
+            if app.state.db_path is not None
+            else _Path(default_db_path())
+        )
+        uploads_dir = db_path.parent / "uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_paths: list[_Path] = []
+        for upload in files:
+            if not upload.filename:
+                continue
+            stem = _Path(upload.filename).stem
+            suffix = _Path(upload.filename).suffix or ".png"
+            target = uploads_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
+            content = await upload.read()
+            target.write_bytes(content)
+            saved_paths.append(target)
+
+        if not saved_paths:
+            return RedirectResponse(url="/captures?upload_error=no_files", status_code=303)
+
+        # mode_hint: empty string from the form means "auto-detect"; convert
+        # to None so the importer doesn't try to match it as a literal hint.
+        hint = mode_hint.strip() or None
+        label = session_label.strip() or None
+        sid = existing_session_id.strip() or None
+
+        report = import_arena_screenshots(
+            saved_paths,
+            matcher,
+            db_path=db_path,
+            user_username=(get_self_username() or "NIKA"),
+            mode_hint=hint,
+            session_id=sid,
+            session_label=label,
+        )
+        log.info("upload report: %s", report.to_dict())
+        # Redirect to the preview matrix when a session_id is set; the page
+        # surfaces completeness gaps and cell-level confidence so the user
+        # can decide what to fix before navigating away. Falls back to the
+        # captures list if anything went wrong with session generation.
+        if report.session_id:
+            return RedirectResponse(
+                url=f"/uploads/preview/{report.session_id}",
+                status_code=303,
+            )
+        params = (
+            f"uploaded={report.files_seen}"
+            f"&rookie={report.rookie}"
+            f"&special={report.special}"
+            f"&champion={report.champion}"
+            f"&skipped={report.skipped}"
+            f"&review={report.needs_review}"
+        )
+        return RedirectResponse(url=f"/captures?{params}", status_code=303)
+
+    @app.get("/uploads/preview/{session_id}", response_class=HTMLResponse)
+    def upload_preview(request: Request, session_id: str) -> Response:
+        """Pre-save / post-upload completeness preview for one session.
+
+        Shows the 5-round × 3-screen-type matrix for Champions sessions,
+        plus the Duel Result row, plus per-cell match-confidence
+        summaries. Same view powers both:
+          - Immediate post-upload landing page (verify what just imported)
+          - Returning later from the "Awaiting results" filter to add
+            results to an existing predictions-only session
+        """
+        from ..data.config import get_self_username
+        from .capture_warnings import (
+            session_completeness,
+        )
+        with get_session(engine) as session:
+            captures = list(
+                session.exec(
+                    select(ArenaMatch).where(
+                        ArenaMatch.session_id == session_id
+                    )
+                ).all()
+            )
+            char_names = sorted(
+                c.name for c in session.exec(select(Character)).all()
+            )
+        if not captures:
+            raise HTTPException(404, f"session {session_id} has no captures")
+        username = get_self_username()
+        sc = session_completeness(captures, user_username=username)
+        return templates.TemplateResponse(
+            request,
+            "upload_preview.html",
+            {
+                "session_id": session_id,
+                "captures": captures,
+                "completeness": sc,
+                "captures_by_id": {c.id: c for c in captures},
+                "char_names": char_names,
+            },
+        )
+
+    @app.get("/captures/{capture_id}/cell-crop/{team}/{slot}.png")
+    def captures_cell_crop(capture_id: int, team: str, slot: int) -> Response:
+        """Serve the cropped portrait the matcher used for this cell.
+
+        Slice #137 — debugging aid surfaced via hover-tooltip on the
+        review UI. Lets the user verify that the crop the matcher saw
+        is actually centered on the right portrait region. If the crop
+        is wrong, the geometry needs re-tuning; if the crop is right
+        but the match is wrong, the matcher needs more exemplars.
+        """
+        from io import BytesIO
+        from PIL import Image as _PILImage
+        from ..roster.arena import (
+            _ARENA_INFO_REGIONS, _PORTRAIT_BOX_CHAMPION,
+            _PORTRAIT_BOX_PREBATTLE, _PREBATTLE_REGIONS,
+        )
+        if team not in ("user", "opponent"):
+            raise HTTPException(400, "team must be 'user' or 'opponent'")
+        if not 0 <= slot < 5:
+            raise HTTPException(400, "slot must be 0..4")
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            stored = cap.pre_battle_screenshot
+            mode = cap.mode
+        if not stored:
+            raise HTTPException(404, "no source screenshot for this capture")
+        resolved = _resolve_screenshot_path(stored, mode)
+        if resolved is None:
+            raise HTTPException(404, f"file not found: {stored}")
+        try:
+            full_image = _PILImage.open(resolved).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"open failed: {exc}")
+        # Use the wide portrait crop (NOT the tight feedback box) — this
+        # is what the matcher actually compares against at query time.
+        crop = _crop_review_cell(
+            full_image, mode, team, slot,
+            _ARENA_INFO_REGIONS, _PREBATTLE_REGIONS,
+            _PORTRAIT_BOX_CHAMPION, _PORTRAIT_BOX_PREBATTLE,
+            tight_face=False,
+        )
+        if crop is None:
+            raise HTTPException(404, f"no crop available for {mode}")
+        buf = BytesIO()
+        crop.save(buf, "PNG")
+        buf.seek(0)
+        return Response(content=buf.getvalue(), media_type="image/png")
+
+    @app.get("/captures/{capture_id}/screenshot/{which}")
+    def captures_screenshot(capture_id: int, which: str) -> Response:
+        """Serve the PNG referenced by an ArenaMatch row.
+
+        ``which`` is one of ``pre`` or ``record``. Only screenshots
+        actually referenced by a DB row can be served — no arbitrary
+        filesystem access via this endpoint.
+
+        Slice #121 — if the stored path doesn't resolve (test fixtures
+        were trimmed, project moved, web server cwd differs from import
+        cwd), search known screenshot directories by basename + mode
+        before giving up. Caches the resolved path back into the row so
+        subsequent loads are fast.
+        """
+        if which not in ("pre", "record"):
+            raise HTTPException(400, "which must be 'pre' or 'record'")
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            path_str = (
+                cap.pre_battle_screenshot
+                if which == "pre"
+                else cap.battle_record_screenshot
+            )
+            if not path_str:
+                raise HTTPException(404, f"no {which} screenshot recorded for this capture")
+            resolved = _resolve_screenshot_path(path_str, cap.mode)
+            if resolved is None:
+                raise HTTPException(
+                    404,
+                    f"file not found: {path_str} (also checked user screenshots dir + uploads + project fixtures)",
+                )
+            # Persist the resolved absolute path back so we don't pay
+            # the search cost again on every page reload.
+            new_str = str(resolved)
+            if new_str != path_str:
+                if which == "pre":
+                    cap.pre_battle_screenshot = new_str
+                else:
+                    cap.battle_record_screenshot = new_str
+                session.add(cap)
+                session.commit()
+        return FileResponse(resolved, media_type="image/png")
+
+    @app.post("/captures/{capture_id}/cell")
+    def captures_override_cell(
+        capture_id: int,
+        team: str = Form(...),  # "user" or "opponent"
+        slot: int = Form(...),  # 0..4
+        character: str = Form(...),
+        anchor: str = Form(""),  # row id to scroll back to after save
+        return_to: str = Form(""),  # 'preview' → bounce back to session preview
+    ) -> Response:
+        if team not in ("user", "opponent"):
+            raise HTTPException(400, f"team must be 'user' or 'opponent'")
+        if not 0 <= slot < 5:
+            raise HTTPException(400, f"slot must be 0..4")
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+
+            team_list = list(cap.user_team if team == "user" else cap.opponent_team)
+            while len(team_list) < 5:
+                team_list.append("")
+            previous_value = (team_list[slot] or "").strip()
+            cleaned = character.strip()
+            team_list[slot] = cleaned
+            if team == "user":
+                cap.user_team = team_list
+            else:
+                cap.opponent_team = team_list
+
+            # Also mark this cell confident in capture_quality so it doesn't
+            # show up as needing review again.
+            quality = dict(cap.capture_quality or {})
+            tq = dict(quality.get(team, {}))
+            chars = list(tq.get("characters", []))
+            while len(chars) < 5:
+                chars.append(None)
+            chars[slot] = cleaned or None
+            tq["characters"] = chars
+            quality[team] = tq
+            cap.capture_quality = quality
+
+            # Recompute needs_review across both teams.
+            still_review = False
+            for t in ("user", "opponent"):
+                t_chars = (quality.get(t) or {}).get("characters") or []
+                if any(c is None for c in t_chars):
+                    still_review = True
+                    break
+            cap.needs_review = still_review
+
+            session.add(cap)
+
+            # Snapshot the screenshot path + mode BEFORE committing so the
+            # post-commit feedback-loop save uses the right file location.
+            snap_path = cap.pre_battle_screenshot
+            snap_mode = cap.mode
+
+            session.commit()
+
+        # Feedback loop: ONLY save when the user actually changed the value.
+        # Saving when the override input was already pre-populated with the
+        # best-match value (and the user just clicked Save) would pollute the
+        # exemplar index with whatever the matcher guessed — exactly the
+        # opposite of "labeled feedback". The previous bug: round-1 cells
+        # auto-saved their best matches as exemplars, then round-2 cells
+        # with similar UI chrome matched against those exemplars and
+        # returned wrong answers.
+        if cleaned and snap_path and cleaned != previous_value:
+            try:
+                _save_feedback_exemplar(
+                    capture_id, team, slot, cleaned, snap_path, snap_mode
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "feedback exemplar save failed for capture %s slot %s: %s",
+                    capture_id, slot, exc,
+                )
+
+        # Anchor-redirect so the page scrolls back to the cell that was
+        # just saved instead of jumping to the top. When the override was
+        # triggered from the session preview (return_to=preview) we bounce
+        # back there instead of the per-capture detail page.
+        if return_to == "preview":
+            sid: Optional[str] = None
+            with get_session(engine) as session:
+                row = session.get(ArenaMatch, capture_id)
+                if row is not None:
+                    sid = row.session_id
+            if sid:
+                target = f"/uploads/preview/{sid}"
+                if anchor:
+                    safe = anchor.lstrip("#").strip()
+                    if safe:
+                        target = f"{target}#{safe}"
+                return RedirectResponse(url=target, status_code=303)
+        target = f"/captures/{capture_id}"
+        if anchor:
+            # Strip any user-supplied '#' so we can prepend our own.
+            safe = anchor.lstrip("#").strip()
+            if safe:
+                target = f"{target}#{safe}"
+        return RedirectResponse(url=target, status_code=303)
+
+    def _save_feedback_exemplar(
+        capture_id: int, team: str, slot: int,
+        character_name: str, stored_path: str, mode: Optional[str],
+    ) -> None:
+        """Crop the corrected cell + feed it back into the matcher.
+
+        Writes the crop to ``<library>/feedback/<Character>/<ts>_<id>_<slot>.webp``
+        AND calls ``matcher.add_exemplar`` so the running index gets the
+        new entry without restart. The next capture in this session will
+        match against the in-game-style exemplar in addition to the
+        curated catalog art.
+        """
+        from PIL import Image as _PILImage
+        import time
+
+        if app.state.portrait_library is None or app.state.matcher is None:
+            return  # nothing to feed back into
+
+        resolved = _resolve_screenshot_path(stored_path, mode)
+        if resolved is None:
+            log.warning(
+                "feedback: cannot resolve screenshot %r for capture %s",
+                stored_path, capture_id,
+            )
+            return
+
+        try:
+            full_image = _PILImage.open(resolved).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("feedback: open failed for %s: %s", resolved, exc)
+            return
+
+        # Re-derive the per-cell crop using the same geometry the importer
+        # used. We re-import these constants so a future re-tune of cell
+        # boxes auto-flows into feedback exemplars too.
+        from ..roster.arena import (
+            _ARENA_INFO_REGIONS, _PORTRAIT_BOX_CHAMPION,
+            _PORTRAIT_BOX_PREBATTLE, _PREBATTLE_REGIONS,
+        )
+        cell_crop = _crop_review_cell(
+            full_image, mode, team, slot,
+            _ARENA_INFO_REGIONS, _PREBATTLE_REGIONS,
+            _PORTRAIT_BOX_CHAMPION, _PORTRAIT_BOX_PREBATTLE,
+            tight_face=True,  # avoid saving UI chrome as part of the exemplar
+        )
+        if cell_crop is None:
+            return
+
+        # Save under feedback/<Character>/<ts>_<id>_<slot>.webp
+        feedback_root = Path(app.state.portrait_library) / "feedback" / character_name
+        feedback_root.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time() * 1000)
+        out_path = feedback_root / f"{ts}_cap{capture_id}_slot{slot}.webp"
+        try:
+            cell_crop.save(out_path, "WEBP", quality=90)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("feedback: write failed for %s: %s", out_path, exc)
+            return
+
+        # Hot-append into the running matcher so the next capture this
+        # session benefits without a restart.
+        app.state.matcher.add_exemplar(
+            character_name, cell_crop, source_path=out_path,
+        )
+
+    # Modest trim applied AFTER the regular portrait box. The portrait box
+    # captures the character art *plus* small chrome bits at the edges
+    # (LV banner at bottom, icon column at left, level badge at top-left).
+    # The chrome is identical across all Champions cells — including it in
+    # a labeled exemplar means a new crop with the same chrome but a
+    # different face matches with artificially low distance.
+    #
+    # Coordinates are relative to the existing portrait box. We trim only
+    # the obvious edge chrome (10% on each side, 5% top, 15% bottom) and
+    # keep face + hair + upper costume — those are what actually
+    # distinguish characters. Once we accumulate ~10 exemplars per
+    # character, the law of large numbers handles the residual chrome
+    # noise; at that point this trim can become more permissive.
+    _FEEDBACK_FACE_BOX = (0.08, 0.05, 0.92, 0.85)
+
+    def _crop_review_cell(
+        image, mode, team, slot,
+        arena_info_regions, prebattle_regions,
+        portrait_box_champion, portrait_box_prebattle,
+        *, tight_face: bool = False,
+    ):
+        """Crop the per-cell portrait from a stored screenshot.
+
+        Mirrors the geometry used at import time so the hover-preview
+        and feedback exemplars match what the matcher actually saw.
+
+        When ``tight_face=True``, applies an additional inner sub-crop to
+        cut UI chrome (LV banner / star count / card frame). Used for
+        feedback exemplars to avoid the chrome dominating the embedding.
+        """
+        from ..roster.arena import _CHAMPION_TILE_BOXES
+        if not mode:
+            return None
+        w, h = image.size
+        # Champions Arena Info — use the explicit per-tile boxes (slice #138).
+        # No strip+grid+portrait layering; the box IS the full card crop.
+        if mode == "champion":
+            if not 0 <= slot < len(_CHAMPION_TILE_BOXES):
+                return None
+            x1, y1, x2, y2 = _CHAMPION_TILE_BOXES[slot]
+            portrait = image.crop(
+                (int(w * x1), int(h * y1), int(w * x2), int(h * y2))
+            )
+        elif mode in ("rookie", "special"):
+            # Rookie / SP retain the legacy strip+grid+portrait pipeline.
+            band_box = (
+                prebattle_regions["bottom_team_strip"] if team == "user"
+                else prebattle_regions["top_team_strip"]
+            )
+            x1, y1, x2, y2 = band_box
+            band = image.crop((int(x1 * w), int(y1 * h), int(x2 * w), int(y2 * h)))
+            bw, bh = band.size
+            cell_w = bw // 5
+            cell = band.crop((slot * cell_w, 0, (slot + 1) * cell_w, bh))
+            cw, ch = cell.size
+            px1, py1, px2, py2 = portrait_box_prebattle
+            portrait = cell.crop(
+                (int(cw * px1), int(ch * py1), int(cw * px2), int(ch * py2))
+            )
+        else:
+            return None
+        if tight_face:
+            pw, ph = portrait.size
+            fx1, fy1, fx2, fy2 = _FEEDBACK_FACE_BOX
+            return portrait.crop(
+                (int(pw * fx1), int(ph * fy1), int(pw * fx2), int(ph * fy2))
+            )
+        return portrait
+
+    # ------------------------------------------------------------------
+    # Delete / discard routes (slice #136)
+    #
+    # Three granularities:
+    #   POST /captures/{id}/delete          — single row + its screenshot
+    #   POST /sessions/{sid}/delete         — every row in a Champions session
+    #   POST /captures/discard-needs-review — bulk: all needs_review rows
+    #
+    # All three accept an `existing_session_id` form field so we can
+    # re-route back to the session preview when the source page wants to
+    # stay there. They also remove the orphaned upload file under
+    # <db_dir>/uploads/ so storage doesn't accumulate over time.
+    # ------------------------------------------------------------------
+
+    def _delete_screenshot_file(stored_path: Optional[str]) -> None:
+        """Best-effort delete of an upload file referenced by a row.
+
+        Only deletes when the file lives under <db_dir>/uploads/ — refuses
+        to touch anything outside that directory so a stray absolute path
+        in the DB can't be exploited to delete arbitrary files.
+        """
+        if not stored_path:
+            return
+        try:
+            target = Path(stored_path).resolve()
+        except Exception:
+            return
+        try:
+            db = app.state.db_path or default_db_path()
+            uploads_dir = (Path(db).parent / "uploads").resolve()
+        except Exception:
+            return
+        try:
+            target.relative_to(uploads_dir)
+        except ValueError:
+            return  # outside uploads dir → never delete
+        try:
+            target.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("upload cleanup failed for %s: %s", target, exc)
+
+    def _delete_capture_row(session, cap: ArenaMatch) -> Optional[str]:
+        """Delete one ArenaMatch row + its screenshot files.
+
+        Returns the row's `session_id` (when set) so the caller can
+        re-run `_refresh_session_kind` after the deletion.
+        """
+        sid = cap.session_id
+        _delete_screenshot_file(cap.pre_battle_screenshot)
+        _delete_screenshot_file(cap.battle_record_screenshot)
+        session.delete(cap)
+        return sid
+
+    @app.post("/captures/{capture_id}/delete")
+    def captures_delete(
+        capture_id: int,
+        return_to: str = Form(""),
+    ) -> Response:
+        """Discard one capture row + its screenshot file."""
+        from ..roster.arena_importer import _refresh_session_kind
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            sid = _delete_capture_row(session, cap)
+            session.flush()
+            if sid:
+                _refresh_session_kind(session, sid)
+            session.commit()
+        # Redirect target: prefer return_to=preview when set + we know
+        # the session, otherwise fall back to /captures.
+        if return_to == "preview" and sid:
+            return RedirectResponse(
+                url=f"/uploads/preview/{sid}", status_code=303,
+            )
+        return RedirectResponse(url="/captures", status_code=303)
+
+    @app.post("/sessions/{session_id}/delete")
+    def sessions_delete(session_id: str) -> Response:
+        """Discard every row in a session + their screenshot files."""
+        with get_session(engine) as session:
+            rows = list(session.exec(
+                select(ArenaMatch).where(ArenaMatch.session_id == session_id)
+            ).all())
+            if not rows:
+                raise HTTPException(404, f"session {session_id} has no rows")
+            for cap in rows:
+                _delete_capture_row(session, cap)
+            session.commit()
+        return RedirectResponse(url="/captures", status_code=303)
+
+    @app.post("/feedback/clear")
+    def feedback_clear(
+        confirm: str = Form(""),
+        character: str = Form(""),
+    ) -> Response:
+        """Wipe feedback exemplars from the portrait library.
+
+        Two modes:
+          * No `character` arg → wipe ALL feedback exemplars (full reset).
+          * `character` set    → wipe only that character's subdir.
+
+        Also rebuilds the in-process matcher index so wiped exemplars
+        stop influencing matches immediately. Requires `confirm=yes`.
+        """
+        import shutil
+        if confirm != "yes":
+            raise HTTPException(400, "clear requires confirm=yes")
+        if app.state.portrait_library is None:
+            raise HTTPException(
+                400, "no portrait library configured; nothing to clear",
+            )
+        feedback_root = Path(app.state.portrait_library) / "feedback"
+        cleared = 0
+        if character:
+            target = feedback_root / character
+            if target.exists() and target.is_dir():
+                cleared = sum(1 for _ in target.glob("*"))
+                shutil.rmtree(target)
+        else:
+            if feedback_root.exists():
+                for sub in feedback_root.iterdir():
+                    if sub.is_dir():
+                        cleared += sum(1 for _ in sub.glob("*"))
+                        shutil.rmtree(sub)
+        # Force a matcher rebuild on next access so the in-memory index
+        # drops the wiped exemplars.
+        app.state.matcher = None
+        log.info(
+            "cleared %d feedback exemplar(s)%s",
+            cleared,
+            f" for {character!r}" if character else " (all)",
+        )
+        return RedirectResponse(
+            url=f"/captures?feedback_cleared={cleared}",
+            status_code=303,
+        )
+
+    @app.post("/captures/discard-needs-review")
+    def captures_discard_needs_review(
+        confirm: str = Form(""),
+        session_kind: str = Form(""),
+    ) -> Response:
+        """Bulk-discard every capture currently flagged needs_review.
+
+        Optional `session_kind` scopes the bulk-delete to one kind
+        (e.g. delete only `predictions` sessions still in review).
+        Requires `confirm=yes` from the form so a stray click can't
+        wipe data — the UI sets this via a JS prompt confirmation.
+        """
+        from ..roster.arena_importer import _refresh_session_kind
+        if confirm != "yes":
+            raise HTTPException(
+                400, "discard requires confirm=yes (set by the UI prompt)",
+            )
+        affected_sessions: set[str] = set()
+        deleted_count = 0
+        with get_session(engine) as session:
+            query = select(ArenaMatch).where(
+                ArenaMatch.needs_review == True  # noqa: E712
+            )
+            if session_kind in ("predictions", "partial", "complete"):
+                query = query.where(ArenaMatch.session_kind == session_kind)
+            for cap in list(session.exec(query).all()):
+                sid = _delete_capture_row(session, cap)
+                if sid:
+                    affected_sessions.add(sid)
+                deleted_count += 1
+            session.flush()
+            for sid in affected_sessions:
+                _refresh_session_kind(session, sid)
+            session.commit()
+        log.info(
+            "bulk-discarded %d needs_review captures across %d sessions",
+            deleted_count, len(affected_sessions),
+        )
+        return RedirectResponse(
+            url=f"/captures?review_only=true&discarded={deleted_count}",
+            status_code=303,
+        )
+
+    @app.post("/captures/{capture_id}/outcome")
+    def captures_set_outcome(
+        capture_id: int,
+        outcome: str = Form(""),  # 'win' | 'loss' | 'timeout' | '' (clear)
+        user_role: str = Form(""),  # 'attack' | 'defense' | '' (clear)
+        seconds_to_clear: Optional[int] = Form(None),
+    ) -> Response:
+        """Tag an arena capture's match outcome.
+
+        Foundation for damage-formula validation: with real
+        ``outcome`` + ``seconds_to_clear`` data captured per match, the
+        simulator's predictions can eventually be backtested. ``''``
+        clears the field so a mistakenly-set outcome can be reset.
+        """
+        valid_outcomes = {"", "win", "loss", "timeout"}
+        valid_roles = {"", "attack", "defense"}
+        if outcome not in valid_outcomes:
+            raise HTTPException(400, f"outcome must be one of {sorted(valid_outcomes)}")
+        if user_role not in valid_roles:
+            raise HTTPException(400, f"user_role must be one of {sorted(valid_roles)}")
+        if seconds_to_clear is not None and (seconds_to_clear < 0 or seconds_to_clear > 600):
+            raise HTTPException(400, "seconds_to_clear must be 0..600")
+
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            cap.outcome = outcome or None
+            cap.user_role = user_role or None
+            # Persist seconds_to_clear inside raw_battle_record (JSON dict)
+            # so we don't need a schema migration. Clear when set to None.
+            record = dict(cap.raw_battle_record or {})
+            if seconds_to_clear is None:
+                record.pop("seconds_to_clear", None)
+            else:
+                record["seconds_to_clear"] = int(seconds_to_clear)
+            cap.raw_battle_record = record
+            session.add(cap)
+            session.commit()
+        return RedirectResponse(url=f"/captures/{capture_id}", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Misc
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Optimizer
+    # ------------------------------------------------------------------
+
+    @app.get("/counter", response_class=HTMLResponse)
+    def counter_freeform(
+        request: Request,
+        n1: str = "",
+        n2: str = "",
+        n3: str = "",
+        n4: str = "",
+        n5: str = "",
+        top_k: int = 5,
+        min_power: int = 50_000,
+    ) -> Response:
+        """Counter-pick a free-form opponent lineup (no capture required).
+
+        Same recommendation engine as ``captures_counter``; this route
+        just lets the user type 5 names instead of pulling them from a
+        captured ``ArenaMatch``. Useful for theorycrafting or
+        countering teams the user hasn't yet captured (e.g., a friend's
+        roster, or a team posted in chat).
+        """
+        from ..optimizer.counter import recommend_counter
+        from ..optimizer.loader import get_context
+        from .evaluator_helper import burst_timings_for
+
+        opp_names_raw = [n1, n2, n3, n4, n5]
+        opp_names = [n.strip() for n in opp_names_raw if n and n.strip()]
+
+        # Validate: every supplied name must resolve to a known character
+        # (DB lookup) before we run the optimizer. Missing names go into
+        # ``unknown_names`` for surfacing in the form.
+        unknown_names: list[str] = []
+        char_names: list[str] = []
+        with get_session(engine) as session:
+            char_names = sorted(c.name for c in session.exec(select(Character)).all())
+            known = set(char_names)
+            for n in opp_names:
+                if n not in known:
+                    unknown_names.append(n)
+
+            rec = None
+            if opp_names and not unknown_names and len(opp_names) == 5:
+                ctx = get_context(session, db_path=app.state.db_path)
+                rec = recommend_counter(
+                    session,
+                    opp_names,
+                    top_k=top_k,
+                    beam_width=200,
+                    min_power=min_power,
+                    context=ctx,
+                )
+        team_timings = burst_timings_for(rec.teams) if rec and rec.teams else []
+        return templates.TemplateResponse(
+            request,
+            "counter_freeform.html",
+            {
+                "rec": rec,
+                "top_k": top_k,
+                "min_power": min_power,
+                "opp_names_raw": opp_names_raw,
+                "unknown_names": unknown_names,
+                "char_names": char_names,
+                "team_timings": team_timings,
+            },
+        )
+
+    @app.get("/captures/{capture_id}/counter", response_class=HTMLResponse)
+    def captures_counter(
+        request: Request,
+        capture_id: int,
+        top_k: int = 5,
+        min_power: int = 50_000,
+    ) -> Response:
+        from ..optimizer.counter import recommend_counter
+        from ..optimizer.loader import get_context
+        from .evaluator_helper import burst_timings_for
+
+        with get_session(engine) as session:
+            cap = session.get(ArenaMatch, capture_id)
+            if cap is None:
+                raise HTTPException(404, f"capture {capture_id} not found")
+            opp_names = [n for n in (cap.opponent_team or []) if n]
+            rec = None
+            if opp_names:
+                ctx = get_context(session, db_path=app.state.db_path)
+                rec = recommend_counter(
+                    session,
+                    opp_names,
+                    top_k=top_k,
+                    beam_width=200,
+                    min_power=min_power,
+                    context=ctx,
+                )
+        team_timings = burst_timings_for(rec.teams) if rec and rec.teams else []
+        return templates.TemplateResponse(
+            request,
+            "counter.html",
+            {
+                "capture": cap,
+                "rec": rec,
+                "top_k": top_k,
+                "min_power": min_power,
+                "opp_names": opp_names,
+                "team_timings": team_timings,
+            },
+        )
+
+    def _parse_weight_overrides(
+        power_w, element_diversity_w, role_balance_w, synergy_w,
+        investment_w, durability_w, burst_gen_w,
+    ):
+        """Map non-None weight query params → ScoringWeights override.
+
+        Returns ``None`` when no overrides are present (caller uses
+        the role-default presets). Otherwise returns a ScoringWeights
+        constructed from ATTACK_WEIGHTS as a base with the supplied
+        fields replaced. Slice #104 — shared between rookie / SP /
+        Champions routes.
+        """
+        from dataclasses import replace as _replace
+        from ..optimizer.scoring import ATTACK_WEIGHTS, ScoringWeights
+
+        overrides: dict = {}
+        for field, value in (
+            ("power_sum", power_w),
+            ("element_diversity", element_diversity_w),
+            ("role_balance", role_balance_w),
+            ("synergy_pairs", synergy_w),
+            ("investment", investment_w),
+            ("durability", durability_w),
+            ("burst_gen", burst_gen_w),
+        ):
+            if value is not None:
+                overrides[field] = float(value)
+        if not overrides:
+            return None
+        return _replace(ATTACK_WEIGHTS, **overrides)
+
+    @app.get("/optimize/champions", response_class=HTMLResponse)
+    def optimize_champions(
+        request: Request,
+        min_power: int = 100_000,
+        power_w: Optional[float] = None,
+        element_diversity_w: Optional[float] = None,
+        role_balance_w: Optional[float] = None,
+        synergy_w: Optional[float] = None,
+        investment_w: Optional[float] = None,
+        durability_w: Optional[float] = None,
+        burst_gen_w: Optional[float] = None,
+    ) -> Response:
+        from ..optimizer.champions import recommend_champions
+        from ..optimizer.scoring import ATTACK_WEIGHTS, BALANCED_WEIGHTS
+        from .evaluator_helper import (
+            burst_timings_for,
+            rescored_teams_with_evaluations,
+        )
+
+        custom_weights = _parse_weight_overrides(
+            power_w, element_diversity_w, role_balance_w, synergy_w,
+            investment_w, durability_w, burst_gen_w,
+        )
+        with get_session(engine) as session:
+            rec = recommend_champions(
+                session, beam_width=200, min_power=min_power,
+                override_weights=custom_weights,
+            )
+        rescore_w = custom_weights or BALANCED_WEIGHTS
+        rescored, evaluations = rescored_teams_with_evaluations(
+            rec.teams, weights=rescore_w
+        )
+        # Champions teams are season-locked as a group of 5; preserve
+        # the optimizer's lineup ordering rather than re-sorting per team.
+        rec.teams[:] = rescored
+        team_timings = burst_timings_for(rec.teams)
+        return templates.TemplateResponse(
+            request,
+            "optimize_champions.html",
+            {
+                "rec": rec,
+                "min_power": min_power,
+                "team_evaluations": evaluations,
+                "team_timings": team_timings,
+                "active_weights": custom_weights or BALANCED_WEIGHTS,
+                "using_custom_weights": custom_weights is not None,
+                "default_weights": ATTACK_WEIGHTS,
+            },
+        )
+
+    @app.get("/optimize/sp", response_class=HTMLResponse)
+    def optimize_sp(
+        request: Request,
+        min_power: int = 100_000,
+        power_w: Optional[float] = None,
+        element_diversity_w: Optional[float] = None,
+        role_balance_w: Optional[float] = None,
+        synergy_w: Optional[float] = None,
+        investment_w: Optional[float] = None,
+        durability_w: Optional[float] = None,
+        burst_gen_w: Optional[float] = None,
+    ) -> Response:
+        from ..optimizer.sp_arena import recommend_sp_arena
+        from ..optimizer.scoring import ATTACK_WEIGHTS, DEFENSE_WEIGHTS
+        from .evaluator_helper import (
+            burst_timings_for,
+            rescored_teams_with_evaluations,
+        )
+
+        custom_weights = _parse_weight_overrides(
+            power_w, element_diversity_w, role_balance_w, synergy_w,
+            investment_w, durability_w, burst_gen_w,
+        )
+        with get_session(engine) as session:
+            rec = recommend_sp_arena(
+                session, beam_width=200, min_power=min_power,
+                override_weights=custom_weights,
+            )
+        attack_w = custom_weights or ATTACK_WEIGHTS
+        defense_w = custom_weights or DEFENSE_WEIGHTS
+        rec.attack[:], attack_evals = rescored_teams_with_evaluations(
+            rec.attack, weights=attack_w
+        )
+        rec.defense[:], defense_evals = rescored_teams_with_evaluations(
+            rec.defense, weights=defense_w
+        )
+        attack_timings = burst_timings_for(rec.attack)
+        defense_timings = burst_timings_for(rec.defense)
+        return templates.TemplateResponse(
+            request,
+            "optimize_sp.html",
+            {
+                "rec": rec,
+                "min_power": min_power,
+                "attack_evaluations": attack_evals,
+                "defense_evaluations": defense_evals,
+                "attack_timings": attack_timings,
+                "defense_timings": defense_timings,
+                "active_weights": custom_weights or ATTACK_WEIGHTS,
+                "using_custom_weights": custom_weights is not None,
+                "default_weights": ATTACK_WEIGHTS,
+            },
+        )
+
+    @app.get("/optimize/rookie", response_class=HTMLResponse)
+    def optimize_rookie(
+        request: Request,
+        top_k: int = 5,
+        min_power: int = 100_000,
+        # Slice #103 — custom weight overrides. None = use the role default
+        # (ATTACK_WEIGHTS for attack, DEFENSE_WEIGHTS for defense). Any value
+        # set will override BOTH role presets — the rookie page surfaces a
+        # single set of sliders for simplicity.
+        power_w: Optional[float] = None,
+        element_diversity_w: Optional[float] = None,
+        role_balance_w: Optional[float] = None,
+        synergy_w: Optional[float] = None,
+        investment_w: Optional[float] = None,
+        durability_w: Optional[float] = None,
+        burst_gen_w: Optional[float] = None,
+    ) -> Response:
+        from ..optimizer.rookie import recommend_rookie
+        from ..optimizer.scoring import (
+            ATTACK_WEIGHTS, DEFENSE_WEIGHTS, ScoringWeights,
+        )
+        from .evaluator_helper import (
+            burst_timings_for,
+            rescored_teams_with_evaluations,
+        )
+
+        custom_weights: Optional[ScoringWeights] = _parse_weight_overrides(
+            power_w, element_diversity_w, role_balance_w, synergy_w,
+            investment_w, durability_w, burst_gen_w,
+        )
+
+        with get_session(engine) as session:
+            rec = recommend_rookie(
+                session, top_k=top_k, beam_width=200, min_power=min_power,
+                weights=custom_weights,
+            )
+        attack_w = custom_weights or ATTACK_WEIGHTS
+        defense_w = custom_weights or DEFENSE_WEIGHTS
+        attack_rescored, attack_evals = rescored_teams_with_evaluations(
+            rec.attack, weights=attack_w
+        )
+        defense_rescored, defense_evals = rescored_teams_with_evaluations(
+            rec.defense, weights=defense_w
+        )
+        attack_timings = burst_timings_for(attack_rescored)
+        defense_timings = burst_timings_for(defense_rescored)
+
+        # Slice #119 — predicted clear-time vs a canonical meta defense
+        # for each attack team. Lets users see "this team would clear a
+        # generic Helm/Centi/Blanc defense in Xs" without going through
+        # counter-pick. None when team isn't fully encoded.
+        from ..simulator.damage import resolve_by_names
+        BENCHMARK_DEFENSE = ("Helm", "Centi", "Blanc", "Bay", "Anchor")
+        attack_resolutions: list = []
+        for cand in attack_rescored:
+            names = [m.name for m in cand.members]
+            try:
+                attack_resolutions.append(resolve_by_names(names, BENCHMARK_DEFENSE))
+            except Exception:
+                attack_resolutions.append(None)
+
+        return templates.TemplateResponse(
+            request,
+            "optimize_rookie.html",
+            {
+                "attack": attack_rescored,
+                "defense": defense_rescored,
+                "attack_evaluations": attack_evals,
+                "defense_evaluations": defense_evals,
+                "attack_timings": attack_timings,
+                "defense_timings": defense_timings,
+                "attack_resolutions": attack_resolutions,
+                "top_k": top_k,
+                "min_power": min_power,
+                "active_weights": custom_weights or ATTACK_WEIGHTS,
+                "using_custom_weights": custom_weights is not None,
+                "default_weights": ATTACK_WEIGHTS,
+            },
+        )
+
+    @app.get("/validate", response_class=HTMLResponse)
+    def damage_validation(
+        request: Request,
+        damage_per_shot: Optional[float] = None,
+        cycle_period: Optional[float] = None,
+        min_def_through: Optional[float] = None,
+    ) -> Response:
+        """Backtest the damage formula against tagged match outcomes.
+
+        Slice #108 — for every capture with both a tagged ``outcome``
+        and a complete user_team + opponent_team, run the damage
+        resolver and compare predicted win/loss to the actual.
+
+        Slice #123 — accepts URL overrides for the three tunable
+        constants (`damage_per_shot`, `cycle_period`,
+        `min_def_through`) so users can sweep these and watch accuracy
+        / mean clear-time error change.
+        """
+        from ..simulator.damage import (
+            DAMAGE_PER_SHOT_FRACTION,
+            DEFAULT_CYCLE_PERIOD_SEC,
+            MIN_DAMAGE_FRACTION_THROUGH_DEF,
+            resolve_by_names,
+        )
+
+        # Resolve effective tuning constants — params override defaults.
+        tuning_kwargs: dict = {}
+        if damage_per_shot is not None:
+            tuning_kwargs["damage_per_shot_fraction"] = float(damage_per_shot)
+        if cycle_period is not None:
+            tuning_kwargs["cycle_period_sec"] = float(cycle_period)
+        if min_def_through is not None:
+            tuning_kwargs["min_damage_fraction_through_def"] = float(min_def_through)
+
+        rows: list[dict] = []
+        n_total = 0
+        n_predictable = 0
+        n_correct = 0
+        confusion = {"true_pos": 0, "true_neg": 0, "false_pos": 0, "false_neg": 0}
+        clear_time_errors: list[float] = []
+        with get_session(engine) as session:
+            captures = list(session.exec(select(ArenaMatch)).all())
+        for cap in captures:
+            if not cap.outcome:
+                continue
+            n_total += 1
+            user = [n for n in (cap.user_team or []) if n]
+            opp = [n for n in (cap.opponent_team or []) if n]
+            if len(user) != 5 or len(opp) != 5:
+                continue
+            # Determine attacker / defender based on user_role.
+            if cap.user_role == "attack":
+                attacker_names, defender_names = user, opp
+            elif cap.user_role == "defense":
+                attacker_names, defender_names = opp, user
+            else:
+                continue  # need a tagged role to attribute attack side
+            try:
+                resolution = resolve_by_names(
+                    attacker_names, defender_names, **tuning_kwargs,
+                )
+            except Exception:  # pragma: no cover - defensive
+                resolution = None
+            if resolution is None:
+                continue
+            n_predictable += 1
+            # User's "win" maps to: attacker beats defender if user is attacking,
+            # OR attacker fails to beat defender if user is defending.
+            if cap.user_role == "attack":
+                user_predicted_to_win = resolution.attacker_wins_within_5min
+            else:
+                user_predicted_to_win = not resolution.attacker_wins_within_5min
+            user_actually_won = cap.outcome == "win"
+            correct = user_predicted_to_win == user_actually_won
+            if correct:
+                n_correct += 1
+            if user_predicted_to_win and user_actually_won:
+                confusion["true_pos"] += 1
+            elif (not user_predicted_to_win) and (not user_actually_won):
+                confusion["true_neg"] += 1
+            elif user_predicted_to_win and (not user_actually_won):
+                confusion["false_pos"] += 1
+            else:
+                confusion["false_neg"] += 1
+            actual_seconds = (cap.raw_battle_record or {}).get("seconds_to_clear")
+            err = None
+            if actual_seconds is not None:
+                err = abs(resolution.seconds_to_clear_defender - float(actual_seconds))
+                clear_time_errors.append(err)
+            rows.append({
+                "capture_id": cap.id,
+                "mode": cap.mode,
+                "user_role": cap.user_role,
+                "outcome": cap.outcome,
+                "predicted_user_wins": user_predicted_to_win,
+                "predicted_clear_sec": resolution.seconds_to_clear_defender,
+                "actual_seconds": actual_seconds,
+                "clear_time_error_sec": err,
+                "correct": correct,
+            })
+        accuracy = (n_correct / n_predictable) if n_predictable else None
+        mean_err = (
+            sum(clear_time_errors) / len(clear_time_errors)
+            if clear_time_errors else None
+        )
+
+        # Per-Nikke Battle Records aggregate (slice #135). When Champions
+        # Battle Records screens have been imported, each row carries a
+        # ``raw_battle_record["matchups"]`` list with per-Nikke damage,
+        # damage_taken, healing, burst_uses. We aggregate these into per-
+        # character mean / count tables so the user can see "we have 12
+        # damage observations for Crown averaging 1.4M" — foundation for
+        # eventual simulator-vs-actual per-character bias tuning.
+        per_nikke_actuals: dict[str, dict[str, list[int]]] = {}
+        n_battle_records = 0
+        for cap in captures:
+            payload = (cap.raw_battle_record or {}).get("matchups") or []
+            if not payload:
+                continue
+            n_battle_records += 1
+            for m in payload:
+                for who_key, dmg_key, taken_key, heal_key in (
+                    ("my_nikke", "my_damage_dealt", "my_damage_taken", "my_healing"),
+                    ("opponent_nikke", "opponent_damage_dealt",
+                     "opponent_damage_taken", "opponent_healing"),
+                ):
+                    name = m.get(who_key)
+                    if not name:
+                        continue
+                    bucket = per_nikke_actuals.setdefault(
+                        name,
+                        {"damage_dealt": [], "damage_taken": [], "healing": []},
+                    )
+                    if m.get(dmg_key) is not None:
+                        bucket["damage_dealt"].append(m[dmg_key])
+                    if m.get(taken_key) is not None:
+                        bucket["damage_taken"].append(m[taken_key])
+                    if m.get(heal_key) is not None:
+                        bucket["healing"].append(m[heal_key])
+        per_nikke_summary = []
+        for name, stats in sorted(per_nikke_actuals.items()):
+            row = {"name": name}
+            for k, vals in stats.items():
+                row[f"{k}_n"] = len(vals)
+                row[f"{k}_mean"] = (sum(vals) / len(vals)) if vals else None
+            per_nikke_summary.append(row)
+
+        return templates.TemplateResponse(
+            request,
+            "validate.html",
+            {
+                "rows": rows,
+                "n_total": n_total,
+                "n_predictable": n_predictable,
+                "n_correct": n_correct,
+                "accuracy": accuracy,
+                "confusion": confusion,
+                "mean_clear_time_error": mean_err,
+                "n_clear_time_samples": len(clear_time_errors),
+                "per_nikke_summary": per_nikke_summary,
+                "n_battle_records": n_battle_records,
+                "tuning": {
+                    "damage_per_shot": (
+                        damage_per_shot
+                        if damage_per_shot is not None
+                        else DAMAGE_PER_SHOT_FRACTION
+                    ),
+                    "cycle_period": (
+                        cycle_period
+                        if cycle_period is not None
+                        else DEFAULT_CYCLE_PERIOD_SEC
+                    ),
+                    "min_def_through": (
+                        min_def_through
+                        if min_def_through is not None
+                        else MIN_DAMAGE_FRACTION_THROUGH_DEF
+                    ),
+                    "is_custom": any(
+                        v is not None for v in
+                        (damage_per_shot, cycle_period, min_def_through)
+                    ),
+                },
+                "defaults": {
+                    "damage_per_shot": DAMAGE_PER_SHOT_FRACTION,
+                    "cycle_period": DEFAULT_CYCLE_PERIOD_SEC,
+                    "min_def_through": MIN_DAMAGE_FRACTION_THROUGH_DEF,
+                },
+            },
+        )
+
+    @app.get("/optimize/ga", response_class=HTMLResponse)
+    def optimize_ga(
+        request: Request,
+        role: str = "attack",
+        top_k: int = 5,
+        pop_size: int = 100,
+        generations: int = 50,
+        min_power: int = 100_000,
+        seed: Optional[int] = None,
+    ) -> Response:
+        """Phase 4 GA team search — surfaces non-obvious comps the
+        beam-search heuristic might miss. Compares to beam-top-K
+        side-by-side. Slice #128.
+        """
+        from ..optimizer.constraints import effective_min_skill_sum
+        from ..optimizer.genetic import genetic_search
+        from ..optimizer.loader import filter_eligible, load_owned
+        from ..optimizer.scoring import (
+            ATTACK_WEIGHTS, BALANCED_WEIGHTS, DEFENSE_WEIGHTS,
+        )
+        from ..optimizer.search import beam_search_top_teams
+
+        weights_for = {
+            "attack": ATTACK_WEIGHTS,
+            "defense": DEFENSE_WEIGHTS,
+            "balanced": BALANCED_WEIGHTS,
+        }
+        weights = weights_for.get(role, ATTACK_WEIGHTS)
+
+        with get_session(engine) as session:
+            owned = load_owned(session)
+        pool = filter_eligible(
+            owned, min_power=min_power, min_skill_sum=effective_min_skill_sum(),
+        )
+        ga_result = genetic_search(
+            pool,
+            weights=weights,
+            population_size=pop_size,
+            generations=generations,
+            top_k=top_k,
+            seed=seed,
+        )
+        beam_teams = beam_search_top_teams(
+            pool, top_k=top_k, beam_width=200, weights=weights,
+        ) if pool else []
+        # Set comparison.
+        ga_sets = {frozenset(m.name for m in t.members) for t in ga_result.teams}
+        beam_sets = {frozenset(m.name for m in t.members) for t in beam_teams}
+        return templates.TemplateResponse(
+            request,
+            "optimize_ga.html",
+            {
+                "ga": ga_result,
+                "beam": beam_teams,
+                "ga_only": ga_sets - beam_sets,
+                "beam_only": beam_sets - ga_sets,
+                "shared": ga_sets & beam_sets,
+                "role": role,
+                "top_k": top_k,
+                "pop_size": pop_size,
+                "generations": generations,
+                "min_power": min_power,
+                "seed": seed,
+                "pool_size": len(pool),
+            },
+        )
+
+    @app.get("/explain", response_class=HTMLResponse)
+    def explain(
+        request: Request,
+        character: Optional[str] = None,
+        role: str = "balanced",
+        min_power: int = 100_000,
+    ) -> Response:
+        from ..optimizer.explain import explain_character
+
+        if role not in ("attack", "defense", "balanced"):
+            role = "balanced"
+
+        result = None
+        char_names: list[str] = []
+        with get_session(engine) as session:
+            char_names = sorted(c.name for c in session.exec(select(Character)).all())
+            if character:
+                result = explain_character(
+                    session,
+                    character,
+                    role=role,  # type: ignore[arg-type]
+                    beam_width=200,
+                    min_power=min_power,
+                )
+
+        return templates.TemplateResponse(
+            request,
+            "explain.html",
+            {
+                "result": result,
+                "character": character or "",
+                "role": role,
+                "min_power": min_power,
+                "char_names": char_names,
+            },
+        )
+
+    @app.get("/healthz")
+    def healthz() -> dict:
+        return {"ok": True, "matcher_loaded": app.state.matcher is not None}
+
+    return app

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.simulator.damage import (
+from nikke_optimizer.simulator.damage import (
     DamageResolution,
     MATCH_LENGTH_SEC,
     resolve,
     resolve_by_names,
 )
-from nikke_copilot.simulator.evaluator import evaluate_by_names
+from nikke_optimizer.simulator.evaluator import evaluate_by_names
 
 
 _ATTACK_COMP = ["Liter", "Crown", "Modernia", "Red Hood", "Snow White: Heavy Arms"]
@@ -93,7 +93,7 @@ def test_true_damage_carry_team_has_significant_true_damage_channel():
 def test_def_reduction_floors_at_5_percent():
     """Even an absurdly high-DEF defender shouldn't reduce damage below
     the 5% floor — the formula caps mitigation."""
-    from nikke_copilot.simulator.damage import _def_reduction_factor
+    from nikke_optimizer.simulator.damage import _def_reduction_factor
     # 1k ATK vs 1B DEF — would produce ~0% without the floor.
     factor = _def_reduction_factor(1_000.0, 1_000_000_000.0)
     assert factor >= 0.05
@@ -177,7 +177,7 @@ def test_weapon_class_table_differentiates_classes():
     """Slice #97 — per-WeaponClass damage factor. The table must give
     SR/RL distinctly lower fractions than MG/SMG so the optimizer's
     win-margin output reflects fire-rate differences."""
-    from nikke_copilot.simulator.damage import (
+    from nikke_optimizer.simulator.damage import (
         WEAPON_DAMAGE_PER_SECOND_FRACTION,
     )
     assert WEAPON_DAMAGE_PER_SECOND_FRACTION["MG"] > WEAPON_DAMAGE_PER_SECOND_FRACTION["SR"]

@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.models import Character, CharacterIcon
-from nikke_copilot.data.scrapers.prydwen import normalize_character_node
-from nikke_copilot.data.scrapers.refresh import upsert_character
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.models import Character, CharacterIcon
+from nikke_optimizer.data.scrapers.prydwen import normalize_character_node
+from nikke_optimizer.data.scrapers.refresh import upsert_character
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Apple Vision OCR required (macOS only)"
@@ -34,7 +34,7 @@ def _seed_full_index(engine):
     data = json.loads((PRYDWEN_FIXTURES / "index.json").read_text())
     nodes = data["result"]["data"]["allCharacters"]["nodes"]
     # Index nodes lack the rich detail; promote each to a minimal Character row.
-    from nikke_copilot.data.enums import (
+    from nikke_optimizer.data.enums import (
         BurstType,
         Element,
         Manufacturer,
@@ -99,7 +99,7 @@ def _icon_screenshot() -> Path:
 
 
 def test_extract_icons_returns_grid(tmp_path):
-    from nikke_copilot.roster.icon_library import extract_icons
+    from nikke_optimizer.roster.icon_library import extract_icons
 
     extractions = extract_icons(_icon_screenshot(), cols=4)
     assert len(extractions) >= 16  # at least 4 rows × 4 cols
@@ -108,7 +108,7 @@ def test_extract_icons_returns_grid(tmp_path):
 
 
 def test_resolve_matches_against_full_index():
-    from nikke_copilot.roster.icon_library import (
+    from nikke_optimizer.roster.icon_library import (
         extract_icons,
         resolve_matches,
     )
@@ -135,7 +135,7 @@ def test_resolve_matches_against_full_index():
 
 
 def test_save_icon_library(tmp_path):
-    from nikke_copilot.roster.icon_library import (
+    from nikke_optimizer.roster.icon_library import (
         extract_icons,
         resolve_matches,
         save_icon_library,

@@ -31,10 +31,10 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.enums import Element
-from nikke_copilot.data.models import Character, OwnedCharacter
-from nikke_copilot.optimizer.scoring import SYNERGY_PAIRS
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.enums import Element
+from nikke_optimizer.data.models import Character, OwnedCharacter
+from nikke_optimizer.optimizer.scoring import SYNERGY_PAIRS
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="dev DB lives on macOS"
@@ -79,7 +79,7 @@ def test_top_attack_contains_canonical_buffer():
     """The #1 attack pick should include at least one of the canonical
     burst-gen / amplifier supports — a team without one is a sign that
     role detection or synergy weighting is broken."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
 
     engine = _engine()
     with get_session(engine) as session:
@@ -97,7 +97,7 @@ def test_top_attack_contains_canonical_buffer():
 def test_top_attack_contains_a_known_dps():
     """The #1 attack pick should include at least one B3 hyper-DPS —
     catches a regression where the optimizer over-rewards stall units."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
 
     engine = _engine()
     with get_session(engine) as session:
@@ -115,7 +115,7 @@ def test_top_defense_contains_a_dedicated_defender():
     """At least one of the top-3 defense picks should include a dedicated
     defender — Helm/Centi/Blanc/Noah/Anchor are the canonical PvP wall
     units. Without one, defense scoring isn't actually rewarding sustain."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
 
     engine = _engine()
     with get_session(engine) as session:
@@ -146,8 +146,8 @@ def test_attack_and_defense_weights_score_their_top_pick_higher():
     Originally this test asserted attack-team != defense-team, but with
     a diversified search the same comp can be the global optimum under
     both weight presets when meta versatility is high."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
-    from nikke_copilot.optimizer.scoring import (
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.scoring import (
         ATTACK_WEIGHTS, DEFENSE_WEIGHTS, score_team,
     )
 
@@ -176,8 +176,8 @@ def test_attack_and_defense_weights_score_their_top_pick_higher():
 def test_defense_team_has_more_durability_tags_than_attack():
     """A dedicated defense team should have measurably more total
     durability tags than the equivalent attack team."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
-    from nikke_copilot.optimizer.scoring import _DURABILITY_TAGS
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.scoring import _DURABILITY_TAGS
 
     engine = _engine()
     with get_session(engine) as session:
@@ -208,15 +208,15 @@ def test_defense_team_has_more_durability_tags_than_attack():
 def test_element_advantage_score_monotonic():
     """A team that has element advantage against MORE opponents should
     score higher than the same team against FEWER advantageous opponents."""
-    from nikke_copilot.optimizer.counter import (
+    from nikke_optimizer.optimizer.counter import (
         CounterContext,
         score_counter,
     )
-    from nikke_copilot.data.enums import BurstType
+    from nikke_optimizer.data.enums import BurstType
 
     # Build a 5-Fire attack team (Fire counters Wind).
-    from nikke_copilot.optimizer.models import CharacterView
-    from nikke_copilot.data.enums import (
+    from nikke_optimizer.optimizer.models import CharacterView
+    from nikke_optimizer.data.enums import (
         Manufacturer, Rarity, WeaponClass,
     )
 
@@ -308,7 +308,7 @@ def test_rookie_deterministic():
     top team. Catches subtle non-determinism (set iteration order,
     unstable sorts) that would make recommendations inconsistent across
     page reloads."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
 
     engine = _engine()
     with get_session(engine) as session:
@@ -330,7 +330,7 @@ def test_champions_coverage_reasonable_on_real_roster():
     plan should counter at least 3 of the 5 opposing elements. Anything
     less means the cross-team swap optimization isn't actually finding
     diverse picks."""
-    from nikke_copilot.optimizer.champions import recommend_champions
+    from nikke_optimizer.optimizer.champions import recommend_champions
 
     engine = _engine()
     with get_session(engine) as session:
@@ -355,7 +355,7 @@ def test_score_team_components_are_finite_and_positive():
     """Every component contribution on a valid team should be finite
     and non-negative — sentinel infeasibility penalties or NaN would
     propagate silently and break ranking."""
-    from nikke_copilot.optimizer.rookie import recommend_rookie
+    from nikke_optimizer.optimizer.rookie import recommend_rookie
 
     engine = _engine()
     with get_session(engine) as session:

@@ -1,0 +1,233 @@
+{% extends "_base.html" %}
+{% block title %}Champions Arena planner — NikkeOptimizer{% endblock %}
+{% block body %}
+<h1>Champions Arena season plan</h1>
+<p class="muted">
+    5 teams locked at season start, all pairwise-disjoint (~25 unique Nikkes).
+    Each team plays as both attack AND defense per round (50/50 coin flip).
+</p>
+<form method="get" class="filters">
+    <label>Min power
+        <input name="min_power" type="number" step="10000" value="{{ min_power }}">
+    </label>
+    <button type="submit">Recommend</button>
+    {% include "_weight_panel.html" %}
+</form>
+
+{% for note in rec.notes %}
+<p class="warning">{{ note }}</p>
+{% endfor %}
+
+{% if not rec.teams %}
+<p class="warning">No recommendations — make sure the roster CSV is imported.</p>
+{% else %}
+
+{% if rec.coverage %}
+<section class="team-card">
+    <h2>Set coverage</h2>
+    <p>
+        Opposing elements countered:
+        <strong>{{ rec.coverage.element_coverage|int }} / 5</strong>
+        ({{ rec.coverage.covered_opposing_elements | map(attribute="value") | join(", ") or "none" }})
+    </p>
+    {% if rec.coverage.uncovered_opposing_elements %}
+    <p class="warning">
+        No team counters
+        {{ rec.coverage.uncovered_opposing_elements | map(attribute="value") | join(", ") }} —
+        opponents fielding those elements will be tough.
+    </p>
+    {% endif %}
+    <p>
+        Archetype spread:
+        <strong>{{ (rec.coverage.archetype_spread * 5)|int }} / 5</strong> distinct archetypes
+    </p>
+</section>
+{% endif %}
+
+{# Slice #85: 5-team coverage matrix — who appears where + per-team role mix #}
+<section class="team-card">
+    <h2>Coverage matrix</h2>
+
+    {% set role_first_tag = {} %}
+    {% set _ = role_first_tag.update(Attacker="A", Defender="D", Supporter="S", Healer="H", Buffer="B", Debuffer="X", Shielder="Z") %}
+
+    <h3>Per-team role mix</h3>
+    <table class="cells">
+        <thead>
+            <tr>
+                <th>Team</th>
+                <th>Attackers</th>
+                <th>Defenders</th>
+                <th>Supporters</th>
+                <th>Element spread</th>
+                <th>Burst chain</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for t in rec.teams %}
+            {% set ns = namespace(att=0, df=0, sup=0) %}
+            {% set elems = [] %}
+            {% set bursts = [] %}
+            {% for m in t.members %}
+                {% set tags = m.role_tags or [] %}
+                {% if "Attacker" in tags %}{% set ns.att = ns.att + 1 %}{% endif %}
+                {% if "Defender" in tags %}{% set ns.df = ns.df + 1 %}{% endif %}
+                {% if "Supporter" in tags %}{% set ns.sup = ns.sup + 1 %}{% endif %}
+                {% set _ = elems.append(m.element.value) %}
+                {% set _ = bursts.append("B" ~ m.burst_position) %}
+            {% endfor %}
+            <tr>
+                <td><strong>Team {{ loop.index }}</strong></td>
+                <td>{{ ns.att }}</td>
+                <td>{{ ns.df }}</td>
+                <td>{{ ns.sup }}</td>
+                <td>{{ elems | unique | join(", ") }}</td>
+                <td>{{ bursts | join("→") }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <h3>Roster utilization</h3>
+    {% set all_names = [] %}
+    {% for t in rec.teams %}
+        {% for m in t.members %}{% set _ = all_names.append(m.name) %}{% endfor %}
+    {% endfor %}
+    <p class="muted small">
+        Total slots: <strong>{{ all_names|length }}</strong> ·
+        Unique Nikkes: <strong>{{ all_names | unique | list | length }}</strong>
+        ({{ "%.0f"|format(100 * (all_names | unique | list | length) / (all_names|length)) }}% disjoint)
+    </p>
+    <table class="cells">
+        <thead>
+            <tr>
+                <th>Nikke</th>
+                <th>Element</th>
+                <th>Burst</th>
+                <th>Power</th>
+                <th>Team(s)</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% set seen = [] %}
+        {% for t in rec.teams %}
+            {% for m in t.members %}
+                {% if m.name not in seen %}
+                    {% set _ = seen.append(m.name) %}
+                    {% set teams_with_me = [] %}
+                    {% for tt in rec.teams %}
+                        {% for mm in tt.members %}
+                            {% if mm.name == m.name %}{% set _ = teams_with_me.append(loop.index0 + 1) %}{% endif %}
+                        {% endfor %}
+                    {% endfor %}
+                    <tr>
+                        <td>{{ m.name }}</td>
+                        <td>{{ m.element.value }}</td>
+                        <td>B{{ m.burst_position }}</td>
+                        <td>{{ "{:,}".format(m.power) }}</td>
+                        <td>
+                            {% for n in teams_with_me %}
+                                <span class="team-tag">T{{ n }}</span>
+                            {% endfor %}
+                        </td>
+                    </tr>
+                {% endif %}
+            {% endfor %}
+        {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+{% for t in rec.teams %}
+{% set eval = team_evaluations[loop.index0] %}
+{% set timing = team_timings[loop.index0] if team_timings else None %}
+{% set team_text = t.members | map(attribute="name") | join(" / ") %}
+{% set encoded_count = 5 if eval else (5 - (eval.missing | length)) %}
+<section class="team-card">
+    <h3>Team {{ loop.index }} — score {{ "%.2f"|format(t.score) }}, power {{ "{:,}".format(t.power) }}
+        <span class="muted small" title="Members in the simulator's skill library">
+            · {{ encoded_count }}/5 encoded
+        </span>
+        <button type="button" class="copy-team-btn" onclick="copyTeam(this)"
+                data-team="{{ team_text }}"
+                title="Copy team names to clipboard"
+                style="float: right; font-size: 0.85em">Copy</button>
+    </h3>
+    {% if timing %}
+    <p class="muted small timing">[timing] {{ timing.label }}</p>
+    {% endif %}
+    <table class="cells">
+        <thead>
+            <tr><th>Burst</th><th>Name</th><th>Element</th><th>Power</th></tr>
+        </thead>
+        <tbody>
+        {% for m in t.members %}
+            <tr>
+                <td>B{{ m.burst_position }}</td>
+                <td>{{ m.name }}</td>
+                <td>{{ m.element.value }}</td>
+                <td>{{ "{:,}".format(m.power) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% set syns = t.notes | synergy_notes %}
+    {% set others = t.notes | other_notes %}
+    {% if syns %}
+    <p class="muted small notes">
+        <strong>Synergies:</strong>
+        {% for n in syns %}{{ n | replace("synergy: ", "") }}{% if not loop.last %} · {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if others %}
+    <p class="muted notes">{{ others | join(" · ") }}</p>
+    {% endif %}
+    {% set b = t.breakdown.to_dict() %}
+    <p class="muted small">
+        burst {{ "%.1f"|format(b.burst_feasibility) }} ·
+        power {{ "%.1f"|format(b.power_sum) }} ·
+        elements {{ "%.1f"|format(b.element_diversity) }} ·
+        roles {{ "%.1f"|format(b.role_balance) }} ·
+        synergy {{ "%.1f"|format(b.synergy_pairs) }} ·
+        invest {{ "%.1f"|format(b.investment) }} ·
+        durability {{ "%.1f"|format(b.durability) }} ·
+        burst-gen {{ "%.1f"|format(b.burst_gen) }}
+        {% if b.team_buff_amp or b.vs_high_def %}
+        · buff-amp {{ "%.1f"|format(b.team_buff_amp) }}
+        · vs-high-DEF {{ "%.1f"|format(b.vs_high_def) }}
+        {% endif %}
+    </p>
+    {% if eval %}
+    <p class="muted small evaluator">
+        [evaluator]
+        DPS {{ "{:,.0f}".format(eval.dps_estimate) }} ·
+        EHP {{ "{:,.0f}".format(eval.ehp_estimate) }} ·
+        burst-payload {{ "{:,.0f}".format(eval.burst_payload) }} ·
+        shield {{ "{:,.0f}".format(eval.total_shield) }} ·
+        sustain {{ "%.1f"|format(eval.sustain_index) }} ·
+        avg ATK +{{ "%.0f"|format(eval.team_atk_buff_pct) }}%
+    </p>
+    {% set buffs = [] %}
+    {% if eval.team_true_damage_buff_pct > 0 %}{% set _ = buffs.append("true +%.0f%%" % eval.team_true_damage_buff_pct) %}{% endif %}
+    {% if eval.team_attack_damage_buff_pct > 0 %}{% set _ = buffs.append("atk-dmg +%.0f%%" % eval.team_attack_damage_buff_pct) %}{% endif %}
+    {% if eval.team_pierce_damage_buff_pct > 0 %}{% set _ = buffs.append("pierce +%.0f%%" % eval.team_pierce_damage_buff_pct) %}{% endif %}
+    {% if eval.team_shield_damage_buff_pct > 0 %}{% set _ = buffs.append("shield-dmg +%.0f%%" % eval.team_shield_damage_buff_pct) %}{% endif %}
+    {% if eval.team_core_damage_buff_pct > 0 %}{% set _ = buffs.append("core +%.0f%%" % eval.team_core_damage_buff_pct) %}{% endif %}
+    {% if eval.team_burst_skill_damage_buff_pct > 0 %}{% set _ = buffs.append("burst-skill +%.0f%%" % eval.team_burst_skill_damage_buff_pct) %}{% endif %}
+    {% if buffs or eval.total_flat_atk_bonus > 0 or eval.vs_high_def_damage_index > 0 %}
+    <p class="muted small evaluator-buffs">
+        [damage buffs]
+        {% if buffs %}{{ buffs | join(" · ") }}{% endif %}
+        {% if eval.total_flat_atk_bonus > 0 %} · flat-ATK +{{ "{:,.0f}".format(eval.total_flat_atk_bonus) }}{% endif %}
+        {% if eval.vs_high_def_damage_index > 0 %} · vs-high-DEF {{ "%.0f"|format(eval.vs_high_def_damage_index) }}{% endif %}
+    </p>
+    {% endif %}
+    {% else %}
+    <p class="muted small evaluator-missing">
+        [evaluator] N/A — encode {{ eval.missing | join(", ") }} for full DSL evaluation
+    </p>
+    {% endif %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

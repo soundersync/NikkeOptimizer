@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.simulator.dsl import (
+from nikke_optimizer.simulator.dsl import (
     CharacterSkillSet,
     DSLValidationError,
     Effect,
@@ -16,7 +16,7 @@ from nikke_copilot.simulator.dsl import (
     TriggerKind,
     assert_well_formed,
 )
-from nikke_copilot.simulator.registry import (
+from nikke_optimizer.simulator.registry import (
     all_encoded_names,
     coverage_against,
     get,

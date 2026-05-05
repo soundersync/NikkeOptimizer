@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.simulator.evaluator import (
+from nikke_optimizer.simulator.evaluator import (
     NikkeSnapshot,
     TeamEvaluation,
     evaluate_by_names,
@@ -241,13 +241,13 @@ def test_rescore_with_evaluator_adds_buff_amp_and_vs_high_def_components():
     after rescoring under ATTACK_WEIGHTS — those weights credit damage-type
     buffs and DEF-bypassing carries."""
     from dataclasses import dataclass
-    from nikke_copilot.data.enums import (
+    from nikke_optimizer.data.enums import (
         BurstType, Element, Rarity, WeaponClass,
     )
-    from nikke_copilot.optimizer.models import (
+    from nikke_optimizer.optimizer.models import (
         CharacterView, ScoreBreakdown, TeamCandidate,
     )
-    from nikke_copilot.optimizer.scoring import (
+    from nikke_optimizer.optimizer.scoring import (
         ATTACK_WEIGHTS, DEFENSE_WEIGHTS, rescore_with_evaluator,
     )
 
@@ -299,13 +299,13 @@ def test_rescore_with_evaluator_adds_buff_amp_and_vs_high_def_components():
 def test_rescore_with_evaluator_is_no_op_for_balanced_when_no_damage_buffs():
     """A pure-defense team (Helm/Centi/Blanc/Bay/Anchor) has no damage-type
     buffs and zero vs_high_def index, so rescoring shouldn't move the total."""
-    from nikke_copilot.data.enums import (
+    from nikke_optimizer.data.enums import (
         BurstType, Element, Rarity, WeaponClass,
     )
-    from nikke_copilot.optimizer.models import (
+    from nikke_optimizer.optimizer.models import (
         CharacterView, ScoreBreakdown, TeamCandidate,
     )
-    from nikke_copilot.optimizer.scoring import (
+    from nikke_optimizer.optimizer.scoring import (
         BALANCED_WEIGHTS, rescore_with_evaluator,
     )
 
@@ -344,7 +344,7 @@ def test_per_name_stats_overrides_global_defaults():
     """Per-Nikke stats from ``OwnedCharacter`` override the global defaults
     used by ``evaluate_team``. Drives the damage formula off the user's
     actual investment instead of the coarse 100k/1M/30k baseline."""
-    from nikke_copilot.simulator.registry import get as _get
+    from nikke_optimizer.simulator.registry import get as _get
     sets = [_get(name) for name in _CROWN_COMP]
     assert all(s is not None for s in sets)
 
@@ -368,7 +368,7 @@ def test_per_name_stats_overrides_global_defaults():
 def test_per_name_stats_skips_zero_or_none_values():
     """Missing / 0 stats fall through to the global defaults so partial
     CSV rows don't produce degenerate snapshots."""
-    from nikke_copilot.simulator.registry import get as _get
+    from nikke_optimizer.simulator.registry import get as _get
     sets = [_get(name) for name in _CROWN_COMP]
 
     per_name_stats = {

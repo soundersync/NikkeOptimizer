@@ -13,16 +13,16 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.models import ArenaMatch, Character, Cube
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.models import ArenaMatch, Character, Cube
+from nikke_optimizer.data.enums import (
     BurstType,
     Element,
     Manufacturer,
     Rarity,
     WeaponClass,
 )
-from nikke_copilot.web.app import create_app
+from nikke_optimizer.web.app import create_app
 
 
 def _seed(engine):
@@ -190,8 +190,8 @@ def test_optimize_rookie_renders(client, tmp_path):
     """Optimizer page must render even with a small seeded roster."""
     # Seed a couple of OwnedCharacter rows so the optimizer has anything to work with.
     from sqlmodel import Session
-    from nikke_copilot.data.models import OwnedCharacter
-    from nikke_copilot.data.db import make_engine, init_db, get_session
+    from nikke_optimizer.data.models import OwnedCharacter
+    from nikke_optimizer.data.db import make_engine, init_db, get_session
 
     # Reuse the test client's DB by reading its app.state.engine via dependency.
     # Simpler: just render the page; an empty roster yields the "no recommendations" path.
@@ -365,9 +365,9 @@ def test_capture_outcome_rejects_invalid_value(client):
 def test_dashboard_offers_username_when_unset(tmp_path, monkeypatch):
     """First-run: no env var + no config.json + captures present →
     dashboard surfaces the auto-detected username with a save button."""
-    from nikke_copilot.data import config as config_module
+    from nikke_optimizer.data import config as config_module
 
-    monkeypatch.delenv("NIKKE_COPILOT_USERNAME", raising=False)
+    monkeypatch.delenv("NIKKE_OPTIMIZER_USERNAME", raising=False)
     fake_config = tmp_path / "username_test_config.json"
     monkeypatch.setattr(config_module, "_config_path", lambda: fake_config)
 
@@ -387,9 +387,9 @@ def test_dashboard_offers_username_when_unset(tmp_path, monkeypatch):
 
 def test_config_save_username_persists(tmp_path, monkeypatch):
     """POST /config/username writes to config.json."""
-    from nikke_copilot.data import config as config_module
+    from nikke_optimizer.data import config as config_module
 
-    monkeypatch.delenv("NIKKE_COPILOT_USERNAME", raising=False)
+    monkeypatch.delenv("NIKKE_OPTIMIZER_USERNAME", raising=False)
     fake_config = tmp_path / "savetest.json"
     monkeypatch.setattr(config_module, "_config_path", lambda: fake_config)
 
@@ -414,7 +414,7 @@ def test_roster_snapshot_creates_file(tmp_path, monkeypatch):
     # gotcha as MEMORY.md note about FastAPI Jinja2 signature change.)
     snapshots_root = tmp_path / "data"
     snapshots_root.mkdir()
-    from nikke_copilot.roster import snapshots as snapshots_mod
+    from nikke_optimizer.roster import snapshots as snapshots_mod
     monkeypatch.setattr(
         snapshots_mod, "user_data_dir",
         lambda *args, **kwargs: str(snapshots_root),
@@ -434,9 +434,9 @@ def test_roster_snapshot_creates_file(tmp_path, monkeypatch):
 
 
 def test_config_save_username_rejects_blank(tmp_path, monkeypatch):
-    from nikke_copilot.data import config as config_module
+    from nikke_optimizer.data import config as config_module
 
-    monkeypatch.delenv("NIKKE_COPILOT_USERNAME", raising=False)
+    monkeypatch.delenv("NIKKE_OPTIMIZER_USERNAME", raising=False)
     fake_config = tmp_path / "rejectblank.json"
     monkeypatch.setattr(config_module, "_config_path", lambda: fake_config)
 
@@ -454,7 +454,7 @@ def test_screenshot_route_falls_back_to_user_screens_dir(tmp_path):
     project moved, cwd mismatch), the screenshot route searches the
     DB-sibling ``screenshots/<Mode>/<basename>`` dir and serves from
     there. Mirrors the real-life layout where DB + screenshots are
-    siblings under ``~/Library/Application Support/NikkeCopilot/``."""
+    siblings under ``~/Library/Application Support/NikkeOptimizer/``."""
     # Place the real screenshot at <db_dir>/screenshots/Rookie_Arena/.
     screens = tmp_path / "screenshots" / "Rookie_Arena"
     screens.mkdir(parents=True)

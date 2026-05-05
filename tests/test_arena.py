@@ -14,14 +14,14 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import (
+from nikke_optimizer.data.db import (
     default_db_path,
     default_portrait_library_path,
     get_session,
     init_db,
     make_engine,
 )
-from nikke_copilot.data.models import Character, CharacterIcon
+from nikke_optimizer.data.models import Character, CharacterIcon
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Apple Vision OCR required (macOS only)"
@@ -44,7 +44,7 @@ def _portrait_library() -> Path:
     if fallback.is_dir():
         return fallback
     pytest.skip(
-        "no portrait library found (checked $NIKKE_COPILOT_PORTRAITS, "
+        "no portrait library found (checked $NIKKE_OPTIMIZER_PORTRAITS, "
         "<user_data_dir>/portraits/, and tests/fixtures/screenshots/Portrait_library/)"
     )
     raise AssertionError("unreachable")  # for type checkers
@@ -73,7 +73,7 @@ def _build_library_matcher():
 
     Cached at module level so 335 embeddings aren't recomputed for every test.
     """
-    from nikke_copilot.roster.portrait_matcher import PortraitMatcher
+    from nikke_optimizer.roster.portrait_matcher import PortraitMatcher
 
     if not PORTRAIT_LIBRARY.exists():
         pytest.skip(f"portrait library missing: {PORTRAIT_LIBRARY}")
@@ -101,7 +101,7 @@ def _champion_team_screenshots() -> list[Path]:
 
 
 def test_rookie_pre_battle_extraction():
-    from nikke_copilot.roster.arena import extract_pre_battle
+    from nikke_optimizer.roster.arena import extract_pre_battle
 
     matcher = _build_library_matcher()
 
@@ -143,7 +143,7 @@ def test_rookie_pre_battle_extraction():
 
 
 def test_champion_arena_info_extraction():
-    from nikke_copilot.roster.arena import extract_champion_arena_info
+    from nikke_optimizer.roster.arena import extract_champion_arena_info
 
     matcher = _build_library_matcher()
 

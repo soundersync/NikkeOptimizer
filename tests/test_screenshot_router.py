@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nikke_copilot.roster.screenshot_router import (
+from nikke_optimizer.roster.screenshot_router import (
     classify_screenshot,
     ingest_directory,
 )

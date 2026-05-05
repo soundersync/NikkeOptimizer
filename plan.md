@@ -1,4 +1,4 @@
-# NikkeCopilot — plan & open work
+# NikkeOptimizer — plan & open work
 
 Forward-looking companion to `CLAUDE.md` (project context) and
 `BACKLOG.md` (granular notes). This file answers "what's done, what's
@@ -70,7 +70,7 @@ machines + filter enforcement still TODO.
 1. ~~**Investment-floor veto in the optimizer scorer.**~~
    **DONE — slice #89.** ``has_minimum_investment`` (floor=18 by default)
    in `constraints.py` already vetoed sub-floor teams; this slice wired
-   the ``NIKKE_COPILOT_MIN_SKILL_SUM`` env override (read at call time
+   the ``NIKKE_OPTIMIZER_MIN_SKILL_SUM`` env override (read at call time
    via ``effective_min_skill_sum()``) and added 8 tests covering
    pass/veto/explainer-mode/env-override/zero-disable cases. All four
    optimizer entry points (rookie / sp_arena / champions / counter)
@@ -210,7 +210,7 @@ Validation plan:
 If picking up this project cold, the open task IDs (from the runtime
 task list) are:
 
-1. **#62** — Run `nikkecopilot refresh` so the new Prydwen fields
+1. **#62** — Run `nikkeoptimizer refresh` so the new Prydwen fields
    actually populate for all 206 characters. ~5 min, just verification.
    Blocks #65, #66.
 2. **#63** — Investment-floor veto in the optimizer scorer. Resolves
@@ -239,7 +239,7 @@ dynamics, stack-cap source tracking) and Phase 4 (ML).
 | # | Subject | ~Effort | Why |
 |---|---|---|---|
 | **69** | Auto-detect self-username from captures | 30 min | Eliminates first-run friction |
-| **70** | `nikkecopilot doctor` setup verification | 1 hr | Self-diagnosis on env issues |
+| **70** | `nikkeoptimizer doctor` setup verification | 1 hr | Self-diagnosis on env issues |
 | **71** | Multi-capture consensus for portrait matcher | 2 hr | Halves review burden alongside #60 |
 | **72** | Roster diff / "what changed since last week" | 2 hr | Track investment progress; foundation for #73 |
 | **73** | "Suggest who to level up" advisor | 2-3 hr | Turns optimizer into investment advisor; uses slice #61's `high_investment` |
@@ -250,11 +250,11 @@ dynamics, stack-cap source tracking) and Phase 4 (ML).
 
 ## Questions / decisions to surface in the next session
 
-- ~~`NIKKE_COPILOT_USERNAME` env var as the gate for CP cross-
+- ~~`NIKKE_OPTIMIZER_USERNAME` env var as the gate for CP cross-
   validation~~ — **resolved 2026-04-28**. Username now persisted to
   `<user_data_dir>/config.json` (currently `{"username": "Nika"}`).
   Env var still takes precedence; CLI command
-  `nikkecopilot set-username <name>` writes the file.
+  `nikkeoptimizer set-username <name>` writes the file.
 - ~~Meta-tier source for fix #3~~ — **resolved 2026-04-28**.
   Prydwen does not expose structured tier ratings; #65 will use a
   manual override table refreshed quarterly + a heuristic fallback
@@ -270,4 +270,4 @@ dynamics, stack-cap source tracking) and Phase 4 (ML).
 
 For per-character / per-encoding / per-bug detail, see `BACKLOG.md`.
 For accumulated user-preference and project-context memories, see
-`~/.claude/projects/-Users-sleepingcounty-git-other-NikkeCopilot/memory/MEMORY.md`.
+`~/.claude/projects/-Users-sleepingcounty-git-other-NikkeOptimizer/memory/MEMORY.md`.

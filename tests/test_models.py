@@ -4,8 +4,8 @@ from pathlib import Path
 
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.enums import (
     BurstType,
     Element,
     OLBonusType,
@@ -13,7 +13,7 @@ from nikke_copilot.data.enums import (
     Rarity,
     WeaponClass,
 )
-from nikke_copilot.data.models import (
+from nikke_optimizer.data.models import (
     ArenaMatch,
     BuffSummaryLine,
     Character,

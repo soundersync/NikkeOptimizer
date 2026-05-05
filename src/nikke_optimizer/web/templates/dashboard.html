@@ -1,0 +1,65 @@
+{% extends "_base.html" %}
+{% block title %}Dashboard — NikkeOptimizer{% endblock %}
+{% block body %}
+<h1>Dashboard</h1>
+<p class="muted">DB: <code>{{ db_path }}</code></p>
+{% if configured_username %}
+<p class="muted">Self-username: <strong>{{ configured_username }}</strong></p>
+{% elif detected_username %}
+<div class="warnings-block">
+    <p>
+        <strong>First-run setup:</strong> No in-game username configured yet.
+        Detected <strong>"{{ detected_username[0] }}"</strong> in
+        {{ detected_username[1] }} arena capture{{ "s" if detected_username[1] != 1 else "" }} —
+        is that you?
+    </p>
+    <form method="post" action="/config/username" style="display: inline">
+        <input type="hidden" name="name" value="{{ detected_username[0] }}">
+        <button type="submit">Yes, save "{{ detected_username[0] }}" as my username</button>
+    </form>
+    <span class="muted small">
+        — or pick a different name with the CLI:
+        <code>nikkeoptimizer set-username &lt;name&gt;</code>
+    </span>
+</div>
+{% else %}
+<p class="warning">
+    No in-game username configured. Capture an arena screenshot first, then
+    refresh this page to auto-detect — or run
+    <code>nikkeoptimizer set-username &lt;name&gt;</code>.
+</p>
+{% endif %}
+{% if portrait_library %}
+<p class="muted">Portrait library: <code>{{ portrait_library }}</code></p>
+{% else %}
+<p class="warning">No portrait library — start the server with <code>--library</code> to enable per-cell rerun.</p>
+{% endif %}
+
+<div class="cards">
+    <a class="card" href="/cubes">
+        <div class="big">{{ n_cubes }}</div>
+        <div class="label">Cubes</div>
+    </a>
+    <a class="card" href="/captures">
+        <div class="big">{{ n_captures }}</div>
+        <div class="label">Arena captures</div>
+    </a>
+    <a class="card {% if n_review %}warning-card{% endif %}" href="/captures?review_only=true">
+        <div class="big">{{ n_review }}</div>
+        <div class="label">Need review</div>
+    </a>
+    <a class="card {% if n_predictions_awaiting %}warning-card{% endif %}"
+       href="/captures?session_kind=predictions&since=7d">
+        <div class="big">{{ n_predictions_awaiting }}</div>
+        <div class="label">Awaiting results (7d)</div>
+    </a>
+    <a class="card" href="/captures?session_kind=complete">
+        <div class="big">{{ n_complete_sessions }}</div>
+        <div class="label">Complete sessions</div>
+    </a>
+    <div class="card">
+        <div class="big">{{ n_chars }}</div>
+        <div class="label">Characters in DB</div>
+    </div>
+</div>
+{% endblock %}

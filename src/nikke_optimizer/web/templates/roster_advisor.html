@@ -1,0 +1,70 @@
+{% extends "_base.html" %}
+{% block title %}Investment advisor — NikkeOptimizer{% endblock %}
+{% block body %}
+<h1>Who should I level up next?</h1>
+<p class="muted">
+    For each owned-but-undertrained Nikke (below the investment floor), the
+    advisor simulates upgrading her three skills to <strong>target skill</strong>
+    and re-runs the optimizer. Recommendations are ranked by total team-score lift —
+    higher = better ROI for your skill books.
+</p>
+
+<form method="get" class="filters">
+    <label>Role
+        <select name="role" onchange="this.form.submit()">
+            <option value="attack" {% if role == 'attack' %}selected{% endif %}>attack</option>
+            <option value="defense" {% if role == 'defense' %}selected{% endif %}>defense</option>
+            <option value="balanced" {% if role == 'balanced' %}selected{% endif %}>balanced</option>
+        </select>
+    </label>
+    <label>Target skill
+        <input name="target_skill" type="number" min="1" max="10" value="{{ target_skill }}">
+    </label>
+    <label>Top K teams
+        <input name="top_k" type="number" min="1" max="20" value="{{ top_k }}">
+    </label>
+    <label>Max recs
+        <input name="max_recs" type="number" min="1" max="50" value="{{ max_recs }}">
+    </label>
+    <button type="submit">Recompute</button>
+</form>
+
+{% if not recs %}
+<p class="muted">
+    No recommendations — either every owned Nikke meets the investment floor,
+    or no upgrade pushes anyone into the top-K teams. Try lowering target skill,
+    increasing Top K, or relaxing the floor via
+    <code>NIKKE_OPTIMIZER_MIN_SKILL_SUM</code>.
+</p>
+{% else %}
+<table class="cells">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Nikke</th>
+            <th>Projected team score</th>
+            <th>Total score lift</th>
+            <th>In current top-K?</th>
+            <th>In upgraded top-K?</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in recs %}
+        <tr>
+            <td>{{ loop.index }}</td>
+            <td><a href="/characters/{{ r.name }}">{{ r.name }}</a></td>
+            <td>{{ "%.1f"|format(r.projected_score_in_team) }}</td>
+            <td><strong>{{ "%+.1f"|format(r.score_lift) }}</strong></td>
+            <td>{{ "yes" if r.appears_in_baseline_top_k else "no" }}</td>
+            <td>{{ "yes" if r.appears_in_upgraded_top_k else "no" }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+<p class="muted small">
+    Each row simulates "if you raised this Nikke's three skills to {{ target_skill }}",
+    re-runs the optimizer, and reports how much the total top-{{ top_k }} score moves.
+    A high score lift means the upgrade unlocks a meaningfully stronger team.
+</p>
+{% endif %}
+{% endblock %}

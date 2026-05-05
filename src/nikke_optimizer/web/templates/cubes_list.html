@@ -1,0 +1,46 @@
+{% extends "_base.html" %}
+{% block title %}Cubes — NikkeOptimizer{% endblock %}
+{% block body %}
+<h1>Cubes ({{ cubes | length }})</h1>
+{% set warned_count = warnings | length %}
+{% if warned_count %}
+<p class="warning">
+    <strong>{{ warned_count }} cube(s) flagged</strong> — stat values differ
+    significantly from same-level siblings (likely OCR misreads). Open each
+    flagged row to verify and correct.
+</p>
+{% endif %}
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Lv</th>
+            <th>ATK</th>
+            <th>HP</th>
+            <th>DEF</th>
+            <th>Equipped / Owned</th>
+            <th>Warnings</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in cubes %}
+        {% set ws = warnings.get(c.id, []) if warnings else [] %}
+        <tr {% if ws %}class="warning-row"{% endif %}>
+            <td>{{ c.name }}</td>
+            <td>{{ c.level if c.level is not none else "-" }}</td>
+            <td>{{ c.atk if c.atk is not none else "-" }}</td>
+            <td>{{ c.hp if c.hp is not none else "-" }}</td>
+            <td>{{ c.def_ if c.def_ is not none else "-" }}</td>
+            <td>{{ c.equipping_count_equipped or 0 }} / {{ c.equipping_count_owned or 0 }}</td>
+            <td class="muted small">
+                {% if ws %}
+                    {% for w in ws %}<div>⚠ {{ w }}</div>{% endfor %}
+                {% else %}—{% endif %}
+            </td>
+            <td><a href="/cubes/{{ c.id }}">edit</a></td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

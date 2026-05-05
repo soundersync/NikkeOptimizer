@@ -7,7 +7,7 @@ name = "nikke-copilot"
 version = "0.1.0"
 description = "PvP team optimization AI for Goddess of Victory: NIKKE"
 requires-python = ">=3.12"
-readme = { content-type = "text/markdown", text = "NikkeCopilot — PvP team optimization AI for Goddess of Victory: NIKKE." }
+readme = { content-type = "text/markdown", text = "NikkeOptimizer — PvP team optimization AI for Goddess of Victory: NIKKE." }
 dependencies = [
     "paddleocr>=2.7",
     "paddlepaddle>=2.6",
@@ -37,10 +37,10 @@ dev = [
 ]
 
 [project.scripts]
-nikkecopilot = "nikke_copilot.cli.main:app"
+nikkeoptimizer = "nikke_optimizer.cli.main:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/nikke_copilot"]
+packages = ["src/nikke_optimizer"]
 
 [tool.ruff]
 line-length = 100

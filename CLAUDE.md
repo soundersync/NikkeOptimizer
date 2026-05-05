@@ -1,4 +1,4 @@
-# NikkeCopilot — context for future Claude sessions
+# NikkeOptimizer — context for future Claude sessions
 
 This file is the first thing Claude should read on a fresh session.
 It exists so we don't have to re-explain the project from scratch every
@@ -57,14 +57,14 @@ Phase status:
 ## File layout
 
 ```
-NikkeCopilot/
+NikkeOptimizer/
   BACKLOG.md                          # granular open items + DSL gaps
   CLAUDE.md                           # ← you are here
   plan.md                             # current state + what's left
-  pyproject.toml                      # deps + scripts (`nikkecopilot` entry)
+  pyproject.toml                      # deps + scripts (`nikkeoptimizer` entry)
 
-  src/nikke_copilot/
-    cli/main.py                       # typer CLI; `nikkecopilot <cmd>`
+  src/nikke_optimizer/
+    cli/main.py                       # typer CLI; `nikkeoptimizer <cmd>`
     data/
       db.py                           # SQLite engine + path resolution
       models.py                       # SQLModel schema (Character, OwnedCharacter, ArenaMatch, ...)
@@ -108,12 +108,12 @@ NikkeCopilot/
 
 ## Where data lives
 
-The user's data dir is `~/Library/Application Support/NikkeCopilot/`
+The user's data dir is `~/Library/Application Support/NikkeOptimizer/`
 on macOS (via `platformdirs.user_data_dir`). Three things live there:
 
 | Path | What | Notes |
 |---|---|---|
-| `nikke_copilot.sqlite3` | DB (Character, OwnedCharacter, Cube, ArenaMatch, ...) | 184 owned chars, 206 static, 17 cubes, 15+ captures |
+| `nikke_optimizer.sqlite3` | DB (Character, OwnedCharacter, Cube, ArenaMatch, ...) | 184 owned chars, 206 static, 17 cubes, 15+ captures |
 | `portraits/` | 335 labeled `.webp` images | Used by Vision matcher; auto-discovered at startup |
 | `screenshots/` | User's gameplay screenshots organized by mode | Champion_Arena/ Special_Arena/ Rookie_Arena/ Cubes/ loose/ |
 | `uploads/` | Files uploaded via the web drop-zone | Auto-routed to the right importer |
@@ -121,14 +121,14 @@ on macOS (via `platformdirs.user_data_dir`). Three things live there:
 
 Resolution order for the user's in-game name (used by CP cross-validation
 auto-confirm to identify which team in a capture is the user's own):
-1. `NIKKE_COPILOT_USERNAME` env var
+1. `NIKKE_OPTIMIZER_USERNAME` env var
 2. `username` key in `config.json`
 3. Fallback heuristic: 3-of-5 captured CPs match the owned roster's CPs
 
 Other env overrides:
-- `NIKKE_COPILOT_DB` — DB path
-- `NIKKE_COPILOT_PORTRAITS` — portrait library path
-- `NIKKE_COPILOT_USERNAME` — see above (also persistable via `nikkecopilot set-username <name>`)
+- `NIKKE_OPTIMIZER_DB` — DB path
+- `NIKKE_OPTIMIZER_PORTRAITS` — portrait library path
+- `NIKKE_OPTIMIZER_USERNAME` — see above (also persistable via `nikkeoptimizer set-username <name>`)
 
 ---
 
@@ -152,14 +152,14 @@ For simulator-only work: `pip install pytest` and run with
 ## Common commands
 
 ```sh
-nikkecopilot web                          # web UI (auto-discovers portrait library)
-nikkecopilot roster                       # list owned characters in CLI
-nikkecopilot import-csv <path>            # import roster from CSV
-nikkecopilot optimize rookie --top-k 5    # CLI optimizer
-nikkecopilot counter <capture_id>         # counter-pick a captured opponent
-nikkecopilot simulate <name1> ... <name5> # static evaluator on a team
-nikkecopilot skill <name>                 # inspect encoded skill DSL
-nikkecopilot skill-coverage               # DSL-encoded vs DB total
+nikkeoptimizer web                          # web UI (auto-discovers portrait library)
+nikkeoptimizer roster                       # list owned characters in CLI
+nikkeoptimizer import-csv <path>            # import roster from CSV
+nikkeoptimizer optimize rookie --top-k 5    # CLI optimizer
+nikkeoptimizer counter <capture_id>         # counter-pick a captured opponent
+nikkeoptimizer simulate <name1> ... <name5> # static evaluator on a team
+nikkeoptimizer skill <name>                 # inspect encoded skill DSL
+nikkeoptimizer skill-coverage               # DSL-encoded vs DB total
 ```
 
 The `web` command auto-launches the default browser; pass `--no-open`
@@ -198,7 +198,7 @@ collab carries; the long tail (~120 chars) is unencoded.
 ## Memory system
 
 There's a persistent memory at
-`~/.claude/projects/-Users-sleepingcounty-git-other-NikkeCopilot/memory/`.
+`~/.claude/projects/-Users-sleepingcounty-git-other-NikkeOptimizer/memory/`.
 Read `MEMORY.md` there for short hooks pointing to:
 
 - Portrait library data quirks (label byte-duplicates)

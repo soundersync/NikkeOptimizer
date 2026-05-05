@@ -23,12 +23,12 @@ if importlib.util.find_spec("PIL") is None:  # pragma: no cover
 
 from PIL import Image  # noqa: E402
 
-from nikke_copilot.roster import portrait_library  # noqa: E402
-from nikke_copilot.roster.portrait_library import (  # noqa: E402
+from nikke_optimizer.roster import portrait_library  # noqa: E402
+from nikke_optimizer.roster.portrait_library import (  # noqa: E402
     discover_feedback_exemplars,
     resolve_library,
 )
-from nikke_copilot.roster.portrait_matcher import PortraitMatcher  # noqa: E402
+from nikke_optimizer.roster.portrait_matcher import PortraitMatcher  # noqa: E402
 
 
 @dataclass
@@ -64,7 +64,7 @@ def _fake_distance(a: _FakeEmbedding, b: _FakeEmbedding) -> float:
 @pytest.fixture(autouse=True)
 def _patch_distance(monkeypatch):
     """Replace the native compute_distance with a Python-only L2 metric."""
-    from nikke_copilot.roster import _vision_features
+    from nikke_optimizer.roster import _vision_features
     monkeypatch.setattr(
         _vision_features.FeaturePrintEmbedder,
         "compute_distance",

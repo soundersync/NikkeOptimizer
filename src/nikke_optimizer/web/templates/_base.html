@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}NikkeOptimizer{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <a class="brand" href="/">NikkeOptimizer</a>
+        <nav>
+            <a href="/roster">Roster</a>
+            <a href="/roster/diff">Diff</a>
+            <a href="/roster/advisor">Advisor</a>
+            <a href="/cubes">Cubes</a>
+            <a href="/captures">Captures</a>
+            <a href="/captures?review_only=true">Needs review</a>
+            <a href="/captures?session_kind=predictions&amp;since=7d">Awaiting results</a>
+            <a href="/optimize/rookie">Rookie</a>
+            <a href="/optimize/sp">SP Arena</a>
+            <a href="/optimize/champions">Champions</a>
+            <a href="/optimize/ga">GA</a>
+            <a href="/counter">Counter-pick</a>
+            <a href="/validate">Validate</a>
+            <a href="/explain">Explain</a>
+        </nav>
+    </header>
+    <main>
+        {% block body %}{% endblock %}
+    </main>
+<script>
+// Slice #136 — generic clipboard helper. Reads `data-copy` from the
+// triggering element and writes it to the clipboard. The optional
+// `data-copied-message` overrides the default "✓ Copied" tooltip text.
+//
+// Backwards-compat: copyTeam(btn) still works for older callers that
+// set data-team — it forwards to copyToClipboard.
+function copyToClipboard(el) {
+    const text = el.dataset.copy || el.dataset.team || el.textContent || "";
+    if (!text) return;
+    const msg = el.dataset.copiedMessage || "✓ Copied";
+    const tooltip = document.createElement("span");
+    tooltip.className = "copy-tooltip";
+    tooltip.textContent = msg;
+    el.appendChild(tooltip);
+    setTimeout(() => tooltip.remove(), 1200);
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {
+            tooltip.textContent = "✗ Copy failed";
+        });
+        return;
+    }
+    // Legacy fallback.
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); }
+    catch (e) { tooltip.textContent = "✗ Copy failed"; }
+    document.body.removeChild(ta);
+}
+
+// Backwards-compatible alias used by existing team-card buttons.
+function copyTeam(btn) {
+    // The legacy helper rewrote button text; preserve that behavior.
+    const text = btn.dataset.team || "";
+    if (!text) return;
+    const orig = btn.textContent;
+    const swap = (m) => {
+        btn.textContent = m;
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+            () => swap("✓ Copied"),
+            () => swap("✗ Copy failed"),
+        );
+        return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); swap("✓ Copied"); }
+    catch (e) { swap("✗ Copy failed"); }
+    document.body.removeChild(ta);
+}
+</script>
+<style>
+/* Slice #136 — click-to-copy tooltip (used by data-copy elements). */
+.copy-target {
+    cursor: pointer;
+    border-bottom: 1px dotted #6da6ff;
+    position: relative;
+}
+.copy-target:hover { color: #9dc6ff; }
+.copy-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #103a18;
+    color: #6fdf80;
+    padding: 0.2em 0.6em;
+    border-radius: 3px;
+    font-size: 0.75em;
+    white-space: nowrap;
+    margin-bottom: 0.3em;
+    pointer-events: none;
+    z-index: 10;
+}
+
+/* Slice #137 — hover preview of cell crop on best-match cells. The
+   data-crop URL is loaded into a floating <img> on hover so the user
+   can verify what the matcher actually saw. */
+.crop-hover {
+    cursor: help;
+    border-bottom: 1px dotted #888;
+}
+.crop-hover-popup {
+    position: fixed;
+    z-index: 1000;
+    background: #0a0a0a;
+    border: 1px solid #444;
+    padding: 4px;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+.crop-hover-popup img {
+    display: block;
+    max-width: 240px;
+    max-height: 240px;
+}
+.crop-hover-popup .caption {
+    color: #888;
+    font-size: 0.7em;
+    margin-top: 2px;
+    text-align: center;
+}
+
+/* Slice #137 — datalist (autocomplete) contrast fix. The native
+   <input list> dropdown inherits the page's dark color-scheme by
+   default; setting it to 'light' on the input forces the OS to use
+   readable light-mode rendering for just the dropdown popover. */
+input[list] {
+    color-scheme: light;
+}
+</style>
+<script>
+// Slice #137 — hover-preview helper. Wraps any element with
+// `class="crop-hover"` and `data-crop="..."`. On hover, fetches the
+// image URL and shows a floating popup near the cursor. Removed on
+// mouseleave / scroll.
+(function() {
+    let popup = null;
+    function showPopup(el, evt) {
+        const url = el.dataset.crop;
+        if (!url) return;
+        if (popup) popup.remove();
+        popup = document.createElement("div");
+        popup.className = "crop-hover-popup";
+        const img = document.createElement("img");
+        img.src = url;
+        img.alt = "Cell crop";
+        const caption = document.createElement("div");
+        caption.className = "caption";
+        caption.textContent = "Crop the matcher saw";
+        popup.appendChild(img);
+        popup.appendChild(caption);
+        document.body.appendChild(popup);
+        positionPopup(evt);
+    }
+    function positionPopup(evt) {
+        if (!popup) return;
+        const offsetX = 14, offsetY = 14;
+        const x = evt.clientX + offsetX;
+        const y = evt.clientY + offsetY;
+        // Keep popup within viewport.
+        const w = 260, h = 260;
+        const left = Math.min(x, window.innerWidth - w - 8);
+        const top = Math.min(y, window.innerHeight - h - 8);
+        popup.style.left = left + "px";
+        popup.style.top = top + "px";
+    }
+    function hidePopup() {
+        if (popup) { popup.remove(); popup = null; }
+    }
+    document.addEventListener("mouseover", function(evt) {
+        const el = evt.target.closest(".crop-hover");
+        if (!el) return;
+        showPopup(el, evt);
+    });
+    document.addEventListener("mousemove", function(evt) {
+        if (popup && evt.target.closest(".crop-hover")) {
+            positionPopup(evt);
+        }
+    });
+    document.addEventListener("mouseout", function(evt) {
+        const el = evt.target.closest(".crop-hover");
+        if (!el) return;
+        // Only hide if we're leaving the .crop-hover entirely (not
+        // moving between its children).
+        const related = evt.relatedTarget;
+        if (!related || !el.contains(related)) hidePopup();
+    });
+    document.addEventListener("scroll", hidePopup, true);
+})();
+</script>
+</body>
+</html>

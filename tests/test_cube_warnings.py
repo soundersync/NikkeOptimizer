@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from nikke_copilot.data.models import Cube
-from nikke_copilot.web.cube_warnings import compute_cube_warnings
+from nikke_optimizer.data.models import Cube
+from nikke_optimizer.web.cube_warnings import compute_cube_warnings
 
 
 def _cube(id: int, name: str, level: int, atk=None, hp=None, def_=None) -> Cube:

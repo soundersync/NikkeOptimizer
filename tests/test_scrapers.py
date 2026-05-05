@@ -11,20 +11,20 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import get_session, init_db, make_engine
-from nikke_copilot.data.enums import (
+from nikke_optimizer.data.db import get_session, init_db, make_engine
+from nikke_optimizer.data.enums import (
     BurstType,
     Element,
     Manufacturer,
     Rarity,
     WeaponClass,
 )
-from nikke_copilot.data.models import Character
-from nikke_copilot.data.scrapers.prydwen import (
+from nikke_optimizer.data.models import Character
+from nikke_optimizer.data.scrapers.prydwen import (
     NormalizedCharacter,
     normalize_character_node,
 )
-from nikke_copilot.data.scrapers.refresh import upsert_character
+from nikke_optimizer.data.scrapers.refresh import upsert_character
 
 FIXTURES = Path(__file__).parent / "fixtures" / "prydwen"
 

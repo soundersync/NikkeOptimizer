@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nikke_copilot.simulator.timeline import (
+from nikke_optimizer.simulator.timeline import (
     AppliedEffect,
     Timeline,
     build_timeline,
@@ -15,7 +15,7 @@ from nikke_copilot.simulator.timeline import (
     DEFAULT_BURST_CHAIN_OFFSETS_SEC,
     DEFAULT_FULL_BURST_START_SEC,
 )
-from nikke_copilot.simulator.dsl import EffectKind
+from nikke_optimizer.simulator.dsl import EffectKind
 
 
 _CROWN_COMP = ["Liter", "Crown", "Modernia", "Red Hood", "Snow White: Heavy Arms"]
@@ -173,8 +173,8 @@ def test_stack_cap_groups_by_source_character():
     """Slice #86 — two effects of the same kind targeting the same Nikke
     but from DIFFERENT casters each count as their own stack budget.
     Without source tracking, both would aggregate into one over-cap pile."""
-    from nikke_copilot.simulator.timeline import AppliedEffect, Timeline
-    from nikke_copilot.simulator.dsl import EffectKind
+    from nikke_optimizer.simulator.timeline import AppliedEffect, Timeline
+    from nikke_optimizer.simulator.dsl import EffectKind
 
     timeline = Timeline(
         member_names=("Alice", "Bob"),
@@ -201,8 +201,8 @@ def test_stack_cap_caps_within_same_source():
     """Multiple effects from the SAME caster + slot + target + kind
     cap at ``stacks_max``. Five 10% applications with stacks_max=3
     should sum to 30%, not 50%."""
-    from nikke_copilot.simulator.timeline import AppliedEffect, Timeline
-    from nikke_copilot.simulator.dsl import EffectKind
+    from nikke_optimizer.simulator.timeline import AppliedEffect, Timeline
+    from nikke_optimizer.simulator.dsl import EffectKind
 
     timeline = Timeline(
         member_names=("Alice",),
@@ -224,8 +224,8 @@ def test_stack_cap_takes_top_magnitudes_within_source():
     """When stacks_max < total applications, the implementation picks
     the strongest stacks (not the first or random). Verifies the
     in-game behavior of "extra stacks dropped in favor of stronger ones"."""
-    from nikke_copilot.simulator.timeline import AppliedEffect, Timeline
-    from nikke_copilot.simulator.dsl import EffectKind
+    from nikke_optimizer.simulator.timeline import AppliedEffect, Timeline
+    from nikke_optimizer.simulator.dsl import EffectKind
 
     timeline = Timeline(
         member_names=("Alice",),
@@ -246,8 +246,8 @@ def test_legacy_effects_without_source_each_count_independently():
     """Effects with empty ``source_character`` / ``source_skill_slot``
     each get a unique pseudo-source group so the cap doesn't conflate
     legacy callers. Verifies the ``__legacy_{idx}__`` fallback."""
-    from nikke_copilot.simulator.timeline import AppliedEffect, Timeline
-    from nikke_copilot.simulator.dsl import EffectKind
+    from nikke_optimizer.simulator.timeline import AppliedEffect, Timeline
+    from nikke_optimizer.simulator.dsl import EffectKind
 
     timeline = Timeline(
         member_names=("Alice",),

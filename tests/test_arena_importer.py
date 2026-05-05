@@ -9,13 +9,13 @@ from pathlib import Path
 import pytest
 from sqlmodel import select
 
-from nikke_copilot.data.db import (
+from nikke_optimizer.data.db import (
     default_portrait_library_path,
     get_session,
     init_db,
     make_engine,
 )
-from nikke_copilot.data.models import ArenaMatch, Character, CharacterIcon
+from nikke_optimizer.data.models import ArenaMatch, Character, CharacterIcon
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Apple Vision OCR required (macOS only)"
@@ -53,7 +53,7 @@ def _real_db_engine():
 
 
 def _build_matcher():
-    from nikke_copilot.roster.portrait_matcher import PortraitMatcher
+    from nikke_optimizer.roster.portrait_matcher import PortraitMatcher
 
     if not PORTRAIT_LIBRARY.exists():
         pytest.skip(f"missing portrait library: {PORTRAIT_LIBRARY}")
@@ -70,7 +70,7 @@ def _build_matcher():
 def test_import_rookie_pre_battle(tmp_path):
     """Importing the rookie fixture must persist exactly one ArenaMatch row
     with both teams populated and capture_quality metadata stored."""
-    from nikke_copilot.roster.arena_importer import import_arena_screenshots
+    from nikke_optimizer.roster.arena_importer import import_arena_screenshots
 
     matches = glob(
         "tests/fixtures/screenshots/Rookie_Arena/Screenshot*9.37.33*.png"
@@ -106,7 +106,7 @@ def test_import_rookie_pre_battle(tmp_path):
 
 
 def test_import_champion_arena_info(tmp_path):
-    from nikke_copilot.roster.arena_importer import import_arena_screenshots
+    from nikke_optimizer.roster.arena_importer import import_arena_screenshots
 
     path = Path("tests/fixtures/screenshots/Champion_Arena/IMG_2153.PNG")
     if not path.exists():
