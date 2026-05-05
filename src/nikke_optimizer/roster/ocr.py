@@ -85,7 +85,7 @@ def get_default_engine() -> OCREngine:
 
     Order of preference:
       1. Apple Vision (macOS native, no large model download)
-      2. PaddleOCR (cross-platform, requires `pip install nikke-copilot[paddle]`)
+      2. PaddleOCR (cross-platform, requires `pip install nikke-optimizer[paddle]`)
     """
     global _DEFAULT_ENGINE
     if _DEFAULT_ENGINE is not None:

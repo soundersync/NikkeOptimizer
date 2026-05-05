@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nikke-copilot"
+name = "nikke-optimizer"
 version = "0.1.0"
 description = "PvP team optimization AI for Goddess of Victory: NIKKE"
 requires-python = ">=3.12"
