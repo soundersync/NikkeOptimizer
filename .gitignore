@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.db
+*.sqlite
+*.sqlite3
+data/cache/
+data/raw/
+.DS_Store
+# Ad-hoc debug crops produced by `nikkecopilot crop-tool` and the
+# arena-extractor diagnostic scripts. Keep out of git history.
+/debug/

@@ -1,0 +1,124 @@
+{% extends "_base.html" %}
+{% block title %}Counter capture #{{ capture.id }} — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>Counter capture #{{ capture.id }}</h1>
+<p class="muted">
+    {{ capture.mode }} ·
+    {{ capture.opponent_username or "?" }} ({{ "{:,}".format(capture.opponent_power or 0) }})
+</p>
+
+{% if not opp_names %}
+<p class="warning">No opponent_team on this capture (Champion captures only store one team).</p>
+{% else %}
+<p><strong>Opponent lineup:</strong> {{ opp_names | join(", ") }}</p>
+
+{% if rec and rec.opponent.opponent_members %}
+<p class="muted">
+    Resolved elements:
+    {% for m in rec.opponent.opponent_members %}
+    <span>{{ m.name }} ({{ m.element.value }}){% if not loop.last %}, {% endif %}</span>
+    {% endfor %}
+</p>
+
+<form method="get" class="filters">
+    <label>Top K
+        <input name="top_k" type="number" min="1" max="20" value="{{ top_k }}">
+    </label>
+    <label>Min power
+        <input name="min_power" type="number" step="10000" value="{{ min_power }}">
+    </label>
+    <button type="submit">Recommend</button>
+</form>
+
+{% if rec.teams %}
+{% for t in rec.teams %}
+{% set team_text = t.members | map(attribute="name") | join(" / ") %}
+<section class="team-card">
+    {% set cov = rec.element_coverages[loop.index0] if rec.element_coverages and rec.element_coverages|length > loop.index0 else None %}
+    <h2>#{{ loop.index }} — score {{ "%.2f"|format(t.score) }}, power {{ "{:,}".format(t.power) }}
+        {% if cov %}
+        <span class="muted small" title="Distinct opponent elements your team has weakness advantage over">
+            · element coverage {{ cov[0] }}/{{ cov[1] }}
+        </span>
+        {% endif %}
+        <button type="button" class="copy-team-btn" onclick="copyTeam(this)"
+                data-team="{{ team_text }}"
+                title="Copy team names to clipboard"
+                style="float: right; font-size: 0.85em">Copy</button>
+    </h2>
+    {% set timing = team_timings[loop.index0] if team_timings and team_timings|length > loop.index0 else None %}
+    {% set delta = rec.burst_time_deltas[loop.index0] if rec.burst_time_deltas and rec.burst_time_deltas|length > loop.index0 else None %}
+    {% if timing %}
+    <p class="muted small timing">
+        [timing] {{ timing.label }}
+        {% if delta is not none and rec.opponent_full_burst_start_sec is not none %}
+        · opponent FB @ {{ "%.1f"|format(rec.opponent_full_burst_start_sec) }}s
+        {% if delta > 0.2 %}
+        · <span style="color: #5acf6a">{{ "%.2f"|format(delta) }}s faster</span>
+        {% elif delta < -0.2 %}
+        · <span style="color: #f4b740">{{ "%.2f"|format(-delta) }}s slower</span>
+        {% else %}
+        · roughly equal
+        {% endif %}
+        {% endif %}
+    </p>
+    {% endif %}
+    {% set dr = rec.damage_resolutions[loop.index0] if rec.damage_resolutions and rec.damage_resolutions|length > loop.index0 else None %}
+    {% if dr %}
+    <p class="muted small">
+        [damage formula]
+        {% if dr.attacker_wins_within_5min %}
+            <span style="color: #5acf6a"><strong>Predicted WIN</strong></span> —
+            clear in {{ "%.0f"|format(dr.seconds_to_clear_defender) }}s ({{ "%.1f"|format(dr.seconds_to_clear_defender/60) }}m),
+            margin {{ "%+.0f"|format(dr.win_margin) }}s
+        {% else %}
+            <span style="color: #f4b740"><strong>Predicted TIMEOUT</strong></span> —
+            would need {{ "%.0f"|format(dr.seconds_to_clear_defender) }}s
+        {% endif %}
+        · burst payload {{ "{:,.0f}".format(dr.attacker_burst_payload) }}
+        · defender HP pool {{ "{:,.0f}".format(dr.defender_effective_hp) }}
+    </p>
+    {% endif %}
+    <table class="cells">
+        <thead>
+            <tr>
+                <th>Burst</th>
+                <th>Name</th>
+                <th>Element</th>
+                <th>Power</th>
+                <th>Skills</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for m in t.members %}
+            <tr>
+                <td>B{{ m.burst_position }}</td>
+                <td>{{ m.name }}</td>
+                <td>{{ m.element.value }}</td>
+                <td>{{ "{:,}".format(m.power) }}</td>
+                <td>{{ m.skill1_level }}/{{ m.skill2_level }}/{{ m.burst_skill_level }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% set syns = t.notes | synergy_notes %}
+    {% set others = t.notes | other_notes %}
+    {% if syns %}
+    <p class="muted small notes">
+        <strong>Synergies:</strong>
+        {% for n in syns %}{{ n | replace("synergy: ", "") }}{% if not loop.last %} · {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if others %}
+    <p class="muted notes">{{ others | join(" · ") }}</p>
+    {% endif %}
+</section>
+{% endfor %}
+{% else %}
+<p class="warning">No counter-pick recommendations found — try lowering Min power.</p>
+{% endif %}
+{% endif %}
+{% endif %}
+
+<p><a href="/captures/{{ capture.id }}">← back to capture</a></p>
+{% endblock %}

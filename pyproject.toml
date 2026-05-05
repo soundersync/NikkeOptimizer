@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nikke-copilot"
+version = "0.1.0"
+description = "PvP team optimization AI for Goddess of Victory: NIKKE"
+requires-python = ">=3.12"
+readme = { content-type = "text/markdown", text = "NikkeCopilot — PvP team optimization AI for Goddess of Victory: NIKKE." }
+dependencies = [
+    "paddleocr>=2.7",
+    "paddlepaddle>=2.6",
+    "opencv-python>=4.9",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6",
+    "sqlmodel>=0.0.16",
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "platformdirs>=4.0",
+    "typer>=0.12",
+    "rich>=13.7",
+    "tkinterdnd2>=0.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+nikkecopilot = "nikke_copilot.cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nikke_copilot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

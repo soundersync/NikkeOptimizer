@@ -1,0 +1,21 @@
+{% extends "_base.html" %}
+{% block title %}Edit {{ cube.name }} — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>Edit cube</h1>
+<form method="post" action="/cubes/{{ cube.id }}" class="stack">
+    <label>Name <input name="name" value="{{ cube.name }}" required></label>
+    <label>Level <input name="level" type="number" value="{{ cube.level if cube.level is not none else '' }}"></label>
+    <label>ATK <input name="atk" type="number" value="{{ cube.atk if cube.atk is not none else '' }}"></label>
+    <label>HP <input name="hp" type="number" value="{{ cube.hp if cube.hp is not none else '' }}"></label>
+    <label>DEF <input name="def" type="number" value="{{ cube.def_ if cube.def_ is not none else '' }}"></label>
+    <label>Equipped <input name="equipping_count_equipped" type="number" value="{{ cube.equipping_count_equipped if cube.equipping_count_equipped is not none else '' }}"></label>
+    <label>Owned <input name="equipping_count_owned" type="number" value="{{ cube.equipping_count_owned if cube.equipping_count_owned is not none else '' }}"></label>
+    <div class="row">
+        <button type="submit">Save</button>
+        <a class="secondary" href="/cubes">Cancel</a>
+    </div>
+</form>
+{% if cube.source_screenshot %}
+<p class="muted">Last updated from: <code>{{ cube.source_screenshot }}</code></p>
+{% endif %}
+{% endblock %}

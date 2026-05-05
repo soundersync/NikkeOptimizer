@@ -1,0 +1,71 @@
+{% extends "_base.html" %}
+{% block title %}{{ char.name }} — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>{{ char.name }}</h1>
+<p class="muted">
+    {{ char.element.value }} · {{ char.weapon_class.value }} · B{{ char.burst_type.value }}
+    · {{ char.manufacturer.value if char.manufacturer else "?" }}
+    · {{ char.rarity.value }}
+    {% if char.squad %} · {{ char.squad }}{% endif %}
+</p>
+
+<p class="muted small">
+    Released {{ char.release_date or "?" }}
+    {% if char.is_limited %} · <strong>Limited</strong>{% if char.limited_event %} ({{ char.limited_event }}){% endif %}{% endif %}
+    {% if char.has_treasure %} · Has Treasure form{% endif %}
+    {% if char.high_investment %} · ⚠ Prydwen flags as high-investment-required{% endif %}
+</p>
+
+{% if char.specialities %}
+<p class="muted small">
+    <strong>Tags:</strong> {{ char.specialities | join(" · ") }}
+</p>
+{% endif %}
+
+{% if owned %}
+<h2>Your investment</h2>
+<table class="cells">
+    <tr>
+        <td>Power</td><td>{{ "{:,}".format(owned.power or 0) }}</td>
+        <td>Sync</td><td>{{ owned.sync_level or "—" }}</td>
+        <td>Core</td><td>{{ owned.core if owned.core is not none else "—" }}</td>
+        <td>LB</td><td>{{ owned.limit_break if owned.limit_break is not none else "—" }}</td>
+    </tr>
+    <tr>
+        <td>Skill 1</td><td>{{ owned.skill1_level or "?" }}</td>
+        <td>Skill 2</td><td>{{ owned.skill2_level or "?" }}</td>
+        <td>Burst</td><td>{{ owned.burst_skill_level or "?" }}</td>
+        <td>Mfr lvl</td><td>{{ owned.manufacturer_level or "?" }}</td>
+    </tr>
+</table>
+{% else %}
+<p class="muted"><em>You don't own this character.</em></p>
+{% endif %}
+
+{% if pros_text %}
+<h2>Pros</h2>
+<p>{{ pros_text }}</p>
+{% endif %}
+
+{% if cons_text %}
+<h2>Cons</h2>
+<p>{{ cons_text }}</p>
+{% endif %}
+
+{% if review_text %}
+<h2>Review</h2>
+<p>{{ review_text }}</p>
+{% endif %}
+
+{% if skill_analysis_text %}
+<h2>Skill analysis</h2>
+<p>{{ skill_analysis_text }}</p>
+{% endif %}
+
+{% if harmony_cubes_text %}
+<h2>Harmony cubes / Doll</h2>
+<p>{{ harmony_cubes_text }}</p>
+{% endif %}
+
+<p><a href="/roster">← back to roster</a></p>
+{% endblock %}

@@ -1,0 +1,88 @@
+{% extends "_base.html" %}
+{% block title %}Roster — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>Roster ({{ rows | length }} of {{ total_owned }} owned)</h1>
+
+{% if snapshot_saved %}
+<p class="muted small">Saved snapshot: <code>{{ snapshot_saved }}</code></p>
+{% endif %}
+<p class="muted small">
+    <form method="post" action="/roster/snapshot" style="display: inline">
+        <button type="submit" title="Save a snapshot of the current roster so the Diff tab can compare it against later state.">
+            Snapshot roster now
+        </button>
+    </form>
+    <a href="/roster/diff" style="margin-left: 0.5em">→ View diff</a>
+</p>
+
+<form method="get" class="filters">
+    <label>Sort
+        <select name="sort" onchange="this.form.submit()">
+            <option value="power" {% if sort == "power" %}selected{% endif %}>power</option>
+            <option value="name" {% if sort == "name" %}selected{% endif %}>name</option>
+            <option value="sync" {% if sort == "sync" %}selected{% endif %}>sync level</option>
+            <option value="burst" {% if sort == "burst" %}selected{% endif %}>burst type</option>
+            <option value="element" {% if sort == "element" %}selected{% endif %}>element</option>
+        </select>
+    </label>
+    <label>Element
+        <select name="element" onchange="this.form.submit()">
+            <option value="">any</option>
+            {% for e in all_elements %}
+            <option value="{{ e }}" {% if element == e %}selected{% endif %}>{{ e }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Burst
+        <select name="burst" onchange="this.form.submit()">
+            <option value="">any</option>
+            {% for b in all_bursts %}
+            <option value="{{ b }}" {% if burst == b %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+        </select>
+    </label>
+</form>
+
+<table class="cells">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Element</th>
+            <th>Weapon</th>
+            <th>Burst</th>
+            <th>Mfr</th>
+            <th>Power</th>
+            <th>Sync</th>
+            <th>Core</th>
+            <th>LB</th>
+            <th>Skills</th>
+            <th>Arena cube</th>
+            <th>Battle cube</th>
+            <th>Doll</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td><a href="/characters/{{ r.name }}">{{ r.name }}</a></td>
+            <td>{{ r.element }}</td>
+            <td>{{ r.weapon }}</td>
+            <td>{{ r.burst }}</td>
+            <td class="muted small">{{ r.manufacturer }}</td>
+            <td>{{ "{:,}".format(r.power) if r.power else "—" }}</td>
+            <td>{{ r.sync_level or "—" }}</td>
+            <td>{{ r.core if r.core is not none else "—" }}</td>
+            <td>{{ r.limit_break if r.limit_break is not none else "—" }}</td>
+            <td class="muted small">
+                {{ r.skill1 or "?" }}/{{ r.skill2 or "?" }}/{{ r.burst_skill or "?" }}
+            </td>
+            <td class="muted small">{{ r.arena_cube or "—" }}</td>
+            <td class="muted small">{{ r.battle_cube or "—" }}</td>
+            <td class="muted small">
+                {% if r.doll %}{{ r.doll }} (P{{ r.doll_phase or "?" }}){% else %}—{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

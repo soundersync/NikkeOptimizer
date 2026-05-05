@@ -1,0 +1,110 @@
+{% extends "_base.html" %}
+{% block title %}Roster diff — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>Roster diff</h1>
+
+<form method="get" class="filters">
+    <label>Snapshot
+        <select name="snapshot" onchange="this.form.submit()">
+            <option value="">most recent ≥ {{ days_ago }} days ago</option>
+            {% for s in all_snapshots %}
+            <option value="{{ s }}" {% if selected == s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>Days ago
+        <input type="number" name="days_ago" value="{{ days_ago }}" min="0" max="365">
+    </label>
+    <button type="submit">Compare</button>
+</form>
+
+{% if not diff %}
+<p class="muted">
+    No qualifying snapshot found. Try a smaller "days ago" value, pick a
+    specific snapshot, or take one now from the
+    <a href="/roster">Roster page</a> (snapshots also auto-save on every
+    <code>nikkecopilot import-csv</code>).
+</p>
+{% else %}
+<p class="muted small">
+    Comparing current roster against snapshot
+    <code>{{ diff.snapshot_path | replace("/Users/sleepingcounty/Library/Application Support/NikkeCopilot/snapshots/", "") }}</code>
+    (timestamp {{ diff.snapshot_timestamp }}).
+</p>
+<p>
+    <strong>{{ diff.added | length }}</strong> added ·
+    <strong>{{ diff.removed | length }}</strong> removed ·
+    <strong>{{ diff.changed | length }}</strong> with field changes
+    {% if not diff.added and not diff.removed and not diff.changed %}
+    — <span class="muted">no changes</span>
+    {% endif %}
+</p>
+
+<h2>Added ({{ diff.added | length }})</h2>
+{% if diff.added %}
+<ul>
+    {% for n in diff.added %}<li><a href="/characters/{{ n }}">{{ n }}</a></li>{% endfor %}
+</ul>
+{% else %}<p class="muted">No new Nikkes acquired since the snapshot.</p>{% endif %}
+
+<h2>Removed ({{ diff.removed | length }})</h2>
+{% if diff.removed %}
+<ul>
+    {% for n in diff.removed %}<li>{{ n }}</li>{% endfor %}
+</ul>
+{% else %}<p class="muted">No Nikkes removed.</p>{% endif %}
+
+<h2>Changed ({{ diff.changed | length }})</h2>
+{# Slice #130 — total power delta across changed rows. #}
+{% set ns = namespace(power_delta=0) %}
+{% for name, fields in diff.changed.items() %}
+    {% if "power" in fields %}
+        {% set old_p = fields["power"][0] or 0 %}
+        {% set new_p = fields["power"][1] or 0 %}
+        {% set ns.power_delta = ns.power_delta + (new_p - old_p) %}
+    {% endif %}
+{% endfor %}
+{% if ns.power_delta != 0 %}
+<p>
+    <strong>Total power change:</strong>
+    <span style="color: {% if ns.power_delta > 0 %}#5acf6a{% else %}#f4b740{% endif %}">
+        {{ "{:+,}".format(ns.power_delta) }}
+    </span>
+    across changed Nikkes.
+</p>
+{% endif %}
+{% if diff.changed %}
+<table class="cells">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Field</th>
+            <th>Before</th>
+            <th>After</th>
+            <th>Δ</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for name, fields in diff.changed.items() %}
+        {% for field, pair in fields.items() %}
+        <tr>
+            {% if loop.first %}<td rowspan="{{ fields | length }}"><a href="/characters/{{ name }}">{{ name }}</a></td>{% endif %}
+            <td>{{ field }}</td>
+            <td class="muted small">{{ pair[0] if pair[0] is not none else "—" }}</td>
+            <td><strong>{{ pair[1] if pair[1] is not none else "—" }}</strong></td>
+            <td>
+                {% if pair[0] is number and pair[1] is number %}
+                    {% set delta = pair[1] - pair[0] %}
+                    <span style="color: {% if delta > 0 %}#5acf6a{% elif delta < 0 %}#f4b740{% else %}#888{% endif %}">
+                        {{ "{:+}".format(delta) if delta != 0 else "—" }}
+                    </span>
+                {% else %}—{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}<p class="muted">No per-character changes.</p>{% endif %}
+{% endif %}
+{% endblock %}

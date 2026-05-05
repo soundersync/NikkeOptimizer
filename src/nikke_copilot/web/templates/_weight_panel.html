@@ -1,0 +1,45 @@
+{# Reusable scoring-weights tuning panel.
+   Embed via {% include "_weight_panel.html" %}.
+   Required context: ``using_custom_weights`` (bool),
+   ``default_weights`` (ScoringWeights), and `request` (Starlette).
+#}
+<details {% if using_custom_weights %}open{% endif %} style="margin-top: 1em">
+    <summary class="muted small">
+        Scoring weights
+        {% if using_custom_weights %}<strong>(custom)</strong>{% else %}(default){% endif %}
+    </summary>
+    <p class="muted small">
+        Override how each component weighs into the team score. Empty = role default
+        (ATTACK_WEIGHTS for attack teams, DEFENSE_WEIGHTS for defense — different
+        built-in mixes). Any custom value applies to BOTH attack and defense rankings.
+    </p>
+    <table class="cells">
+        <thead>
+            <tr><th>Component</th><th>Default (ATTACK)</th><th>Custom</th></tr>
+        </thead>
+        <tbody>
+            {% for label, key, default_v in [
+                ("Power sum (log-scaled)", "power_w", default_weights.power_sum),
+                ("Element diversity", "element_diversity_w", default_weights.element_diversity),
+                ("Role balance", "role_balance_w", default_weights.role_balance),
+                ("Synergy pairs", "synergy_w", default_weights.synergy_pairs),
+                ("Investment", "investment_w", default_weights.investment),
+                ("Durability", "durability_w", default_weights.durability),
+                ("Burst gen", "burst_gen_w", default_weights.burst_gen),
+            ] %}
+            <tr>
+                <td>{{ label }}</td>
+                <td class="muted small">{{ "%.1f"|format(default_v) }}</td>
+                <td>
+                    <input name="{{ key }}" type="number" step="0.1" min="0" max="5"
+                           placeholder="{{ "%.1f"|format(default_v) }}"
+                           value="{% if using_custom_weights and request.query_params.get(key) %}{{ request.query_params.get(key) }}{% endif %}">
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <p class="muted small">
+        <a href="{{ request.url.path }}{% if request.query_params.get('top_k') %}?top_k={{ request.query_params.get('top_k') }}&min_power={{ request.query_params.get('min_power', '0') }}{% else %}?min_power={{ request.query_params.get('min_power', '0') }}{% endif %}">↺ Reset to defaults</a>
+    </p>
+</details>

@@ -1,0 +1,144 @@
+{% extends "_base.html" %}
+{% block title %}SP Arena optimizer — NikkeCopilot{% endblock %}
+{% block body %}
+<h1>SP Arena recommendations</h1>
+<p class="muted">
+    SP Arena uses 3 attack teams + 3 defense teams. Defense teams must use
+    <strong>distinct</strong> Nikkes from each other. Attack teams may repeat
+    Nikkes — but we surface 3 distinct candidates so you can mix and match.
+    Attack and defense are scored with role-specific weights and may
+    surface different Nikkes.
+</p>
+<form method="get" class="filters">
+    <label>Min power
+        <input name="min_power" type="number" step="10000" value="{{ min_power }}">
+    </label>
+    <button type="submit">Recommend</button>
+    {% include "_weight_panel.html" %}
+</form>
+
+{% for note in rec.notes %}
+<p class="warning">{{ note }}</p>
+{% endfor %}
+
+{% if rec.diagnostics %}
+<section class="diagnostics">
+    <p class="muted small">
+        [diagnostics]
+        eligible pool: <strong>{{ rec.diagnostics.eligible_pool_size }}</strong> ·
+        attack unique: <strong>{{ rec.diagnostics.attack_unique_count }}</strong> ·
+        defense unique: <strong>{{ rec.diagnostics.defense_unique_count }}</strong> / 15 ·
+        attack/defense overlap: <strong>{{ rec.diagnostics.overlap_attack_defense }}</strong>
+        {% if rec.diagnostics.defense_uniqueness_violated %}
+        · <span style="color: #d04040">UNIQUENESS VIOLATED</span>
+        {% endif %}
+    </p>
+</section>
+{% endif %}
+
+{% macro render_eval(eval) %}
+{% if eval %}
+<p class="muted small evaluator">
+    [evaluator]
+    DPS {{ "{:,.0f}".format(eval.dps_estimate) }} ·
+    EHP {{ "{:,.0f}".format(eval.ehp_estimate) }} ·
+    burst-payload {{ "{:,.0f}".format(eval.burst_payload) }} ·
+    shield {{ "{:,.0f}".format(eval.total_shield) }} ·
+    sustain {{ "%.1f"|format(eval.sustain_index) }} ·
+    avg ATK +{{ "%.0f"|format(eval.team_atk_buff_pct) }}%
+</p>
+{% set buffs = [] %}
+{% if eval.team_true_damage_buff_pct > 0 %}{% set _ = buffs.append("true +%.0f%%" % eval.team_true_damage_buff_pct) %}{% endif %}
+{% if eval.team_attack_damage_buff_pct > 0 %}{% set _ = buffs.append("atk-dmg +%.0f%%" % eval.team_attack_damage_buff_pct) %}{% endif %}
+{% if eval.team_pierce_damage_buff_pct > 0 %}{% set _ = buffs.append("pierce +%.0f%%" % eval.team_pierce_damage_buff_pct) %}{% endif %}
+{% if eval.team_shield_damage_buff_pct > 0 %}{% set _ = buffs.append("shield-dmg +%.0f%%" % eval.team_shield_damage_buff_pct) %}{% endif %}
+{% if eval.team_core_damage_buff_pct > 0 %}{% set _ = buffs.append("core +%.0f%%" % eval.team_core_damage_buff_pct) %}{% endif %}
+{% if eval.team_burst_skill_damage_buff_pct > 0 %}{% set _ = buffs.append("burst-skill +%.0f%%" % eval.team_burst_skill_damage_buff_pct) %}{% endif %}
+{% if buffs or eval.total_flat_atk_bonus > 0 or eval.vs_high_def_damage_index > 0 %}
+<p class="muted small evaluator-buffs">
+    [damage buffs]
+    {% if buffs %}{{ buffs | join(" · ") }}{% endif %}
+    {% if eval.total_flat_atk_bonus > 0 %} · flat-ATK +{{ "{:,.0f}".format(eval.total_flat_atk_bonus) }}{% endif %}
+    {% if eval.vs_high_def_damage_index > 0 %} · vs-high-DEF {{ "%.0f"|format(eval.vs_high_def_damage_index) }}{% endif %}
+</p>
+{% endif %}
+{% else %}
+<p class="muted small evaluator-missing">
+    [evaluator] N/A — encode {{ eval.missing | join(", ") }} for full DSL evaluation
+</p>
+{% endif %}
+{% endmacro %}
+
+{% macro render_teams(label, teams, evaluations, timings) %}
+<h2>{{ label }}</h2>
+{% if not teams %}
+<p class="warning">No recommendations.</p>
+{% else %}
+{% for t in teams %}
+{% set timing = timings[loop.index0] if timings else None %}
+{% set team_text = t.members | map(attribute="name") | join(" / ") %}
+<section class="team-card">
+    {% set ev = evaluations[loop.index0] %}
+    {% set encoded_count = 5 if ev else (5 - (ev.missing | length)) %}
+    <h3>Team {{ loop.index }} — score {{ "%.2f"|format(t.score) }}, power {{ "{:,}".format(t.power) }}
+        <span class="muted small" title="Members in the simulator's skill library">
+            · {{ encoded_count }}/5 encoded
+        </span>
+        <button type="button" class="copy-team-btn" onclick="copyTeam(this)"
+                data-team="{{ team_text }}"
+                title="Copy team names to clipboard"
+                style="float: right; font-size: 0.85em">Copy</button>
+    </h3>
+    {% if timing %}
+    <p class="muted small timing">[timing] {{ timing.label }}</p>
+    {% endif %}
+    <table class="cells">
+        <thead>
+            <tr><th>Burst</th><th>Name</th><th>Element</th><th>Power</th></tr>
+        </thead>
+        <tbody>
+        {% for m in t.members %}
+            <tr>
+                <td>B{{ m.burst_position }}</td>
+                <td>{{ m.name }}</td>
+                <td>{{ m.element.value }}</td>
+                <td>{{ "{:,}".format(m.power) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% set syns = t.notes | synergy_notes %}
+    {% set others = t.notes | other_notes %}
+    {% if syns %}
+    <p class="muted small notes">
+        <strong>Synergies:</strong>
+        {% for n in syns %}{{ n | replace("synergy: ", "") }}{% if not loop.last %} · {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if others %}
+    <p class="muted notes">{{ others | join(" · ") }}</p>
+    {% endif %}
+    {% set b = t.breakdown.to_dict() %}
+    <p class="muted small">
+        burst {{ "%.1f"|format(b.burst_feasibility) }} ·
+        power {{ "%.1f"|format(b.power_sum) }} ·
+        elements {{ "%.1f"|format(b.element_diversity) }} ·
+        roles {{ "%.1f"|format(b.role_balance) }} ·
+        synergy {{ "%.1f"|format(b.synergy_pairs) }} ·
+        invest {{ "%.1f"|format(b.investment) }} ·
+        durability {{ "%.1f"|format(b.durability) }} ·
+        burst-gen {{ "%.1f"|format(b.burst_gen) }}
+        {% if b.team_buff_amp or b.vs_high_def %}
+        · buff-amp {{ "%.1f"|format(b.team_buff_amp) }}
+        · vs-high-DEF {{ "%.1f"|format(b.vs_high_def) }}
+        {% endif %}
+    </p>
+    {{ render_eval(evaluations[loop.index0]) }}
+</section>
+{% endfor %}
+{% endif %}
+{% endmacro %}
+
+{{ render_teams("Attack lineup (3 distinct, repeat any in slots 1/2/3)", rec.attack, attack_evaluations, attack_timings) }}
+{{ render_teams("Defense lineup (3 disjoint, uniqueness enforced)", rec.defense, defense_evaluations, defense_timings) }}
+{% endblock %}
