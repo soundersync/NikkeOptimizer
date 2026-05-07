@@ -137,6 +137,36 @@ def ingest_tournaments(
             console.print(f"  · {err}")
 
 
+@app.command(name="label-tournament-portraits")
+def label_tournament_portraits(
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Backfill loadout portraits with character_ids from same-round duel results.
+
+    Loadout screenshots show portraits but no character names; duel
+    results show both. For each loadout, this finds the corresponding
+    duel (same match + same round), determines which side of the duel
+    the loadout's player is on (by player_name OCR vs the overview's
+    left_name / right_name), and copies the 5 character_ids into the
+    loadout's char1..5.portrait extraction rows.
+
+    Idempotent — re-runs only update rows whose character_id changed.
+    No Vision API calls, no PaddleOCR, just a slot-correspondence join.
+    """
+    from sqlmodel import Session
+
+    from ..data.db import init_db, make_engine
+    from ..roster.promo_tournament_ocr import backfill_portrait_character_ids
+
+    engine = make_engine(db)
+    init_db(engine)
+    with Session(engine) as session:
+        examined, updated = backfill_portrait_character_ids(session)
+    console.print(
+        f"[bold green]Portrait labeling complete[/]: examined={examined} updated={updated}"
+    )
+
+
 @app.command(name="rematch-tournament-characters")
 def rematch_tournament_characters(
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),

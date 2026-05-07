@@ -494,6 +494,189 @@ def has_extractions(session: Session, screenshot_id: int) -> bool:
     )
 
 
+def _resolve_side(
+    loadout_player: str, overview_names: dict[str, str]
+) -> Optional[str]:
+    """Return ``"left"`` / ``"right"`` for the loadout's player, or ``None``
+    if neither overview name matches even fuzzily.
+
+    Match tiers (most strict first):
+    1. Exact case-sensitive
+    2. Exact case-insensitive
+    3. Fuzzy ``fuzz.ratio`` ≥ 60 — picks the side with the higher score.
+       Empty / missing overview names are treated as 0 score.
+    """
+    lp = loadout_player.strip()
+    left = (overview_names.get("left_name") or "").strip()
+    right = (overview_names.get("right_name") or "").strip()
+    if not lp or (not left and not right):
+        return None
+    if left == lp:
+        return "left"
+    if right == lp:
+        return "right"
+    if left and left.lower() == lp.lower():
+        return "left"
+    if right and right.lower() == lp.lower():
+        return "right"
+    from rapidfuzz import fuzz
+
+    left_score = fuzz.ratio(lp.lower(), left.lower()) if left else 0
+    right_score = fuzz.ratio(lp.lower(), right.lower()) if right else 0
+    if max(left_score, right_score) < 60:
+        return None
+    return "left" if left_score >= right_score else "right"
+
+
+def backfill_portrait_character_ids(session: Session) -> tuple[int, int]:
+    """Label each loadout's char1..5.portrait with the character_id read
+    from the SAME-ROUND duel result at the matching slot.
+
+    The loadout screen shows portraits but no character names. The duel
+    result for the same round shows both — names *and* implied slots
+    (5 chars per side, in order). Combining them gives us a reliable
+    portrait → character mapping with zero Vision API calls:
+
+    1. For each loadout, find its same-match same-round
+       ``results_duel`` screenshot.
+    2. Match the loadout's player_name OCR against the same match's
+       overview ``left_name`` / ``right_name`` to determine which side
+       of the duel this loadout corresponds to.
+    3. Copy the ``character_id`` (and OCR'd raw name as ``text``) from
+       the duel's ``{side}.char{N}.name`` extraction into the loadout's
+       ``char{N}.portrait`` row.
+
+    Returns ``(examined, updated)``.
+    """
+    # Lazy imports — avoid pulling these into headless test envs.
+    from ..data.models import (
+        PromoExtractedField as _Field,
+        PromoMatchScreenshot as _Shot,
+    )
+
+    examined = 0
+    updated = 0
+
+    loadouts = session.exec(
+        select(_Shot).where(_Shot.kind == "player_loadout")
+    ).all()
+
+    # Cache same-match overview names + duel screenshots so we don't
+    # re-query for each of the (up to 10) loadouts in a match.
+    overview_cache: dict[int, dict[str, str]] = {}
+    duels_cache: dict[tuple[int, int], int] = {}
+
+    def _overview_names(match_id: int) -> dict[str, str]:
+        if match_id in overview_cache:
+            return overview_cache[match_id]
+        ov = session.exec(
+            select(_Shot).where(
+                _Shot.match_id == match_id, _Shot.kind == "results_overview"
+            )
+        ).first()
+        names: dict[str, str] = {}
+        if ov is not None:
+            for f in session.exec(
+                select(_Field).where(
+                    _Field.screenshot_id == ov.id,
+                    _Field.region_slug.in_(["left_name", "right_name"]),
+                )
+            ).all():
+                if f.text:
+                    names[f.region_slug] = f.text
+        overview_cache[match_id] = names
+        return names
+
+    def _duel_id(match_id: int, round_no: int) -> int | None:
+        key = (match_id, round_no)
+        if key in duels_cache:
+            return duels_cache[key]
+        d = session.exec(
+            select(_Shot).where(
+                _Shot.match_id == match_id,
+                _Shot.kind == "results_duel",
+                _Shot.round_no == round_no,
+            )
+        ).first()
+        duels_cache[key] = d.id if d else None
+        return duels_cache[key]
+
+    for loadout in loadouts:
+        examined += 1
+        # Find this loadout's player_name extraction.
+        pn_field = session.exec(
+            select(_Field).where(
+                _Field.screenshot_id == loadout.id,
+                _Field.region_slug == "player_name",
+            )
+        ).first()
+        if pn_field is None or not pn_field.text:
+            continue
+        loadout_player = pn_field.text.strip()
+
+        # Determine which side of the duel this loadout corresponds to.
+        # Tries: exact match → case-insensitive → fuzzy ratio (handles
+        # OCR drift like "AHIO" vs "AHH" being the same player).
+        names = _overview_names(loadout.match_id)
+        side = _resolve_side(loadout_player, names)
+        if side is None:
+            continue
+
+        duel_id = _duel_id(loadout.match_id, loadout.round_no)
+        if duel_id is None:
+            continue
+
+        # Pull the 5 duel name extractions for this side.
+        duel_fields = session.exec(
+            select(_Field).where(
+                _Field.screenshot_id == duel_id,
+                _Field.region_slug.like(f"{side}.char%.name"),
+            )
+        ).all()
+        by_slug = {f.region_slug: f for f in duel_fields}
+
+        for n in range(1, 6):
+            duel_name = by_slug.get(f"{side}.char{n}.name")
+            if duel_name is None:
+                continue
+            target_slug = f"char{n}.portrait"
+            target = session.exec(
+                select(_Field).where(
+                    _Field.screenshot_id == loadout.id,
+                    _Field.region_slug == target_slug,
+                )
+            ).first()
+            new_text = duel_name.text
+            new_cid = duel_name.character_id
+            new_score = duel_name.character_match_score
+            if target is None:
+                target = _Field(
+                    screenshot_id=loadout.id,
+                    region_slug=target_slug,
+                    text=new_text,
+                    normalized=None,
+                    character_id=new_cid,
+                    character_match_score=new_score,
+                    confidence=duel_name.confidence,
+                )
+                session.add(target)
+                updated += 1
+            elif (
+                target.character_id != new_cid
+                or target.text != new_text
+                or target.character_match_score != new_score
+            ):
+                target.text = new_text
+                target.character_id = new_cid
+                target.character_match_score = new_score
+                target.confidence = duel_name.confidence
+                session.add(target)
+                updated += 1
+        session.commit()
+
+    return examined, updated
+
+
 def rematch_character_fields(session: Session) -> tuple[int, int]:
     """Re-run ``match_character`` on every stored ``*.name`` extraction.
 

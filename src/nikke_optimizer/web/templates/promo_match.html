@@ -170,15 +170,152 @@ h1 { margin: 0 0 4px; }
     <span class="pill">{% if match.has_loadouts %}with loadouts{% else %}results-only{% endif %}</span>
 </div>
 
+{% if not match.has_loadouts and canonical %}
+<section style="margin-bottom: 26px;">
+    <h2 style="font-size: 14px; font-weight: 600; color: #e5e7eb; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #1f2228;">
+        Canonical team
+        <span style="font-size: 11px; color: #6b7280; font-family: 'SF Mono', Menlo, monospace; font-weight: 400;">portraits from each player's earliest captured loadout</span>
+    </h2>
+    <style>
+    .canon-side {
+        margin-bottom: 14px;
+        background: #14161b;
+        border: 1px solid #1f2228;
+        border-radius: 6px;
+        padding: 12px 14px;
+    }
+    .canon-side .header {
+        display: flex; align-items: baseline; gap: 12px;
+        margin-bottom: 10px; padding-bottom: 8px;
+        border-bottom: 1px solid #1f2228;
+    }
+    .canon-side .name { font-size: 14px; font-weight: 600; color: #e5e7eb; }
+    .canon-side .team-cp {
+        font-family: "SF Mono", Menlo, monospace;
+        font-size: 12px; color: #f87171;
+    }
+    .canon-side .source {
+        margin-left: auto; font-size: 11px; color: #6b7280;
+        font-family: "SF Mono", Menlo, monospace;
+    }
+    .canon-side .source a { color: #9ca3af; text-decoration: none; }
+    .canon-side .source a:hover { color: #f87171; }
+    .canon-team {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+    }
+    .canon-char {
+        background: #0f1116;
+        border: 1px solid #1f2228;
+        border-radius: 4px;
+        overflow: hidden;
+        display: flex; flex-direction: column;
+    }
+    .canon-portrait {
+        background-color: #0a0b0e;
+        background-repeat: no-repeat;
+        background-size: contain;
+        aspect-ratio: 170 / 317;
+        border-bottom: 1px solid #1f2228;
+    }
+    .canon-char .label {
+        padding: 6px 8px;
+        font-size: 11px;
+        color: #e5e7eb;
+        text-align: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .canon-char .label a { color: inherit; text-decoration: none; }
+    .canon-char .label a:hover { color: #f87171; }
+    .canon-char .cp {
+        padding: 0 8px 6px;
+        font-size: 10px;
+        font-family: "SF Mono", Menlo, monospace;
+        color: #9ca3af;
+        text-align: center;
+    }
+    .canon-missing { color: #6b7280; font-style: italic; font-size: 12px; }
+    </style>
+
+    {% for side_key in ["left", "right"] %}
+    {% set side = canonical[side_key] %}
+    {% if side %}
+    <div class="canon-side">
+        <div class="header">
+            <span class="name">{{ side.player_name }}</span>
+            {% if side.team_cp %}
+            <span class="team-cp">CP {{ "{:,}".format(side.team_cp) }}</span>
+            {% endif %}
+            <span class="source">
+                source:
+                <a href="/promo/screenshots/{{ side.source_screenshot_id }}">
+                    {{ side.source_round_label or "?" }}
+                </a>
+            </span>
+        </div>
+        <div class="canon-team">
+            {% for char in side.characters %}
+            {% set bbox = char.portrait_bbox %}
+            {% if bbox and side.source_image_url %}
+                {% set bx1, by1, bx2, by2 = bbox %}
+                {% set bw = bx2 - bx1 %}
+                {% set bh = by2 - by1 %}
+                {# Choose a display width that gives the portrait crop a
+                   readable size; the height follows naturally via the
+                   aspect-ratio. We compute background-size + position
+                   so the bbox region of the source image fills the
+                   .canon-portrait container.                            #}
+                {% set disp_w = 128 %}
+                {% set scale = disp_w / bw %}
+                {% set bg_w = (ref_w * scale)|round(0, 'common')|int %}
+                {% set bg_h = (ref_h * scale)|round(0, 'common')|int %}
+                {% set bg_x = -1 * (bx1 * scale)|round(0, 'common')|int %}
+                {% set bg_y = -1 * (by1 * scale)|round(0, 'common')|int %}
+            {% endif %}
+            <div class="canon-char">
+                <div class="canon-portrait"
+                     {% if bbox and side.source_image_url %}
+                     style="background-image: url('{{ side.source_image_url }}');
+                            background-size: {{ bg_w }}px {{ bg_h }}px;
+                            background-position: {{ bg_x }}px {{ bg_y }}px;"
+                     {% endif %}></div>
+                <div class="label">
+                    {% if char.character_name %}
+                        <a href="/characters/{{ char.character_name }}">{{ char.character_name }}</a>
+                    {% elif char.raw_name %}
+                        {{ char.raw_name }}
+                    {% else %}
+                        <span style="color: #4b5158;">—</span>
+                    {% endif %}
+                </div>
+                <div class="cp">
+                    {% if char.cp %}{{ "{:,}".format(char.cp) }}{% else %}—{% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% else %}
+    <div class="canon-side">
+        <div class="canon-missing">No canonical loadout found for {{ derived_loadouts[side_key].name or "(unknown)" }}.</div>
+    </div>
+    {% endif %}
+    {% endfor %}
+</section>
+{% endif %}
+
 {% if not match.has_loadouts and derived_loadouts %}
 <section class="derived-section">
     <h2 style="font-size: 14px; font-weight: 600; color: #e5e7eb; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #1f2228;">
-        Team compositions
-        <span style="font-size: 11px; color: #6b7280; font-family: 'SF Mono', Menlo, monospace; font-weight: 400;">derived from duel results</span>
+        Per-round detail
+        <span style="font-size: 11px; color: #6b7280; font-family: 'SF Mono', Menlo, monospace; font-weight: 400;">HP / damage from each round's duel result</span>
     </h2>
     <div class="derived-banner">
-        Loadout screenshots weren't captured for this match — instead, the 5-character team for each side is read from
-        each round's <strong>duel result</strong>. HP %, attack damage, defense, and heal totals come from the same row.
+        Loadout screenshots weren't captured for this match. The 5-character team for each round is read directly from the
+        <strong>duel result</strong>, with HP %, attack damage, defense, and heal totals from the same source.
     </div>
 
     {% for round in derived_loadouts.left.rounds %}

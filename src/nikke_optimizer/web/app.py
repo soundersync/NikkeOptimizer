@@ -2008,6 +2008,152 @@ def create_app(
             return None
         return "/promo-images/" + rel.as_posix()
 
+    # Round-priority for canonical loadout lookup. Earliest rounds with
+    # full loadouts win — those are the most reliable source of a
+    # player's season-locked team.
+    _CANONICAL_ROUND_PRIORITY = {
+        "round_64": 0,
+        "quarterfinals": 1,
+        "top_32": 2,
+        "semifinals": 3,
+        "top_16": 4,
+        "finals": 5,
+    }
+
+    def _promo_canonical_loadout(
+        session, player_name: Optional[str]
+    ) -> Optional[dict]:
+        """Find a representative loadout for ``player_name``.
+
+        Searches every player_loadout screenshot whose ``player_name``
+        OCR matches (exact → case-insensitive → fuzzy ratio ≥ 80) and
+        picks the one with the earliest round_label by
+        ``_CANONICAL_ROUND_PRIORITY``. Returns a dict with the team_cp,
+        5 character entries (slot, character_id, character_name, cp,
+        portrait_bbox) and the source-screenshot URL so the template
+        can render portrait crops via CSS object-position.
+        """
+        from rapidfuzz import fuzz
+
+        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
+        if not player_name:
+            return None
+        pn = player_name.strip()
+        if not pn:
+            return None
+
+        # Find player_name extractions on player_loadout screenshots.
+        rows = session.exec(
+            select(PromoExtractedField, PromoMatchScreenshot)
+            .where(
+                PromoExtractedField.region_slug == "player_name",
+                PromoExtractedField.screenshot_id == PromoMatchScreenshot.id,
+                PromoMatchScreenshot.kind == "player_loadout",
+            )
+        ).all()
+        if not rows:
+            return None
+        # Tier 1: exact match.
+        matches = [(f, sh) for f, sh in rows if f.text and f.text.strip() == pn]
+        # Tier 2: case-insensitive.
+        if not matches:
+            lp = pn.lower()
+            matches = [
+                (f, sh) for f, sh in rows
+                if f.text and f.text.strip().lower() == lp
+            ]
+        # Tier 3: fuzzy ratio ≥ 80.
+        if not matches:
+            lp = pn.lower()
+            matches = [
+                (f, sh) for f, sh in rows
+                if f.text and fuzz.ratio(f.text.strip().lower(), lp) >= 80
+            ]
+        if not matches:
+            return None
+
+        # Pick the one from the earliest-priority round, then earliest
+        # round_no within the match.
+        match_ids = list({sh.match_id for _, sh in matches})
+        match_rows = session.exec(
+            select(PromoMatch).where(PromoMatch.id.in_(match_ids))
+        ).all()
+        match_label = {m.id: m.round_label for m in match_rows}
+
+        def _key(item):
+            _f, sh = item
+            return (
+                _CANONICAL_ROUND_PRIORITY.get(match_label.get(sh.match_id, ""), 99),
+                sh.round_no or 0,
+                sh.id,
+            )
+        matches.sort(key=_key)
+        _, source = matches[0]
+
+        # Pull the full slug-keyed extraction map for the source loadout.
+        fields = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.screenshot_id == source.id
+            )
+        ).all()
+        by_slug = {f.region_slug: f for f in fields}
+
+        team_cp_field = by_slug.get("team_cp")
+        try:
+            team_cp = int(team_cp_field.normalized) if team_cp_field and team_cp_field.normalized else None
+        except (TypeError, ValueError):
+            team_cp = None
+
+        # Resolve character names for the portrait character_ids.
+        char_ids = {
+            f.character_id for f in fields
+            if f.character_id and f.region_slug.endswith(".portrait")
+        }
+        char_names: dict[int, str] = {}
+        if char_ids:
+            crows = session.exec(
+                select(Character.id, Character.name).where(
+                    Character.id.in_(char_ids)
+                )
+            ).all()
+            char_names = {int(cid): str(name) for cid, name in crows}
+
+        # Coords for the 5 portrait regions in source-image pixel space.
+        portrait_bbox_by_slug = {
+            r.slug: r.bbox for r in PLAYER_LOADOUT
+            if r.slug.endswith(".portrait")
+        }
+
+        characters = []
+        for n in range(1, 6):
+            portrait = by_slug.get(f"char{n}.portrait")
+            cp_field = by_slug.get(f"char{n}.cp")
+            try:
+                cp = int(cp_field.normalized) if cp_field and cp_field.normalized else None
+            except (TypeError, ValueError):
+                cp = None
+            characters.append({
+                "slot": n,
+                "character_id": portrait.character_id if portrait else None,
+                "character_name": (
+                    char_names.get(portrait.character_id)
+                    if portrait and portrait.character_id else None
+                ),
+                "raw_name": portrait.text if portrait else None,
+                "cp": cp,
+                "portrait_bbox": portrait_bbox_by_slug.get(f"char{n}.portrait"),
+            })
+
+        return {
+            "player_name": pn,
+            "team_cp": team_cp,
+            "source_screenshot_id": source.id,
+            "source_round_label": match_label.get(source.match_id),
+            "source_image_url": _promo_image_url(source.file_path),
+            "characters": characters,
+        }
+
     def _promo_derived_loadouts(session, match_id: int) -> Optional[dict]:
         """For results-only matches (top_32 / top_16 / semifinals / finals),
         build per-side, per-round team comps from the duel result extractions.
@@ -2305,12 +2451,22 @@ def create_app(
                         "row": s,
                         "url": _promo_image_url(s.file_path),
                     })
-            # For results-only matches, derive team comps from duel results
-            # so the user can see who played even without loadout screenshots.
-            derived_loadouts = (
-                _promo_derived_loadouts(session, match_id)
-                if not match.has_loadouts else None
-            )
+            # For results-only matches: derive team comps from duel
+            # results AND look up each player's canonical loadout
+            # (round_64 / quarterfinals) for portraits + CPs.
+            derived_loadouts = None
+            canonical = None
+            if not match.has_loadouts:
+                derived_loadouts = _promo_derived_loadouts(session, match_id)
+                if derived_loadouts:
+                    canonical = {
+                        "left": _promo_canonical_loadout(
+                            session, derived_loadouts["left"]["name"]
+                        ),
+                        "right": _promo_canonical_loadout(
+                            session, derived_loadouts["right"]["name"]
+                        ),
+                    }
         return templates.TemplateResponse(
             request,
             "promo_match.html",
@@ -2319,8 +2475,11 @@ def create_app(
                 "group": group,
                 "match": match,
                 "derived_loadouts": derived_loadouts,
+                "canonical": canonical,
                 "buckets": buckets,
                 "format": fmt,
+                "ref_w": PROMO_REF_SIZE[0],
+                "ref_h": PROMO_REF_SIZE[1],
             },
         )
 
