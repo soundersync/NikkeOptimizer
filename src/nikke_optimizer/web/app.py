@@ -2008,6 +2008,126 @@ def create_app(
             return None
         return "/promo-images/" + rel.as_posix()
 
+    def _promo_derived_loadouts(session, match_id: int) -> Optional[dict]:
+        """For results-only matches (top_32 / top_16 / semifinals / finals),
+        build per-side, per-round team comps from the duel result extractions.
+
+        Returns ``None`` when there are no duel screenshots or no extractions.
+        Otherwise returns:
+
+        ``{"left": {"name": str|None, "rounds": [{"round_no": int, "winner": str|None, "screenshot_id": int, "characters": [{...}]*5}]}, "right": {...}}``
+
+        Each character is a dict with: slot (1..5), raw_name, character_id,
+        character_name, match_score, atk_int, def_int, heal_int, hp_pct.
+        """
+        duels = session.exec(
+            select(PromoMatchScreenshot)
+            .where(
+                PromoMatchScreenshot.match_id == match_id,
+                PromoMatchScreenshot.kind == "results_duel",
+            )
+            .order_by(PromoMatchScreenshot.round_no)
+        ).all()
+        if not duels:
+            return None
+
+        # Player names + per-round winners come from the overview extractions.
+        overview = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.match_id == match_id,
+                PromoMatchScreenshot.kind == "results_overview",
+            )
+        ).first()
+        left_name = right_name = None
+        winners: dict[int, str] = {}
+        if overview is not None:
+            ext_overview = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.screenshot_id == overview.id
+                )
+            ).all()
+            for e in ext_overview:
+                if e.region_slug == "left_name":
+                    left_name = e.text
+                elif e.region_slug == "right_name":
+                    right_name = e.text
+                elif e.region_slug.endswith("_winner") and e.normalized:
+                    # 'round1_winner' → 1
+                    try:
+                        n = int(e.region_slug[len("round"):-len("_winner")])
+                        winners[n] = e.normalized
+                    except ValueError:
+                        pass
+
+        # Collect every duel's extractions in one shot, then pivot.
+        duel_ids = [d.id for d in duels]
+        duel_fields = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.screenshot_id.in_(duel_ids)
+            )
+        ).all()
+        by_screenshot: dict[int, dict[str, PromoExtractedField]] = {}
+        char_ids: set[int] = set()
+        for f in duel_fields:
+            by_screenshot.setdefault(f.screenshot_id, {})[f.region_slug] = f
+            if f.character_id is not None:
+                char_ids.add(f.character_id)
+
+        char_names: dict[int, str] = {}
+        if char_ids:
+            rows = session.exec(
+                select(Character.id, Character.name).where(
+                    Character.id.in_(char_ids)
+                )
+            ).all()
+            char_names = {int(cid): str(name) for cid, name in rows}
+
+        def _try_int(s: Optional[str]) -> Optional[int]:
+            if not s:
+                return None
+            try:
+                return int(s)
+            except ValueError:
+                return None
+
+        sides: dict[str, dict] = {
+            "left": {"name": left_name, "rounds": []},
+            "right": {"name": right_name, "rounds": []},
+        }
+        for duel in duels:
+            slugs = by_screenshot.get(duel.id, {})
+            for side in ("left", "right"):
+                chars = []
+                for n in range(1, 6):
+                    name = slugs.get(f"{side}.char{n}.name")
+                    atk = slugs.get(f"{side}.char{n}.atk")
+                    deff = slugs.get(f"{side}.char{n}.def")
+                    heal = slugs.get(f"{side}.char{n}.heal")
+                    hp = slugs.get(f"{side}.char{n}.hp")
+                    chars.append({
+                        "slot": n,
+                        "raw_name": name.text if name else None,
+                        "character_id": name.character_id if name else None,
+                        "character_name": (
+                            char_names.get(name.character_id)
+                            if name and name.character_id else None
+                        ),
+                        "match_score": (
+                            name.character_match_score if name else None
+                        ),
+                        "atk_int": _try_int(atk.normalized) if atk else None,
+                        "def_int": _try_int(deff.normalized) if deff else None,
+                        "heal_int": _try_int(heal.normalized) if heal else None,
+                        "hp_pct": hp.normalized if hp else None,
+                    })
+                sides[side]["rounds"].append({
+                    "round_no": duel.round_no,
+                    "screenshot_id": duel.id,
+                    "winner": winners.get(duel.round_no),
+                    "characters": chars,
+                })
+        return sides
+
     def _promo_match_thumb_url(session, match_id: int) -> Optional[str]:
         """URL of a representative screenshot for a match — used as a tile thumbnail.
 
@@ -2185,6 +2305,12 @@ def create_app(
                         "row": s,
                         "url": _promo_image_url(s.file_path),
                     })
+            # For results-only matches, derive team comps from duel results
+            # so the user can see who played even without loadout screenshots.
+            derived_loadouts = (
+                _promo_derived_loadouts(session, match_id)
+                if not match.has_loadouts else None
+            )
         return templates.TemplateResponse(
             request,
             "promo_match.html",
@@ -2192,6 +2318,7 @@ def create_app(
                 "tournament": tournament,
                 "group": group,
                 "match": match,
+                "derived_loadouts": derived_loadouts,
                 "buckets": buckets,
                 "format": fmt,
             },

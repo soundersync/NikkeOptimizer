@@ -66,6 +66,95 @@ h1 { margin: 0 0 4px; }
     font-family: "SF Mono", Menlo, monospace;
 }
 .empty-section { color: #6b7280; font-size: 12px; font-style: italic; }
+
+/* Derived-loadout section for results-only matches.
+   Layout: vertical list of rounds, each round shows two rows
+   (left side, right side), each row has player name + 5 char chips. */
+.derived-section { margin-bottom: 26px; }
+.derived-banner {
+    background: #1b1f29;
+    border: 1px solid #1e3a5f;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    color: #93c5fd;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.derived-banner strong { color: #d1d5db; }
+
+.derived-round {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+.derived-round-header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1f2228;
+}
+.derived-round-header .num {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #f87171; font-weight: 600; font-size: 13px;
+}
+.derived-round-header a {
+    margin-left: auto;
+    color: #6b7280; font-size: 11px; text-decoration: none;
+}
+.derived-round-header a:hover { color: #f87171; }
+
+.derived-side {
+    display: flex; align-items: center; gap: 14px;
+    padding: 6px 0;
+}
+.derived-side + .derived-side { border-top: 1px dashed #1f2228; }
+.derived-side .player {
+    flex: 0 0 140px;
+    display: flex; flex-direction: column; gap: 2px;
+}
+.derived-side .player-name {
+    color: #e5e7eb; font-weight: 600; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.derived-side .verdict {
+    font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.derived-side .verdict.won { color: #6fdf80; }
+.derived-side .verdict.lost { color: #f87171; }
+
+.derived-team {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    flex: 1 1 auto;
+}
+.derived-char {
+    display: flex; flex-direction: column;
+    background: #0f1116;
+    border: 1px solid #1f2228;
+    border-radius: 5px;
+    padding: 6px 8px;
+    min-width: 0;
+    flex: 1 1 0;
+}
+.derived-char.disconnected { opacity: 0.55; }
+.derived-char .name {
+    color: #e5e7eb; font-size: 12px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.derived-char .name a { color: inherit; text-decoration: none; }
+.derived-char .name a:hover { color: #f87171; }
+.derived-char .stats {
+    color: #9ca3af; font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    margin-top: 2px;
+    display: flex; justify-content: space-between; gap: 4px;
+}
+.derived-char .stats .hp.full { color: #6fdf80; }
+.derived-char .stats .hp.zero { color: #f87171; }
 </style>
 
 <div class="crumb">
@@ -80,6 +169,69 @@ h1 { margin: 0 0 4px; }
     {{ match.round_label.replace("_", " ") }}
     <span class="pill">{% if match.has_loadouts %}with loadouts{% else %}results-only{% endif %}</span>
 </div>
+
+{% if not match.has_loadouts and derived_loadouts %}
+<section class="derived-section">
+    <h2 style="font-size: 14px; font-weight: 600; color: #e5e7eb; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #1f2228;">
+        Team compositions
+        <span style="font-size: 11px; color: #6b7280; font-family: 'SF Mono', Menlo, monospace; font-weight: 400;">derived from duel results</span>
+    </h2>
+    <div class="derived-banner">
+        Loadout screenshots weren't captured for this match — instead, the 5-character team for each side is read from
+        each round's <strong>duel result</strong>. HP %, attack damage, defense, and heal totals come from the same row.
+    </div>
+
+    {% for round in derived_loadouts.left.rounds %}
+    {% set right_round = derived_loadouts.right.rounds[loop.index0] %}
+    <div class="derived-round">
+        <div class="derived-round-header">
+            <span class="num">Round {{ round.round_no }}</span>
+            {% if round.winner %}
+            <span style="font-size: 11px; color: #9ca3af;">winner: <strong style="color: {{ '#6fdf80' if round.winner == 'left' else '#f87171' }};">{{ round.winner }}</strong></span>
+            {% endif %}
+            <a href="/promo/screenshots/{{ round.screenshot_id }}">view duel →</a>
+        </div>
+
+        {% for side_key, side, this_round in [("left", derived_loadouts.left, round), ("right", derived_loadouts.right, right_round)] %}
+        <div class="derived-side">
+            <div class="player">
+                <span class="player-name">{{ side.name or "(unknown)" }}</span>
+                {% if round.winner %}
+                <span class="verdict {{ 'won' if round.winner == side_key else 'lost' }}">
+                    {{ "won" if round.winner == side_key else "lost" }}
+                </span>
+                {% endif %}
+            </div>
+            <div class="derived-team">
+                {% for char in this_round.characters %}
+                {% set is_zero = char.hp_pct in ("0.00%", "0%") %}
+                <div class="derived-char {{ 'disconnected' if is_zero else '' }}">
+                    <div class="name">
+                        {% if char.character_name %}
+                            <a href="/characters/{{ char.character_name }}">{{ char.character_name }}</a>
+                        {% elif char.raw_name %}
+                            {{ char.raw_name }}
+                        {% else %}
+                            <span style="color: #4b5158;">—</span>
+                        {% endif %}
+                    </div>
+                    <div class="stats">
+                        {% if char.hp_pct %}
+                        <span class="hp {{ 'zero' if is_zero else ('full' if '100' in (char.hp_pct or '') else '') }}">{{ char.hp_pct }}</span>
+                        {% endif %}
+                        {% if char.atk_int %}
+                        <span title="atk damage">{{ "{:,}".format(char.atk_int) }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
+</section>
+{% endif %}
 
 {% if match.has_loadouts %}
 <section class="section">
