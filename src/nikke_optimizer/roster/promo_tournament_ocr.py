@@ -186,28 +186,76 @@ class CharIndex:
         return cls(entries=tuple((int(cid), str(name)) for cid, name in rows))
 
 
+def _score_candidate(query: str, name: str) -> float:
+    """Mean of ``fuzz.ratio`` and ``fuzz.partial_ratio``.
+
+    ``WRatio`` was the previous scorer but its
+    ``max(ratio, partial_ratio·0.9, …)`` formulation throws away the
+    length signal: for query ``"Vesti: Tactical"``, both ``"Vesti"``
+    and ``"Vesti: Tactical Upgrade"`` score exactly 90, and
+    ``process.extractOne`` deterministically picks the first by ID
+    (the base name).
+
+    The arithmetic mean preserves the substring signal (``partial_ratio``)
+    while keeping a length-sensitive component (``ratio``), so the
+    canonical alt-form correctly outscores the base when the OCR text
+    is the alt: ``Vesti`` → 75, ``Vesti: Tactical Upgrade`` → 89.5.
+    """
+    from rapidfuzz import fuzz
+
+    return (fuzz.ratio(query, name) + fuzz.partial_ratio(query, name)) / 2.0
+
+
 def match_character(
     name: Optional[str], index: CharIndex, *, threshold: float = 70.0
 ) -> Optional[tuple[int, str, float]]:
     """Return ``(character_id, matched_name, score)`` for the best fuzzy match.
 
-    Uses ``rapidfuzz.process.extractOne`` with the WRatio scorer, which
-    handles partial matches well — useful for OCR truncations like
-    ``"Liberali"`` → ``"Liberalio"``. ``None`` when no candidate scores
-    above ``threshold``.
+    Uses a colon-aware pre-filter plus the mean ratio + partial_ratio
+    scorer (see ``_score_candidate``). When the OCR query contains a
+    colon (an alt-form like ``"Vesti: Tactical"``) the search pool is
+    restricted to candidates whose canonical name also contains a
+    colon — the in-game UI only displays the colon-form for alts, so
+    a colon in the OCR text is a strong signal of the source's
+    colon-form. Falls back to the unfiltered pool if the filtered
+    best falls below threshold.
+
+    Handles OCR truncations naturally: ``"Liberali"`` → ``"Liberalio"``,
+    ``"Eunhwa: Tactic"`` → ``"Eunhwa: Tactical Upgrade"``.
     """
     if not name or not index.entries:
         return None
-    from rapidfuzz import fuzz, process
-
-    candidates = {cid: cname for cid, cname in index.entries}
-    best = process.extractOne(
-        name.strip(), candidates, scorer=fuzz.WRatio, score_cutoff=threshold
-    )
-    if best is None:
+    q = name.strip()
+    if not q:
         return None
-    matched_name, score, cid = best
-    return int(cid), str(matched_name), float(score)
+
+    has_colon = ":" in q
+    filtered: list[tuple[int, str]] = (
+        [(cid, n) for cid, n in index.entries if ":" in n]
+        if has_colon else []
+    )
+    pool: list[tuple[int, str]] = filtered or list(index.entries)
+
+    best_cid, best_name, best_score = -1, "", -1.0
+    for cid, n in pool:
+        s = _score_candidate(q, n)
+        if s > best_score:
+            best_cid, best_name, best_score = cid, n, s
+
+    # If the colon-filtered pool's winner is below threshold, retry
+    # the full pool — the OCR colon may be noise, or the canonical
+    # name might lack a colon for an alt-only character.
+    if best_score < threshold and filtered:
+        for cid, n in index.entries:
+            if (cid, n) in filtered:
+                continue  # already scored
+            s = _score_candidate(q, n)
+            if s > best_score:
+                best_cid, best_name, best_score = cid, n, s
+
+    if best_score < threshold:
+        return None
+    return int(best_cid), str(best_name), float(best_score)
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +492,44 @@ def has_extractions(session: Session, screenshot_id: int) -> bool:
         ).first()
         is not None
     )
+
+
+def rematch_character_fields(session: Session) -> tuple[int, int]:
+    """Re-run ``match_character`` on every stored ``*.name`` extraction.
+
+    Useful when the matching algorithm changes but the OCR text itself
+    is fine — avoids the 15-minute cost of a full ``--force-ocr``. Walks
+    every ``PromoExtractedField`` whose slug ends in ``.name``, scores
+    its existing ``text`` against the current Character DB, and updates
+    ``character_id`` + ``character_match_score`` in place.
+
+    Returns ``(rows_examined, rows_updated)``.
+    """
+    char_index = CharIndex.from_session(session)
+    rows = session.exec(
+        select(PromoExtractedField).where(
+            PromoExtractedField.region_slug.like("%.name")
+        )
+    ).all()
+    examined = 0
+    updated = 0
+    for row in rows:
+        examined += 1
+        if not row.text:
+            new_cid, new_score = None, None
+        else:
+            match = match_character(row.text, char_index)
+            if match is None:
+                new_cid, new_score = None, None
+            else:
+                new_cid, _, new_score = match
+        if (row.character_id != new_cid) or (
+            row.character_match_score != new_score
+        ):
+            row.character_id = new_cid
+            row.character_match_score = new_score
+            session.add(row)
+            updated += 1
+    if updated:
+        session.commit()
+    return examined, updated

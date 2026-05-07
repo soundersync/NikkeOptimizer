@@ -177,6 +177,16 @@ def char_index() -> CharIndex:
             (7, "Pascal"),
             (8, "Bay"),
             (9, "Rumani"),
+            # Alt-form regression cases (without these in the index, the
+            # WRatio-tied bug couldn't be reproduced in tests).
+            (10, "Vesti"),
+            (11, "Vesti: Tactical Upgrade"),
+            (12, "Eunhwa"),
+            (13, "Eunhwa: Tactical Upgrade"),
+            (14, "Soline"),
+            (15, "Soline: Frost Ticket"),
+            (16, "Maiden"),
+            (17, "Maiden: Ice Rose"),
         )
     )
 
@@ -217,3 +227,63 @@ def test_match_character_empty_input(char_index: CharIndex):
 def test_match_character_empty_index():
     empty = CharIndex(entries=())
     assert match_character("Anis", empty) is None
+
+
+# ---------------------------------------------------------------------------
+# Alt-form regression — the bug that prompted the fix
+# ---------------------------------------------------------------------------
+
+
+def test_match_alt_form_truncated_tactical(char_index: CharIndex):
+    """`'Vesti: Tactical'` (in-game UI truncates "Upgrade") must resolve
+    to the alt-form, NOT the base 'Vesti'."""
+    res = match_character("Vesti: Tactical", char_index)
+    assert res is not None
+    cid, name, _ = res
+    assert name == "Vesti: Tactical Upgrade"
+    assert cid == 11
+
+
+def test_match_alt_form_heavy_truncation(char_index: CharIndex):
+    """Heavily truncated alt-form ('Eunhwa: Tactic') still beats the base."""
+    res = match_character("Eunhwa: Tactic", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Eunhwa: Tactical Upgrade"
+
+
+def test_match_alt_form_multiple_words(char_index: CharIndex):
+    res = match_character("Soline: Frost Ti", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Soline: Frost Ticket"
+
+
+def test_match_alt_form_short_alt(char_index: CharIndex):
+    res = match_character("Maiden: Ice Rose", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Maiden: Ice Rose"
+
+
+def test_match_alt_form_anis_sparkling(char_index: CharIndex):
+    """`'Anis: Sparkling'` (truncated alt) must NOT regress to base 'Anis'."""
+    res = match_character("Anis: Sparkling", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Anis: Sparkling Summer"
+
+
+def test_base_name_stays_base_when_no_colon(char_index: CharIndex):
+    """`'Anis'` alone must still match base, not the alt."""
+    res = match_character("Anis", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Anis"
+
+
+def test_base_name_snow_white_stays_base(char_index: CharIndex):
+    res = match_character("Snow White", char_index)
+    assert res is not None
+    _, name, _ = res
+    assert name == "Snow White"

@@ -137,6 +137,33 @@ def ingest_tournaments(
             console.print(f"  · {err}")
 
 
+@app.command(name="rematch-tournament-characters")
+def rematch_tournament_characters(
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Re-run character matching on every stored tournament name extraction.
+
+    Fast (no PaddleOCR re-run): walks every ``*.name`` row in
+    ``PromoExtractedField``, scores the existing OCR ``text`` against
+    the current ``Character`` DB with the current matcher, and updates
+    ``character_id`` + ``character_match_score`` in place. Use after
+    changing ``match_character()`` to repair existing data without
+    paying the cost of a full ``ingest-tournaments --force-ocr``.
+    """
+    from sqlmodel import Session
+
+    from ..data.db import init_db, make_engine
+    from ..roster.promo_tournament_ocr import rematch_character_fields
+
+    engine = make_engine(db)
+    init_db(engine)
+    with Session(engine) as session:
+        examined, updated = rematch_character_fields(session)
+    console.print(
+        f"[bold green]Rematch complete[/]: examined={examined} updated={updated}"
+    )
+
+
 @app.command(name="pick-coords")
 def pick_coords(
     image: Optional[Path] = typer.Argument(
