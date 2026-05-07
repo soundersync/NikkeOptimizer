@@ -6,9 +6,10 @@ user's investment state. The remaining tables capture extracted screenshot data
 (OL gear pieces + bonuses, harmony cubes, character icons, arena fixtures).
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 from .enums import (
@@ -385,3 +386,102 @@ class ArenaMatch(SQLModel, table=True):
     # usernames where the simple username comparison fails.
     is_user_lineup: Optional[bool] = Field(default=None)
     captured_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Champions Arena — Promotion Tournament archive
+# ---------------------------------------------------------------------------
+# Distinct from ArenaMatch (which is row-per-screenshot for the live PvP
+# capture flow). Promotion Tournament has a hierarchical shape — 1
+# tournament → 8 groups → 3 round types → 4/2/1 matches → up to 12 source
+# images per match — that ArenaMatch can't model cleanly. Stored under
+# <repo>/captures/<YYYY-MM-DD>/promotion_tournament/<group>/<round>/<match>.
+# v1: structural ingest only; OCR + portrait matching land in a future
+# PromoExtractedField table.
+
+
+class PromoTournament(SQLModel, table=True):
+    __tablename__ = "promo_tournament"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    captured_at: datetime = Field(
+        index=True,
+        description="Full timestamp parsed from the staging folder name (YYYYMMDD_HHMMSS).",
+    )
+    capture_date: date = Field(
+        index=True,
+        description="Date portion of captured_at — the user's grouping key in the UI.",
+    )
+    storage_root: str = Field(
+        unique=True, index=True,
+        description="Absolute path under <repo>/captures/<date>/promotion_tournament/.",
+    )
+    source_root: Optional[str] = Field(
+        default=None,
+        description="Original staging path (for traceability after relocation).",
+    )
+    label: Optional[str] = Field(default=None, description="Optional user-supplied name")
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class PromoGroup(SQLModel, table=True):
+    __tablename__ = "promo_group"
+    __table_args__ = (
+        UniqueConstraint("tournament_id", "group_no", name="uq_promo_group_tour_no"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tournament_id: int = Field(foreign_key="promo_tournament.id", index=True)
+    group_no: int = Field(description="1..8")
+
+
+class PromoMatch(SQLModel, table=True):
+    __tablename__ = "promo_match"
+    __table_args__ = (
+        UniqueConstraint(
+            "tournament_id", "group_id", "round_label", "match_no",
+            name="uq_promo_match_natural",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    tournament_id: int = Field(foreign_key="promo_tournament.id", index=True)
+    group_id: int = Field(foreign_key="promo_group.id", index=True)
+    round_label: str = Field(
+        index=True,
+        description="'round_64' | 'top_32' | 'top_16'",
+    )
+    match_no: Optional[int] = Field(
+        default=None,
+        description="1..4 for round_64, 1..2 for top_32, NULL for top_16 single aggregated match.",
+    )
+    has_loadouts: bool = Field(
+        default=True,
+        description="False when only results/ exists (top_32 + top_16).",
+    )
+
+
+class PromoMatchScreenshot(SQLModel, table=True):
+    __tablename__ = "promo_match_screenshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "match_id", "kind", "side", "round_no",
+            name="uq_promo_screenshot_natural",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    match_id: int = Field(foreign_key="promo_match.id", index=True)
+    kind: str = Field(
+        index=True,
+        description="'player_loadout' | 'results_overview' | 'results_duel'",
+    )
+    side: Optional[str] = Field(
+        default=None,
+        description="'top' | 'bottom' for loadouts; NULL for results_*",
+    )
+    round_no: Optional[int] = Field(
+        default=None,
+        description="1..5 for player_loadout and results_duel; NULL for results_overview.",
+    )
+    file_path: str = Field(description="Absolute path on disk under storage_root.")

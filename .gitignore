@@ -17,3 +17,9 @@ data/raw/
 # Ad-hoc debug crops produced by `nikkecopilot crop-tool` and the
 # arena-extractor diagnostic scripts. Keep out of git history.
 /debug/
+
+# Tournament screenshot archive (per-user data, can be GBs).
+# Source captures land in /champion_arena and are relocated by
+# `nikkeoptimizer ingest-tournaments` into /captures.
+/captures/
+/champion_arena/

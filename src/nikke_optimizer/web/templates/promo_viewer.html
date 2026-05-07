@@ -1,0 +1,241 @@
+{% extends "_base.html" %}
+{% block title %}Screenshot {{ screenshot.id }} — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+
+.viewer-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+.viewer-header h1 { margin: 0; font-size: 18px; }
+.viewer-header .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    background: #14161b;
+    color: #f87171;
+    border-radius: 999px;
+    font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.viewer-header .actions { margin-left: auto; }
+.viewer-header .actions a {
+    display: inline-block;
+    padding: 4px 10px;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 4px;
+    color: #d1d5db;
+    font-size: 12px;
+    text-decoration: none;
+}
+.viewer-header .actions a:hover { border-color: #3a4250; color: #f87171; }
+
+.viewer-page {
+    display: flex;
+    gap: 28px;
+    align-items: flex-start;
+}
+.left-pane {
+    flex: 0 1 540px;
+    position: sticky;
+    top: 16px;
+    align-self: flex-start;
+}
+.left-stage {
+    position: relative;
+    background: #0a0b0e;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    line-height: 0;
+}
+.left-stage img {
+    display: block;
+    width: 100%;
+    height: auto;
+    user-select: none;
+}
+.hl {
+    position: absolute;
+    border: 2px solid #f87171;
+    background: rgba(248, 113, 113, 0.12);
+    box-sizing: border-box;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.06s ease;
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+}
+.hl.visible { opacity: 1; }
+.left-meta { font-size: 11px; color: #6b7280; margin-top: 8px; line-height: 1.6; }
+.left-meta code { background: #14161b; padding: 1px 5px; border-radius: 3px; }
+
+.right-pane { flex: 1 1 auto; min-width: 0; }
+.right-pane h2 {
+    font-size: 13px; font-weight: 600;
+    color: #d1d5db;
+    margin: 0 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1f2228;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.right-pane .group-section { margin-bottom: 22px; }
+
+.region-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 10px;
+    margin: 0 0 4px;
+    background: #14161b;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    cursor: default;
+    transition: border-color 0.06s ease, background 0.06s ease;
+}
+.region-row:hover {
+    border-color: #f87171;
+    background: #181b21;
+}
+.region-row .thumb {
+    flex: 0 0 auto;
+    background-color: #0a0b0e;
+    background-repeat: no-repeat;
+    border: 1px solid #2a2f38;
+    border-radius: 3px;
+}
+.region-row .text { flex: 1 1 auto; min-width: 0; }
+.region-row .label {
+    color: #e5e7eb;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 2px;
+}
+.region-row .meta {
+    color: #6b7280;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 10px;
+}
+.region-row .meta .slug { color: #9ca3af; }
+</style>
+
+<div class="crumb">
+    <a href="/promo">Tournaments</a>
+    {% if tournament %}/ <a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a>{% endif %}
+    {% if group %}/ <a href="/promo/{{ tournament.id }}/groups/{{ group.group_no }}">Group {{ group.group_no }}</a>{% endif %}
+    {% if match %}/ <a href="/promo/{{ tournament.id }}/matches/{{ match.id }}">{% if match.match_no %}Match {{ match.match_no }}{% else %}Final{% endif %}</a> /{% endif %}
+</div>
+
+<div class="viewer-header">
+    <h1>
+        {% if screenshot.kind == "player_loadout" %}
+            Player {{ screenshot.side|capitalize }} — Round {{ screenshot.round_no }}
+        {% elif screenshot.kind == "results_overview" %}
+            Match Overview
+        {% else %}
+            Round {{ screenshot.round_no }} Results
+        {% endif %}
+    </h1>
+    <span class="pill">{{ screenshot.kind }}</span>
+    <span class="actions">
+        <a href="/promo/screenshots/{{ screenshot.id }}/overlay">All-bbox overlay →</a>
+    </span>
+</div>
+
+<div class="viewer-page">
+    <div class="left-pane">
+        <div class="left-stage" id="stage">
+            <img src="{{ image_url }}" alt="source screenshot">
+            <div class="hl" id="hl"></div>
+        </div>
+        <div class="left-meta">
+            <code>{{ ref_w }}×{{ ref_h }}</code> · {{ regions|length }} regions ·
+            hover a row to highlight on the source.
+        </div>
+    </div>
+
+    <div class="right-pane">
+        {% set ns = namespace(current_group=None) %}
+        {% for r in regions %}
+            {% if r.group != ns.current_group %}
+                {% if ns.current_group is not none %}
+                    </div>
+                {% endif %}
+                {% set ns.current_group = r.group %}
+                <div class="group-section">
+                <h2>
+                    {% if r.group == "header" %}Header
+                    {% elif r.group and r.group.startswith("char") %}Character {{ r.group[4:] }}
+                    {% elif r.group and "char" in r.group %}{{ r.group.split(".")[0]|capitalize }} · Char {{ r.group.split(".")[1][4:] }}
+                    {% elif r.group and r.group.startswith("round") %}{{ r.group|capitalize }}
+                    {% else %}{{ r.group or "Other" }}
+                    {% endif %}
+                </h2>
+            {% endif %}
+
+            {% set x1, y1, x2, y2 = r.bbox %}
+            {% set bw = x2 - x1 %}
+            {% set bh = y2 - y1 %}
+            {# Scale each thumbnail so it fits in 240w × 110h while
+               preserving the bbox aspect ratio.                       #}
+            {% set scale_w = 240 / bw if bw > 0 else 1 %}
+            {% set scale_h = 110 / bh if bh > 0 else 1 %}
+            {% set scale = scale_w if scale_w < scale_h else scale_h %}
+            {% if scale > 2.0 %}{% set scale = 2.0 %}{% endif %}
+            {% set tw = (bw * scale)|round(0, 'common')|int %}
+            {% set th = (bh * scale)|round(0, 'common')|int %}
+            {% set bg_w = (ref_w * scale)|round(0, 'common')|int %}
+            {% set bg_h = (ref_h * scale)|round(0, 'common')|int %}
+            {% set bg_x = -1 * (x1 * scale)|round(0, 'common')|int %}
+            {% set bg_y = -1 * (y1 * scale)|round(0, 'common')|int %}
+            <div class="region-row"
+                 data-x1="{{ x1 }}" data-y1="{{ y1 }}"
+                 data-x2="{{ x2 }}" data-y2="{{ y2 }}">
+                <div class="thumb"
+                     style="width: {{ tw }}px; height: {{ th }}px;
+                            background-image: url('{{ image_url }}');
+                            background-size: {{ bg_w }}px {{ bg_h }}px;
+                            background-position: {{ bg_x }}px {{ bg_y }}px;"></div>
+                <div class="text">
+                    <div class="label">{{ r.label }}</div>
+                    <div class="meta">
+                        <span class="slug">{{ r.slug }}</span>
+                        · ({{ x1 }}, {{ y1 }}, {{ x2 }}, {{ y2 }})
+                        · {{ bw }}×{{ bh }}
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+        {% if ns.current_group is not none %}
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+// Hover a region row → draw a red bbox over the same region on the
+// left pane. Coords are in image-pixel space; we use percentages so
+// the highlight scales with the displayed image.
+(function () {
+    const refW = {{ ref_w }};
+    const refH = {{ ref_h }};
+    const hl = document.getElementById("hl");
+    const rows = document.querySelectorAll(".region-row");
+    rows.forEach((row) => {
+        row.addEventListener("mouseenter", () => {
+            const x1 = +row.dataset.x1, y1 = +row.dataset.y1;
+            const x2 = +row.dataset.x2, y2 = +row.dataset.y2;
+            hl.style.left = (x1 / refW * 100) + "%";
+            hl.style.top = (y1 / refH * 100) + "%";
+            hl.style.width = ((x2 - x1) / refW * 100) + "%";
+            hl.style.height = ((y2 - y1) / refH * 100) + "%";
+            hl.classList.add("visible");
+        });
+        row.addEventListener("mouseleave", () => {
+            hl.classList.remove("visible");
+        });
+    });
+})();
+</script>
+
+{% endblock %}

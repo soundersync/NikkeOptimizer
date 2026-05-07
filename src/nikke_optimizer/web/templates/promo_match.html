@@ -1,0 +1,142 @@
+{% extends "_base.html" %}
+{% block title %}Match — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+h1 { margin: 0 0 4px; }
+.subhead { color: #9ca3af; margin-bottom: 24px; font-size: 13px; }
+.subhead .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    background: #14161b;
+    color: #f87171;
+    border-radius: 999px;
+    font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+    margin-left: 6px;
+}
+
+.section { margin-bottom: 26px; }
+.section h2 {
+    font-size: 14px; font-weight: 600;
+    color: #e5e7eb;
+    margin: 0 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1f2228;
+    display: flex; align-items: baseline; gap: 10px;
+}
+.section h2 .count {
+    font-size: 11px; color: #6b7280;
+    font-family: "SF Mono", Menlo, monospace; font-weight: 400;
+}
+
+.shot-grid {
+    display: grid; gap: 10px;
+}
+.shot-grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.shot-grid.cols-1 { grid-template-columns: minmax(220px, 280px); }
+
+.shot-card {
+    display: flex; flex-direction: column;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    text-decoration: none; color: inherit;
+    transition: border-color 0.1s ease;
+}
+.shot-card:hover { border-color: #f87171; }
+.shot-thumb {
+    aspect-ratio: 1510 / 2013;
+    background: #0a0b0e;
+    overflow: hidden;
+}
+.shot-thumb img {
+    width: 100%; height: 100%;
+    object-fit: cover; object-position: center top;
+    display: block;
+}
+.shot-card .label {
+    padding: 6px 8px;
+    font-size: 11px; color: #d1d5db;
+    text-align: center;
+    border-top: 1px solid #1f2228;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.empty-section { color: #6b7280; font-size: 12px; font-style: italic; }
+</style>
+
+<div class="crumb">
+    <a href="/promo">Tournaments</a> /
+    <a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a> /
+    <a href="/promo/{{ tournament.id }}/groups/{{ group.group_no }}">Group {{ group.group_no }}</a> /
+</div>
+<h1>
+    {% if match.match_no %}Match {{ match.match_no }}{% else %}Final{% endif %}
+</h1>
+<div class="subhead">
+    {{ match.round_label.replace("_", " ") }}
+    <span class="pill">{% if match.has_loadouts %}with loadouts{% else %}results-only{% endif %}</span>
+</div>
+
+{% if match.has_loadouts %}
+<section class="section">
+    <h2>Player Top — Loadouts <span class="count">{{ buckets.player_top|length }} rounds</span></h2>
+    {% if buckets.player_top %}
+    <div class="shot-grid cols-5">
+        {% for s in buckets.player_top %}
+        <a class="shot-card" href="/promo/screenshots/{{ s.row.id }}">
+            <div class="shot-thumb">{% if s.url %}<img src="{{ s.url }}" alt="round {{ s.row.round_no }}">{% endif %}</div>
+            <div class="label">Round {{ s.row.round_no }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}<div class="empty-section">No loadouts captured.</div>{% endif %}
+</section>
+
+<section class="section">
+    <h2>Player Bottom — Loadouts <span class="count">{{ buckets.player_bottom|length }} rounds</span></h2>
+    {% if buckets.player_bottom %}
+    <div class="shot-grid cols-5">
+        {% for s in buckets.player_bottom %}
+        <a class="shot-card" href="/promo/screenshots/{{ s.row.id }}">
+            <div class="shot-thumb">{% if s.url %}<img src="{{ s.url }}" alt="round {{ s.row.round_no }}">{% endif %}</div>
+            <div class="label">Round {{ s.row.round_no }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}<div class="empty-section">No loadouts captured.</div>{% endif %}
+</section>
+{% endif %}
+
+<section class="section">
+    <h2>Match Overview <span class="count">{{ buckets.results_overview|length }}</span></h2>
+    {% if buckets.results_overview %}
+    <div class="shot-grid cols-1">
+        {% for s in buckets.results_overview %}
+        <a class="shot-card" href="/promo/screenshots/{{ s.row.id }}">
+            <div class="shot-thumb">{% if s.url %}<img src="{{ s.url }}" alt="overview">{% endif %}</div>
+            <div class="label">Overview</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}<div class="empty-section">No overview captured.</div>{% endif %}
+</section>
+
+<section class="section">
+    <h2>Round Results <span class="count">{{ buckets.results_duel|length }} rounds</span></h2>
+    {% if buckets.results_duel %}
+    <div class="shot-grid cols-5">
+        {% for s in buckets.results_duel %}
+        <a class="shot-card" href="/promo/screenshots/{{ s.row.id }}">
+            <div class="shot-thumb">{% if s.url %}<img src="{{ s.url }}" alt="duel {{ s.row.round_no }}">{% endif %}</div>
+            <div class="label">Round {{ s.row.round_no }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}<div class="empty-section">No round results captured.</div>{% endif %}
+</section>
+
+{% endblock %}

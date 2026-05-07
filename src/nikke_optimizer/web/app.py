@@ -27,8 +27,22 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import select
 
 from ..data.db import default_db_path, get_session, init_db, make_engine
-from ..data.models import ArenaMatch, Character, Cube, OwnedCharacter
+from ..data.models import (
+    ArenaMatch,
+    Character,
+    Cube,
+    OwnedCharacter,
+    PromoGroup,
+    PromoMatch,
+    PromoMatchScreenshot,
+    PromoTournament,
+)
 from ..roster.portrait_matcher import PortraitMatcher
+from ..roster.promo_tournament_regions import (
+    KINDS as PROMO_KINDS,
+    REFERENCE_IMAGE_SIZE as PROMO_REF_SIZE,
+    regions_for_kind as promo_regions_for_kind,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +76,17 @@ def create_app(
     templates.env.filters["synergy_notes"] = _synergy_notes
     templates.env.filters["other_notes"] = _other_notes
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # Promotion-tournament archive — served as static files. The mount
+    # root is the canonical archive at <repo>/captures (created on
+    # demand so the mount succeeds even before the first ingest).
+    _PROMO_ROOT = Path(__file__).resolve().parents[3] / "captures"
+    _PROMO_ROOT.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/promo-images",
+        StaticFiles(directory=str(_PROMO_ROOT)),
+        name="promo-images",
+    )
 
     engine = make_engine(db_path)
     init_db(engine)
@@ -1962,6 +1987,255 @@ def create_app(
                 "role": role,
                 "min_power": min_power,
                 "char_names": char_names,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Promotion Tournament archive browser
+    # ------------------------------------------------------------------
+
+    def _promo_image_url(file_path: str) -> Optional[str]:
+        """Map an absolute screenshot path to its /promo-images URL."""
+        try:
+            rel = Path(file_path).resolve().relative_to(_PROMO_ROOT)
+        except (ValueError, OSError):
+            return None
+        return "/promo-images/" + rel.as_posix()
+
+    def _promo_match_thumb_url(session, match_id: int) -> Optional[str]:
+        """URL of a representative screenshot for a match — used as a tile thumbnail.
+
+        Prefers ``results_overview`` (most recognizable), falls back to
+        any other screenshot in the match.
+        """
+        shots = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.match_id == match_id
+            )
+        ).all()
+        if not shots:
+            return None
+        for s in shots:
+            if s.kind == "results_overview":
+                return _promo_image_url(s.file_path)
+        return _promo_image_url(shots[0].file_path)
+
+    @app.get("/promo", response_class=HTMLResponse)
+    def promo_index(request: Request) -> Response:
+        """Capture dates → tournaments grid."""
+        with get_session(engine) as session:
+            tournaments = session.exec(
+                select(PromoTournament).order_by(
+                    PromoTournament.capture_date.desc(),
+                    PromoTournament.captured_at.desc(),
+                )
+            ).all()
+            # Counts per tournament for the tile labels.
+            t_meta = []
+            for t in tournaments:
+                n_matches = len(
+                    session.exec(
+                        select(PromoMatch).where(PromoMatch.tournament_id == t.id)
+                    ).all()
+                )
+                n_groups = len(
+                    session.exec(
+                        select(PromoGroup).where(PromoGroup.tournament_id == t.id)
+                    ).all()
+                )
+                t_meta.append({
+                    "row": t,
+                    "n_matches": n_matches,
+                    "n_groups": n_groups,
+                })
+            # Group meta by date for header sections.
+            by_date: dict[str, list] = {}
+            for m in t_meta:
+                key = m["row"].capture_date.isoformat()
+                by_date.setdefault(key, []).append(m)
+        return templates.TemplateResponse(
+            request,
+            "promo_index.html",
+            {"by_date": by_date, "n_tournaments": len(tournaments)},
+        )
+
+    @app.get("/promo/{tournament_id}", response_class=HTMLResponse)
+    def promo_tournament(request: Request, tournament_id: int) -> Response:
+        with get_session(engine) as session:
+            tournament = session.get(PromoTournament, tournament_id)
+            if tournament is None:
+                raise HTTPException(404, f"tournament {tournament_id} not found")
+            groups = session.exec(
+                select(PromoGroup)
+                .where(PromoGroup.tournament_id == tournament_id)
+                .order_by(PromoGroup.group_no)
+            ).all()
+            group_meta = []
+            for g in groups:
+                n_matches = len(
+                    session.exec(
+                        select(PromoMatch).where(PromoMatch.group_id == g.id)
+                    ).all()
+                )
+                group_meta.append({"row": g, "n_matches": n_matches})
+        return templates.TemplateResponse(
+            request,
+            "promo_tournament.html",
+            {"tournament": tournament, "groups": group_meta},
+        )
+
+    @app.get("/promo/{tournament_id}/groups/{group_no}", response_class=HTMLResponse)
+    def promo_group(request: Request, tournament_id: int, group_no: int) -> Response:
+        with get_session(engine) as session:
+            tournament = session.get(PromoTournament, tournament_id)
+            if tournament is None:
+                raise HTTPException(404, f"tournament {tournament_id} not found")
+            group = session.exec(
+                select(PromoGroup).where(
+                    PromoGroup.tournament_id == tournament_id,
+                    PromoGroup.group_no == group_no,
+                )
+            ).first()
+            if group is None:
+                raise HTTPException(
+                    404, f"group {group_no} not found in tournament {tournament_id}"
+                )
+            matches = session.exec(
+                select(PromoMatch)
+                .where(PromoMatch.group_id == group.id)
+                .order_by(PromoMatch.round_label, PromoMatch.match_no)
+            ).all()
+            sections: dict[str, list] = {"round_64": [], "top_32": [], "top_16": []}
+            for m in matches:
+                thumb = _promo_match_thumb_url(session, m.id)
+                if m.round_label in sections:
+                    sections[m.round_label].append({"row": m, "thumb": thumb})
+        return templates.TemplateResponse(
+            request,
+            "promo_group.html",
+            {"tournament": tournament, "group": group, "sections": sections},
+        )
+
+    @app.get("/promo/{tournament_id}/matches/{match_id}", response_class=HTMLResponse)
+    def promo_match(
+        request: Request, tournament_id: int, match_id: int
+    ) -> Response:
+        with get_session(engine) as session:
+            match = session.get(PromoMatch, match_id)
+            if match is None or match.tournament_id != tournament_id:
+                raise HTTPException(404, f"match {match_id} not found")
+            tournament = session.get(PromoTournament, tournament_id)
+            group = session.get(PromoGroup, match.group_id)
+            shots = session.exec(
+                select(PromoMatchScreenshot)
+                .where(PromoMatchScreenshot.match_id == match_id)
+                .order_by(
+                    PromoMatchScreenshot.kind,
+                    PromoMatchScreenshot.side,
+                    PromoMatchScreenshot.round_no,
+                )
+            ).all()
+            buckets: dict[str, list] = {
+                "player_top": [],
+                "player_bottom": [],
+                "results_overview": [],
+                "results_duel": [],
+            }
+            for s in shots:
+                key = s.kind
+                if s.kind == "player_loadout":
+                    key = f"player_{s.side}"
+                if key in buckets:
+                    buckets[key].append({
+                        "row": s,
+                        "url": _promo_image_url(s.file_path),
+                    })
+        return templates.TemplateResponse(
+            request,
+            "promo_match.html",
+            {
+                "tournament": tournament,
+                "group": group,
+                "match": match,
+                "buckets": buckets,
+            },
+        )
+
+    @app.get("/promo/screenshots/{screenshot_id}", response_class=HTMLResponse)
+    def promo_screenshot_viewer(request: Request, screenshot_id: int) -> Response:
+        """Double-pane viewer: original on left, labeled crops on right.
+
+        Hovering a crop on the right highlights its bbox over the
+        original on the left.
+        """
+        with get_session(engine) as session:
+            screenshot = session.get(PromoMatchScreenshot, screenshot_id)
+            if screenshot is None:
+                raise HTTPException(404, f"screenshot {screenshot_id} not found")
+            match = session.get(PromoMatch, screenshot.match_id)
+            tournament = (
+                session.get(PromoTournament, match.tournament_id) if match else None
+            )
+            group = session.get(PromoGroup, match.group_id) if match else None
+        url = _promo_image_url(screenshot.file_path)
+        if url is None:
+            raise HTTPException(
+                404,
+                f"image not under {_PROMO_ROOT}: {screenshot.file_path}",
+            )
+        regions = promo_regions_for_kind(screenshot.kind)
+        ref_w, ref_h = PROMO_REF_SIZE
+        return templates.TemplateResponse(
+            request,
+            "promo_viewer.html",
+            {
+                "screenshot": screenshot,
+                "match": match,
+                "group": group,
+                "tournament": tournament,
+                "image_url": url,
+                "regions": regions,
+                "ref_w": ref_w,
+                "ref_h": ref_h,
+            },
+        )
+
+    @app.get("/promo/screenshots/{screenshot_id}/overlay", response_class=HTMLResponse)
+    def promo_screenshot_overlay(request: Request, screenshot_id: int) -> Response:
+        """Verification page: every region drawn over the source image.
+
+        Used to spot misaligned coords before building the rest of the
+        UI. ``promo_regions_for_kind(kind)`` selects the schema that
+        applies to this screenshot's ``kind``.
+        """
+        with get_session(engine) as session:
+            screenshot = session.get(PromoMatchScreenshot, screenshot_id)
+            if screenshot is None:
+                raise HTTPException(404, f"screenshot {screenshot_id} not found")
+            match = session.get(PromoMatch, screenshot.match_id)
+            tournament = (
+                session.get(PromoTournament, match.tournament_id) if match else None
+            )
+        url = _promo_image_url(screenshot.file_path)
+        if url is None:
+            raise HTTPException(
+                404,
+                f"image not under {_PROMO_ROOT}: {screenshot.file_path}",
+            )
+        regions = promo_regions_for_kind(screenshot.kind)
+        ref_w, ref_h = PROMO_REF_SIZE
+        return templates.TemplateResponse(
+            request,
+            "promo_overlay.html",
+            {
+                "screenshot": screenshot,
+                "match": match,
+                "tournament": tournament,
+                "image_url": url,
+                "regions": regions,
+                "ref_w": ref_w,
+                "ref_h": ref_h,
+                "kinds": PROMO_KINDS,
             },
         )
 

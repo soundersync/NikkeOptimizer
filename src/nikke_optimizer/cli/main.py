@@ -77,6 +77,83 @@ def crop_tool(
     run(image)
 
 
+@app.command(name="ingest-tournaments")
+def ingest_tournaments(
+    staging: Path = typer.Option(
+        Path("champion_arena"),
+        "--staging",
+        help="Staging dir holding promotion_tournament_* folders.",
+    ),
+    archive: Optional[Path] = typer.Option(
+        None,
+        "--archive",
+        help="Archive root (defaults to <staging>/../captures).",
+    ),
+    move: bool = typer.Option(
+        False, "--move",
+        help="Delete staging files after a successful copy + size match.",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Allow a second tournament on a date already populated (suffixes _2, _3, ...).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Relocate promotion_tournament_* folders into the archive and persist DB rows.
+
+    Walks every ``promotion_tournament_<TS>`` folder under ``--staging``,
+    copies (or with ``--move``, moves) the source PNGs into
+    ``<archive>/<YYYY-MM-DD>/promotion_tournament/<group>/<round>/<match>/``,
+    skips coord-picker leftovers (``__crop.png`` / ``__masked.png``),
+    then upserts PromoTournament / PromoGroup / PromoMatch /
+    PromoMatchScreenshot rows. Idempotent — safe to re-run.
+    """
+    from ..roster.promo_tournament_ingest import ingest_root
+
+    if not staging.is_dir():
+        console.print(f"[yellow]Staging dir not found: {staging}[/]")
+        # Still proceed — the ingest will pick up archive-only folders.
+    stats = ingest_root(
+        staging_root=staging,
+        archive_root=archive,
+        move=move,
+        force=force,
+        db_path=db,
+    )
+    console.print(f"[bold green]Ingest complete[/]: {stats}")
+    if stats.errors:
+        console.print("[red]Errors:[/]")
+        for err in stats.errors:
+            console.print(f"  · {err}")
+
+
+@app.command(name="pick-coords")
+def pick_coords(
+    image: Optional[Path] = typer.Argument(
+        None,
+        help="Optional path to an image to load at startup (otherwise drag-drop into the window).",
+    ),
+) -> None:
+    """Visual coord-picker — drop image, click 2 corners, save crop + masked PNG.
+
+    Sister to ``crop-tool``. Where ``crop-tool`` writes fractional region
+    constants for the codebase's runtime crop boxes, this writes
+    *absolute pixel* outputs alongside the source image:
+
+      ``<stem>__x1_y1_x2_y2__crop.png``    just the selected region
+      ``<stem>__x1_y1_x2_y2__masked.png``  full size, rest blacked out
+
+    Coordinates ``(x1, y1, x2, y2)`` also land on the clipboard. Built
+    on PySide6 — supports trackpad pinch-zoom and drag-pan.
+    """
+    from ..tools.coord_picker import run
+
+    if image is not None and not image.is_file():
+        console.print(f"[red]Image not found:[/] {image}")
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=run(image))
+
+
 @app.command()
 def ga(
     db: Optional[Path] = typer.Option(None, help="Override DB path"),

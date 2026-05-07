@@ -1,0 +1,65 @@
+{% extends "_base.html" %}
+{% block title %}Tournament {{ tournament.capture_date }} — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+.tour-header { margin-bottom: 22px; }
+.tour-header h1 { margin: 0 0 4px; }
+.tour-header .meta { font-size: 13px; color: #9ca3af; }
+.tour-header .meta code {
+    background: #14161b; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+}
+.group-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+}
+.group-card {
+    display: flex; flex-direction: column;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 18px 18px 14px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.1s ease, background 0.1s ease;
+}
+.group-card:hover { border-color: #3a4250; background: #181b21; }
+.group-card .num {
+    font-size: 28px;
+    font-weight: 700;
+    color: #f87171;
+    line-height: 1;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.group-card .label {
+    margin-top: 4px;
+    font-size: 11px; color: #9ca3af;
+    text-transform: uppercase; letter-spacing: 0.05em;
+}
+.group-card .matches { margin-top: 12px; font-size: 12px; color: #d1d5db; }
+</style>
+
+<div class="crumb"><a href="/promo">Tournaments</a> /</div>
+<div class="tour-header">
+    <h1>Promotion Tournament — {{ tournament.capture_date }}</h1>
+    <div class="meta">
+        Captured at <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
+        · {{ groups|length }} groups
+    </div>
+</div>
+
+<div class="group-grid">
+    {% for g in groups %}
+    <a class="group-card" href="/promo/{{ tournament.id }}/groups/{{ g.row.group_no }}">
+        <span class="num">{{ "%02d"|format(g.row.group_no) }}</span>
+        <span class="label">Group</span>
+        <div class="matches">{{ g.n_matches }} matches</div>
+    </a>
+    {% endfor %}
+</div>
+
+{% endblock %}

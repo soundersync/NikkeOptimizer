@@ -1,0 +1,145 @@
+{% extends "_base.html" %}
+{% block title %}Coord overlay — screenshot {{ screenshot.id }}{% endblock %}
+{% block body %}
+
+<style>
+.overlay-page { display: flex; gap: 24px; align-items: flex-start; }
+.overlay-stage {
+    position: relative;
+    flex: 1 1 auto;
+    background: #0a0b0e;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    line-height: 0;
+}
+.overlay-stage img {
+    display: block;
+    width: 100%;
+    height: auto;
+    user-select: none;
+}
+.overlay-stage .bbox {
+    position: absolute;
+    border: 2px solid #f87171;
+    box-sizing: border-box;
+    pointer-events: auto;
+    transition: background 0.08s ease;
+}
+.overlay-stage .bbox:hover {
+    background: rgba(248, 113, 113, 0.18);
+    border-color: #fde68a;
+    z-index: 5;
+}
+.overlay-stage .bbox .tag {
+    position: absolute;
+    top: -1.4em;
+    left: -2px;
+    font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    background: rgba(15, 17, 21, 0.92);
+    color: #f87171;
+    padding: 1px 4px;
+    border-radius: 2px;
+    white-space: nowrap;
+    pointer-events: none;
+}
+.overlay-stage .bbox:hover .tag {
+    color: #fde68a;
+}
+.overlay-side {
+    flex: 0 0 320px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+.overlay-side h2 { font-size: 14px; margin: 0 0 8px; color: #d1d5db; }
+.overlay-side .meta {
+    font-size: 12px; color: #9ca3af; margin-bottom: 12px;
+    line-height: 1.5;
+}
+.overlay-side .meta code {
+    background: #14161b; padding: 0 4px; border-radius: 2px;
+}
+.region-list { list-style: none; padding: 0; margin: 0; }
+.region-list li {
+    display: flex; justify-content: space-between;
+    padding: 4px 6px; font-size: 12px;
+    border-bottom: 1px solid #1f2228;
+}
+.region-list li:hover { background: #14161b; }
+.region-list .slug {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #9ca3af; font-size: 11px;
+}
+.region-list .label { color: #e5e7eb; }
+.kind-pill {
+    display: inline-block; padding: 2px 8px;
+    background: #14161b; color: #f87171;
+    border-radius: 999px; font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+}
+</style>
+
+<h1 style="margin-bottom: 4px;">Coord overlay</h1>
+<p class="muted">
+    {% if tournament %}<a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a> ·
+    {% endif %}
+    {% if match %}group {{ match.group_id }} · {{ match.round_label }}{% if match.match_no %} · match {{ match.match_no }}{% endif %} · {% endif %}
+    <span class="kind-pill">{{ screenshot.kind }}</span>
+    {% if screenshot.side %}· side {{ screenshot.side }}{% endif %}
+    {% if screenshot.round_no %}· round {{ screenshot.round_no }}{% endif %}
+</p>
+
+<div class="overlay-page">
+    <div class="overlay-stage" id="stage">
+        <img src="{{ image_url }}" alt="source screenshot">
+        {% for r in regions %}
+        {% set x1, y1, x2, y2 = r.bbox %}
+        <div class="bbox"
+             style="left: {{ (x1 / ref_w * 100) }}%; top: {{ (y1 / ref_h * 100) }}%; width: {{ ((x2 - x1) / ref_w * 100) }}%; height: {{ ((y2 - y1) / ref_h * 100) }}%;"
+             data-slug="{{ r.slug }}">
+            <span class="tag">{{ r.slug }}</span>
+        </div>
+        {% endfor %}
+    </div>
+    <aside class="overlay-side">
+        <h2>{{ regions|length }} regions</h2>
+        <p class="meta">
+            Source: <code>{{ ref_w }}×{{ ref_h }}</code><br>
+            File: <code>{{ screenshot.file_path.split('/')[-1] }}</code><br>
+            Bboxes outlined in red. Hover one to highlight.
+        </p>
+        <ul class="region-list">
+            {% for r in regions %}
+            <li data-target-slug="{{ r.slug }}">
+                <span class="label">{{ r.label }}</span>
+                <span class="slug">{{ r.slug }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </aside>
+</div>
+
+<script>
+// Sidebar row hover highlights the matching bbox on the stage.
+(function() {
+    const stage = document.getElementById("stage");
+    const rows = document.querySelectorAll(".region-list li");
+    rows.forEach((row) => {
+        const slug = row.dataset.targetSlug;
+        const bbox = stage.querySelector(`.bbox[data-slug="${CSS.escape(slug)}"]`);
+        if (!bbox) return;
+        row.addEventListener("mouseenter", () => {
+            bbox.style.background = "rgba(248, 113, 113, 0.28)";
+            bbox.style.borderColor = "#fde68a";
+            bbox.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+        });
+        row.addEventListener("mouseleave", () => {
+            bbox.style.background = "";
+            bbox.style.borderColor = "";
+        });
+    });
+})();
+</script>
+
+{% endblock %}

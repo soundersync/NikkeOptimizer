@@ -1,0 +1,85 @@
+{% extends "_base.html" %}
+{% block title %}Tournaments — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.promo-page h1 { margin-bottom: 4px; }
+.promo-page .lead { color: #9ca3af; margin-bottom: 24px; font-size: 13px; }
+.date-section { margin-bottom: 28px; }
+.date-section h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+    color: #e5e7eb;
+    font-weight: 600;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1f2228;
+}
+.tournament-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+}
+.tournament-card {
+    display: block;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 14px 16px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.1s ease, background 0.1s ease;
+}
+.tournament-card:hover {
+    border-color: #3a4250;
+    background: #181b21;
+}
+.tournament-card .label {
+    font-size: 13px; color: #e5e7eb; font-weight: 600;
+    margin-bottom: 6px;
+}
+.tournament-card .meta {
+    font-size: 11px; color: #9ca3af;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.tournament-card .stats {
+    margin-top: 10px;
+    display: flex; gap: 14px;
+    font-size: 12px; color: #d1d5db;
+}
+.tournament-card .stats span strong { color: #f87171; }
+.empty {
+    color: #6b7280; padding: 40px 0; text-align: center;
+    border: 1px dashed #1f2228; border-radius: 8px;
+}
+</style>
+
+<div class="promo-page">
+<h1>Tournaments</h1>
+<p class="lead">{{ n_tournaments }} captured · grouped by date · drill down to matches and per-screenshot crops.</p>
+
+{% if not by_date %}
+<div class="empty">
+    No tournaments captured yet. Run <code>nikkeoptimizer ingest-tournaments</code>.
+</div>
+{% else %}
+{% for date_str, items in by_date.items() %}
+<section class="date-section">
+    <h2>{{ date_str }}</h2>
+    <div class="tournament-grid">
+        {% for item in items %}
+        <a class="tournament-card" href="/promo/{{ item.row.id }}">
+            <div class="label">Promotion Tournament</div>
+            <div class="meta">{{ item.row.captured_at.strftime("%H:%M:%S") }} UTC</div>
+            <div class="stats">
+                <span><strong>{{ item.n_groups }}</strong> groups</span>
+                <span><strong>{{ item.n_matches }}</strong> matches</span>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+</section>
+{% endfor %}
+{% endif %}
+</div>
+
+{% endblock %}
