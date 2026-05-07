@@ -38,6 +38,11 @@ from ..data.models import (
     PromoTournament,
 )
 from ..roster.portrait_matcher import PortraitMatcher
+from ..roster.promo_tournament_ingest import (
+    FORMAT_DUEL,
+    FORMAT_PROMO,
+    tournament_format,
+)
 from ..roster.promo_tournament_regions import (
     KINDS as PROMO_KINDS,
     REFERENCE_IMAGE_SIZE as PROMO_REF_SIZE,
@@ -2020,9 +2025,12 @@ def create_app(
                 return _promo_image_url(s.file_path)
         return _promo_image_url(shots[0].file_path)
 
+    _DUEL_ROUND_LABELS = ("quarterfinals", "semifinals", "finals")
+    _PROMO_ROUND_LABELS = ("round_64", "top_32", "top_16")
+
     @app.get("/promo", response_class=HTMLResponse)
     def promo_index(request: Request) -> Response:
-        """Capture dates → tournaments grid."""
+        """Capture dates → tournaments grid (mixed formats)."""
         with get_session(engine) as session:
             tournaments = session.exec(
                 select(PromoTournament).order_by(
@@ -2030,7 +2038,6 @@ def create_app(
                     PromoTournament.captured_at.desc(),
                 )
             ).all()
-            # Counts per tournament for the tile labels.
             t_meta = []
             for t in tournaments:
                 n_matches = len(
@@ -2045,10 +2052,10 @@ def create_app(
                 )
                 t_meta.append({
                     "row": t,
+                    "format": tournament_format(t.storage_root),
                     "n_matches": n_matches,
                     "n_groups": n_groups,
                 })
-            # Group meta by date for header sections.
             by_date: dict[str, list] = {}
             for m in t_meta:
                 key = m["row"].capture_date.isoformat()
@@ -2061,28 +2068,50 @@ def create_app(
 
     @app.get("/promo/{tournament_id}", response_class=HTMLResponse)
     def promo_tournament(request: Request, tournament_id: int) -> Response:
+        """Tournament landing page.
+
+        Promo tournaments show 8 group tiles. Champions duel has no
+        groups — the page shows three round sections (QF / SF / Final)
+        with match tiles directly, identical in layout to a promo
+        group page.
+        """
         with get_session(engine) as session:
             tournament = session.get(PromoTournament, tournament_id)
             if tournament is None:
                 raise HTTPException(404, f"tournament {tournament_id} not found")
-            groups = session.exec(
-                select(PromoGroup)
-                .where(PromoGroup.tournament_id == tournament_id)
-                .order_by(PromoGroup.group_no)
-            ).all()
-            group_meta = []
-            for g in groups:
-                n_matches = len(
-                    session.exec(
-                        select(PromoMatch).where(PromoMatch.group_id == g.id)
-                    ).all()
-                )
-                group_meta.append({"row": g, "n_matches": n_matches})
-        return templates.TemplateResponse(
-            request,
-            "promo_tournament.html",
-            {"tournament": tournament, "groups": group_meta},
-        )
+            fmt = tournament_format(tournament.storage_root)
+            ctx: dict = {"tournament": tournament, "format": fmt}
+            if fmt == FORMAT_PROMO:
+                groups = session.exec(
+                    select(PromoGroup)
+                    .where(PromoGroup.tournament_id == tournament_id)
+                    .order_by(PromoGroup.group_no)
+                ).all()
+                group_meta = []
+                for g in groups:
+                    n_matches = len(
+                        session.exec(
+                            select(PromoMatch).where(PromoMatch.group_id == g.id)
+                        ).all()
+                    )
+                    group_meta.append({"row": g, "n_matches": n_matches})
+                ctx["groups"] = group_meta
+            else:
+                # Duel: build round sections directly off the matches.
+                matches = session.exec(
+                    select(PromoMatch)
+                    .where(PromoMatch.tournament_id == tournament_id)
+                    .order_by(PromoMatch.round_label, PromoMatch.match_no)
+                ).all()
+                sections: dict[str, list] = {
+                    label: [] for label in _DUEL_ROUND_LABELS
+                }
+                for m in matches:
+                    if m.round_label in sections:
+                        thumb = _promo_match_thumb_url(session, m.id)
+                        sections[m.round_label].append({"row": m, "thumb": thumb})
+                ctx["sections"] = sections
+        return templates.TemplateResponse(request, "promo_tournament.html", ctx)
 
     @app.get("/promo/{tournament_id}/groups/{group_no}", response_class=HTMLResponse)
     def promo_group(request: Request, tournament_id: int, group_no: int) -> Response:
@@ -2125,7 +2154,12 @@ def create_app(
             if match is None or match.tournament_id != tournament_id:
                 raise HTTPException(404, f"match {match_id} not found")
             tournament = session.get(PromoTournament, tournament_id)
-            group = session.get(PromoGroup, match.group_id)
+            fmt = tournament_format(tournament.storage_root) if tournament else FORMAT_PROMO
+            # Group is only meaningful for promo tournaments.
+            group = (
+                session.get(PromoGroup, match.group_id)
+                if fmt == FORMAT_PROMO else None
+            )
             shots = session.exec(
                 select(PromoMatchScreenshot)
                 .where(PromoMatchScreenshot.match_id == match_id)
@@ -2158,6 +2192,7 @@ def create_app(
                 "group": group,
                 "match": match,
                 "buckets": buckets,
+                "format": fmt,
             },
         )
 
@@ -2176,7 +2211,11 @@ def create_app(
             tournament = (
                 session.get(PromoTournament, match.tournament_id) if match else None
             )
-            group = session.get(PromoGroup, match.group_id) if match else None
+            fmt = tournament_format(tournament.storage_root) if tournament else FORMAT_PROMO
+            group = (
+                session.get(PromoGroup, match.group_id)
+                if match and fmt == FORMAT_PROMO else None
+            )
         url = _promo_image_url(screenshot.file_path)
         if url is None:
             raise HTTPException(
@@ -2197,6 +2236,7 @@ def create_app(
                 "regions": regions,
                 "ref_w": ref_w,
                 "ref_h": ref_h,
+                "format": fmt,
             },
         )
 
@@ -2216,6 +2256,7 @@ def create_app(
             tournament = (
                 session.get(PromoTournament, match.tournament_id) if match else None
             )
+            fmt = tournament_format(tournament.storage_root) if tournament else FORMAT_PROMO
         url = _promo_image_url(screenshot.file_path)
         if url is None:
             raise HTTPException(
@@ -2236,6 +2277,7 @@ def create_app(
                 "ref_w": ref_w,
                 "ref_h": ref_h,
                 "kinds": PROMO_KINDS,
+                "format": fmt,
             },
         )
 

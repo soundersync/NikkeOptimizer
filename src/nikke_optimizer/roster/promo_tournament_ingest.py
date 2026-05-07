@@ -34,15 +34,46 @@ from ..data.models import (
 log = logging.getLogger(__name__)
 
 
-_STAGING_NAME_RE = re.compile(r"^promotion_tournament_(\d{8})_(\d{6})$")
+_STAGING_NAME_RE = re.compile(
+    r"^(promotion_tournament|champions_duel)_(\d{8})_(\d{6})$"
+)
 _GROUP_NAME_RE = re.compile(r"^group_(\d+)$")
-_MATCH_NAME_RE = re.compile(r"^match_(\d+)$")
+# Match folders use ``match_1`` in promotion_tournament but ``match1`` in
+# champions_duel — accept both.
+_MATCH_NAME_RE = re.compile(r"^match_?(\d+)$")
 _PLAYER_FILE_RE = re.compile(r"^round_(\d+)\.png$", re.IGNORECASE)
 _DUEL_FILE_RE = re.compile(r"^duel_(\d+)\.png$", re.IGNORECASE)
 _OVERVIEW_FILE_NAME = "overview.png"
 _DERIVED_MARKER = "__"  # files whose stem contains "__" are coord-picker output
 
-_ROUND_LABELS = ("round_64", "top_32", "top_16")
+# Round labels used by each format. Per-format tuples drive the walker;
+# all values are stored verbatim in PromoMatch.round_label so the UI can
+# branch on format (derived from storage_root folder name).
+_ROUND_LABELS_PROMO = ("round_64", "top_32", "top_16")
+_ROUND_LABELS_DUEL = ("quarterfinals", "semifinals", "finals")
+# Round labels that are a single aggregated results-only folder (no
+# match_N subfolders). top_16 in promo, finals in duel.
+_AGGREGATED_ROUNDS = {"top_16", "finals"}
+# Round labels that DON'T have player-loadout folders (results-only).
+# top_32 in promo (per inventory), finals in duel.
+_RESULTS_ONLY_ROUNDS = {"top_32", "finals"}
+
+# Format keys, mirrored in tournament_format(). Single source of truth.
+FORMAT_PROMO = "promotion_tournament"
+FORMAT_DUEL = "champions_duel"
+
+
+def tournament_format(storage_root: str) -> str:
+    """Return ``'promotion_tournament'`` or ``'champions_duel'`` for a path.
+
+    The format is encoded in the archive folder name (e.g.
+    ``<archive>/<date>/champions_duel/...``). Cheaper than a DB column
+    and impossible to drift from filesystem reality.
+    """
+    name = Path(storage_root).name
+    if name.startswith(FORMAT_DUEL):
+        return FORMAT_DUEL
+    return FORMAT_PROMO
 
 
 @dataclass
@@ -113,12 +144,12 @@ def ingest_root(
         if match is None:
             stats.errors.append(f"unrecognized staging folder: {src.name}")
             continue
-        ymd, hms = match.group(1), match.group(2)
+        fmt, ymd, hms = match.group(1), match.group(2), match.group(3)
         captured_at = datetime.strptime(f"{ymd}{hms}", "%Y%m%d%H%M%S").replace(
             tzinfo=timezone.utc
         )
         dest_dir = _resolve_archive_dir(
-            archive_root, captured_at.date().isoformat(), force=force
+            archive_root, captured_at.date().isoformat(), fmt=fmt, force=force
         )
         try:
             file_stats = _relocate(src, dest_dir, move=move)
@@ -179,34 +210,39 @@ def _discover_staging(staging_root: Path) -> list[Path]:
 
 
 def _discover_archived(archive_root: Path) -> list[Path]:
-    """Yield <archive>/<date>/promotion_tournament[_N] folders."""
+    """Yield ``<archive>/<date>/<format>[_N]/`` folders for both formats."""
     if not archive_root.is_dir():
         return []
     out: list[Path] = []
     for date_dir in sorted(archive_root.iterdir()):
         if not date_dir.is_dir():
             continue
-        for promo in sorted(date_dir.iterdir()):
-            if promo.is_dir() and promo.name.startswith("promotion_tournament"):
-                out.append(promo)
+        for fmt_dir in sorted(date_dir.iterdir()):
+            if not fmt_dir.is_dir():
+                continue
+            if fmt_dir.name.startswith(FORMAT_PROMO) or fmt_dir.name.startswith(
+                FORMAT_DUEL
+            ):
+                out.append(fmt_dir)
     return out
 
 
 def _resolve_archive_dir(
-    archive_root: Path, date_iso: str, *, force: bool
+    archive_root: Path, date_iso: str, *, fmt: str, force: bool
 ) -> Path:
-    """Return ``<archive>/<date>/promotion_tournament[_N]/``.
+    """Return ``<archive>/<date>/<fmt>[_N]/``.
 
-    If the base folder already exists and ``force`` is set, a numbered
-    suffix is appended (``_2``, ``_3``, …). Otherwise the base path is
-    returned regardless — relocation handles same-source idempotency at
-    the file level.
+    ``fmt`` is the format key (``promotion_tournament`` or
+    ``champions_duel``). If the base folder already exists and ``force``
+    is set, a numbered suffix is appended (``_2``, ``_3``, …). Otherwise
+    the base path is returned regardless — relocation handles
+    same-source idempotency at the file level.
     """
-    base = archive_root / date_iso / "promotion_tournament"
+    base = archive_root / date_iso / fmt
     if not base.exists() or not force:
         return base
     n = 2
-    while (cand := archive_root / date_iso / f"promotion_tournament_{n}").exists():
+    while (cand := archive_root / date_iso / f"{fmt}_{n}").exists():
         n += 1
     return cand
 
@@ -297,17 +333,33 @@ def _persist_tournament(
     if not storage_root.is_dir():
         return  # archive folder vanished between detection + persist
 
-    for group_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
-        m = _GROUP_NAME_RE.match(group_dir.name)
-        if m is None:
-            continue
-        group_no = int(m.group(1))
-        group = _upsert_group(session, tournament.id, group_no, stats)
-        for round_dir in sorted(p for p in group_dir.iterdir() if p.is_dir()):
-            label = round_dir.name
-            if label not in _ROUND_LABELS:
+    fmt = tournament_format(str(storage_root))
+    if fmt == FORMAT_PROMO:
+        for group_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
+            m = _GROUP_NAME_RE.match(group_dir.name)
+            if m is None:
                 continue
-            _persist_round(session, tournament.id, group.id, label, round_dir, stats)
+            group_no = int(m.group(1))
+            group = _upsert_group(session, tournament.id, group_no, stats)
+            for round_dir in sorted(p for p in group_dir.iterdir() if p.is_dir()):
+                label = round_dir.name
+                if label not in _ROUND_LABELS_PROMO:
+                    continue
+                _persist_round(
+                    session, tournament.id, group.id, label, round_dir, stats
+                )
+    else:
+        # Champions Duel — no group level. Synthesize a single
+        # PromoGroup (group_no=1) so PromoMatch.group_id stays
+        # non-null; the UI hides the group page for duel tournaments.
+        group = _upsert_group(session, tournament.id, 1, stats)
+        for round_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
+            label = round_dir.name
+            if label not in _ROUND_LABELS_DUEL:
+                continue
+            _persist_round(
+                session, tournament.id, group.id, label, round_dir, stats
+            )
 
 
 def _upsert_group(
@@ -338,11 +390,13 @@ def _persist_round(
 ) -> None:
     """Walk a round folder.
 
-    ``round_64`` and ``top_32`` contain ``match_K`` subfolders.
-    ``top_16`` contains a single aggregated ``results/`` directly.
+    Aggregated rounds (``top_16``, ``finals``) contain a single
+    ``results/`` directly with no ``match_N`` subfolders. Other rounds
+    contain ``match_K`` (or ``matchK``) subfolders with their own
+    ``player_top`` / ``player_bottom`` / ``results``.
     """
-    if round_label == "top_16":
-        # Single aggregated match per group.
+    if round_label in _AGGREGATED_ROUNDS:
+        # Single aggregated match.
         results_dir = round_dir / "results"
         if results_dir.is_dir():
             match = _upsert_match(
@@ -357,15 +411,13 @@ def _persist_round(
             _persist_results(session, match.id, results_dir, stats)
         return
 
-    has_loadouts_round = round_label == "round_64"
+    round_supports_loadouts = round_label not in _RESULTS_ONLY_ROUNDS
 
     for match_dir in sorted(p for p in round_dir.iterdir() if p.is_dir()):
         m = _MATCH_NAME_RE.match(match_dir.name)
         if m is None:
             continue
         match_no = int(m.group(1))
-        # top_32 should be results-only per the inventory; mark the
-        # has_loadouts flag from the actual presence of player_top.
         loadouts_present = (match_dir / "player_top").is_dir() or (
             match_dir / "player_bottom"
         ).is_dir()
@@ -375,7 +427,7 @@ def _persist_round(
             group_id=group_id,
             round_label=round_label,
             match_no=match_no,
-            has_loadouts=loadouts_present and has_loadouts_round,
+            has_loadouts=loadouts_present and round_supports_loadouts,
             stats=stats,
         )
         if loadouts_present:

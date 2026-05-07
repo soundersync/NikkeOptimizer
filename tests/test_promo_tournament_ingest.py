@@ -191,6 +191,113 @@ def test_ingest_picks_up_archive_only(tmp_path: Path):
     assert stats.screenshots == 6
 
 
+@pytest.fixture
+def duel_staging_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a champions_duel staging tournament with qf/sf/finals shape."""
+    staging = tmp_path / "champion_arena"
+    archive = tmp_path / "captures"
+    src = staging / "champions_duel_20260505_211315"
+
+    # Quarterfinals — 4 matches with full structure. NB: match folders
+    # use ``matchN`` (no underscore) in champions_duel.
+    for k in range(1, 5):
+        base = src / "quarterfinals" / f"match{k}"
+        for n in range(1, 6):
+            _png(base / "player_top" / f"round_{n}.png")
+            _png(base / "player_bottom" / f"round_{n}.png")
+        _png(base / "results" / "overview.png")
+        for n in range(1, 6):
+            _png(base / "results" / f"duel_{n}.png")
+
+    # Semifinals — 2 matches, results-only (matches the real capture
+    # shape; loadouts are typically only saved for the earliest round).
+    for k in range(1, 3):
+        base = src / "semifinals" / f"match{k}"
+        _png(base / "results" / "overview.png")
+        for n in range(1, 6):
+            _png(base / "results" / f"duel_{n}.png")
+
+    # Finals — single aggregated, results-only.
+    base = src / "finals" / "results"
+    _png(base / "overview.png")
+    for n in range(1, 6):
+        _png(base / f"duel_{n}.png")
+
+    return staging, archive
+
+
+def test_duel_ingest_relocates_and_persists(
+    duel_staging_tree: tuple[Path, Path], tmp_path: Path
+):
+    staging, archive = duel_staging_tree
+    db_path = tmp_path / "test.sqlite3"
+
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path)
+    assert stats.errors == [], stats.errors
+    assert stats.tournaments == 1
+    # Synthetic group_no=1 for the duel — 1 group expected.
+    assert stats.groups == 1
+    # 4 quarterfinal + 2 semifinal + 1 finals (aggregated) = 7 matches.
+    assert stats.matches == 7
+    # qf: 4 × 16 (full) = 64
+    # sf: 2 × 6  (results-only) = 12
+    # finals: 6
+    # total = 82
+    assert stats.screenshots == 82
+
+    # Files relocated under captures/<date>/champions_duel/
+    canon = archive / "2026-05-05" / "champions_duel"
+    assert (canon / "quarterfinals" / "match1" / "player_top" / "round_1.png").is_file()
+    assert (canon / "finals" / "results" / "overview.png").is_file()
+
+    engine = make_engine(db_path)
+    init_db(engine)
+    with Session(engine) as session:
+        t = session.exec(select(PromoTournament)).first()
+        assert t is not None
+        assert "champions_duel" in t.storage_root
+        # Matches per round.
+        matches = session.exec(select(PromoMatch)).all()
+        labels = sorted(m.round_label for m in matches)
+        assert labels == ["finals"] + ["quarterfinals"] * 4 + ["semifinals"] * 2
+        finals = next(m for m in matches if m.round_label == "finals")
+        assert finals.match_no is None
+        assert finals.has_loadouts is False
+        # Quarterfinals have loadouts; semifinals (results-only in this
+        # capture) do not.
+        assert all(
+            m.has_loadouts for m in matches if m.round_label == "quarterfinals"
+        )
+        assert all(
+            not m.has_loadouts for m in matches if m.round_label == "semifinals"
+        )
+
+
+def test_duel_and_promo_coexist(
+    staging_tree: tuple[Path, Path],
+    duel_staging_tree: tuple[Path, Path],
+    tmp_path: Path,
+):
+    """Both formats on the same date land in sibling folders + DB rows.
+
+    Both fixtures share ``tmp_path`` and write into the same
+    ``champion_arena/`` staging dir, so a single ingest pass picks up
+    both tournaments naturally.
+    """
+    # Both fixtures point at the same staging + archive paths.
+    promo_staging, archive = staging_tree
+    duel_staging, _ = duel_staging_tree
+    assert promo_staging == duel_staging  # sanity: they share tmp_path
+
+    db_path = tmp_path / "joint.sqlite3"
+    stats = ingest_root(promo_staging, archive_root=archive, db_path=db_path)
+    assert stats.errors == []
+    assert stats.tournaments == 2
+
+    assert (archive / "2026-05-05" / "promotion_tournament").is_dir()
+    assert (archive / "2026-05-05" / "champions_duel").is_dir()
+
+
 def test_force_creates_suffixed_dir_when_collision(tmp_path: Path):
     """A second tournament on the same date with --force gets a numbered suffix."""
     staging = tmp_path / "champion_arena"

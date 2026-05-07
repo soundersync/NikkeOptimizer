@@ -5,13 +5,27 @@
 <style>
 .crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
 .crumb a { color: #9ca3af; }
-.tour-header { margin-bottom: 22px; }
+.tour-header { margin-bottom: 22px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .tour-header h1 { margin: 0 0 4px; }
 .tour-header .meta { font-size: 13px; color: #9ca3af; }
 .tour-header .meta code {
     background: #14161b; padding: 1px 6px; border-radius: 3px;
     font-family: "SF Mono", Menlo, monospace; font-size: 11px;
 }
+.format-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.format-pill.promo { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
+.format-pill.duel  { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
+
+/* Promo: 8 group tiles. */
 .group-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -41,17 +55,116 @@
     text-transform: uppercase; letter-spacing: 0.05em;
 }
 .group-card .matches { margin-top: 12px; font-size: 12px; color: #d1d5db; }
+
+/* Duel: three round sections with match tiles. */
+.round-section { margin-bottom: 28px; }
+.round-section h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e5e7eb;
+    margin: 0 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1f2228;
+    display: flex; align-items: baseline; gap: 10px;
+}
+.round-section h2 .count {
+    font-size: 11px; color: #6b7280;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 400;
+}
+.match-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+}
+.match-card {
+    display: flex; flex-direction: column;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.1s ease;
+}
+.match-card:hover { border-color: #f87171; }
+.match-thumb {
+    width: 100%;
+    aspect-ratio: 1510 / 2013;
+    overflow: hidden;
+    background: #0a0b0e;
+}
+.match-thumb img {
+    width: 100%; height: 100%; object-fit: cover;
+    object-position: center top;
+    display: block;
+}
+.match-card .footer {
+    padding: 8px 10px;
+    font-size: 12px;
+    display: flex; justify-content: space-between;
+    color: #d1d5db;
+    border-top: 1px solid #1f2228;
+}
+.match-card .footer .num {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #f87171; font-weight: 600;
+}
+.match-card .footer .flag {
+    font-size: 10px; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 0.04em;
+}
+.empty-section { color: #6b7280; font-size: 12px; font-style: italic; }
 </style>
 
 <div class="crumb"><a href="/promo">Tournaments</a> /</div>
 <div class="tour-header">
-    <h1>Promotion Tournament — {{ tournament.capture_date }}</h1>
-    <div class="meta">
-        Captured at <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
-        · {{ groups|length }} groups
+    <div>
+        <h1>
+            {% if format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %}
+            — {{ tournament.capture_date }}
+        </h1>
+        <div class="meta">
+            Captured at <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
+        </div>
     </div>
+    <span class="format-pill {% if format == 'champions_duel' %}duel{% else %}promo{% endif %}">
+        {% if format == "champions_duel" %}duel{% else %}promo{% endif %}
+    </span>
 </div>
 
+{% if format == "champions_duel" %}
+{# Duel: three round sections (QF / SF / Final). Same layout as the
+   promo group page's match-tile grid. #}
+{% for round_label, label_human in [("quarterfinals", "Quarterfinals"), ("semifinals", "Semifinals"), ("finals", "Final")] %}
+<section class="round-section">
+    <h2>{{ label_human }} <span class="count">{{ sections[round_label]|length }} match{{ "es" if sections[round_label]|length != 1 else "" }}</span></h2>
+    {% if sections[round_label] %}
+    <div class="match-grid">
+        {% for m in sections[round_label] %}
+        <a class="match-card" href="/promo/{{ tournament.id }}/matches/{{ m.row.id }}">
+            <div class="match-thumb">
+                {% if m.thumb %}<img src="{{ m.thumb }}" alt="match thumbnail">{% endif %}
+            </div>
+            <div class="footer">
+                <span class="num">
+                    {% if m.row.match_no %}Match {{ m.row.match_no }}{% else %}Final{% endif %}
+                </span>
+                <span class="flag">
+                    {% if m.row.has_loadouts %}loadouts{% else %}results-only{% endif %}
+                </span>
+            </div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-section">No matches captured for this round.</div>
+    {% endif %}
+</section>
+{% endfor %}
+
+{% else %}
+{# Promo: 8 group tiles. #}
 <div class="group-grid">
     {% for g in groups %}
     <a class="group-card" href="/promo/{{ tournament.id }}/groups/{{ g.row.group_no }}">
@@ -61,5 +174,6 @@
     </a>
     {% endfor %}
 </div>
+{% endif %}
 
 {% endblock %}

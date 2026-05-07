@@ -71,7 +71,7 @@ h1 { margin: 0 0 4px; }
 <div class="crumb">
     <a href="/promo">Tournaments</a> /
     <a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a> /
-    <a href="/promo/{{ tournament.id }}/groups/{{ group.group_no }}">Group {{ group.group_no }}</a> /
+    {% if group %}<a href="/promo/{{ tournament.id }}/groups/{{ group.group_no }}">Group {{ group.group_no }}</a> /{% endif %}
 </div>
 <h1>
     {% if match.match_no %}Match {{ match.match_no }}{% else %}Final{% endif %}

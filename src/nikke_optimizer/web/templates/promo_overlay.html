@@ -84,7 +84,10 @@
 <p class="muted">
     {% if tournament %}<a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a> ·
     {% endif %}
-    {% if match %}group {{ match.group_id }} · {{ match.round_label }}{% if match.match_no %} · match {{ match.match_no }}{% endif %} · {% endif %}
+    {% if match %}
+        {% if format != "champions_duel" %}group {{ match.group_id }} · {% endif %}
+        {{ match.round_label }}{% if match.match_no %} · match {{ match.match_no }}{% endif %} ·
+    {% endif %}
     <span class="kind-pill">{{ screenshot.kind }}</span>
     {% if screenshot.side %}· side {{ screenshot.side }}{% endif %}
     {% if screenshot.round_no %}· round {{ screenshot.round_no }}{% endif %}

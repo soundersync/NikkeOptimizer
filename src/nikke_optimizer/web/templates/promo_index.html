@@ -36,7 +36,20 @@
 .tournament-card .label {
     font-size: 13px; color: #e5e7eb; font-weight: 600;
     margin-bottom: 6px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
+.format-pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.format-pill.promo { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
+.format-pill.duel  { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
 .tournament-card .meta {
     font-size: 11px; color: #9ca3af;
     font-family: "SF Mono", Menlo, monospace;
@@ -68,10 +81,17 @@
     <div class="tournament-grid">
         {% for item in items %}
         <a class="tournament-card" href="/promo/{{ item.row.id }}">
-            <div class="label">Promotion Tournament</div>
+            <div class="label">
+                {% if item.format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %}
+                <span class="format-pill {% if item.format == 'champions_duel' %}duel{% else %}promo{% endif %}">
+                    {% if item.format == "champions_duel" %}duel{% else %}promo{% endif %}
+                </span>
+            </div>
             <div class="meta">{{ item.row.captured_at.strftime("%H:%M:%S") }} UTC</div>
             <div class="stats">
+                {% if item.format != "champions_duel" %}
                 <span><strong>{{ item.n_groups }}</strong> groups</span>
+                {% endif %}
                 <span><strong>{{ item.n_matches }}</strong> matches</span>
             </div>
         </a>
