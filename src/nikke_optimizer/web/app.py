@@ -32,6 +32,7 @@ from ..data.models import (
     Character,
     Cube,
     OwnedCharacter,
+    PromoExtractedField,
     PromoGroup,
     PromoMatch,
     PromoMatchScreenshot,
@@ -2224,6 +2225,7 @@ def create_app(
             )
         regions = promo_regions_for_kind(screenshot.kind)
         ref_w, ref_h = PROMO_REF_SIZE
+        view_regions = _promo_view_regions(engine, screenshot.id, regions)
         return templates.TemplateResponse(
             request,
             "promo_viewer.html",
@@ -2234,11 +2236,60 @@ def create_app(
                 "tournament": tournament,
                 "image_url": url,
                 "regions": regions,
+                "view_regions": view_regions,
                 "ref_w": ref_w,
                 "ref_h": ref_h,
                 "format": fmt,
             },
         )
+
+    def _promo_view_regions(engine, screenshot_id: int, regions):
+        """Build per-region view-model dicts for the viewer template.
+
+        Each entry merges the base ``Region`` with any
+        ``PromoExtractedField`` row keyed on the same slug, plus the
+        derived ``round{N}_winner`` value for round-strip regions and
+        the matched character name for ``*.name`` fields.
+        """
+        with get_session(engine) as session:
+            extracted = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.screenshot_id == screenshot_id
+                )
+            ).all()
+            by_slug = {e.region_slug: e for e in extracted}
+            char_ids = {e.character_id for e in extracted if e.character_id}
+            char_names: dict[int, str] = {}
+            if char_ids:
+                rows = session.exec(
+                    select(Character.id, Character.name).where(
+                        Character.id.in_(char_ids)
+                    )
+                ).all()
+                char_names = {int(cid): str(name) for cid, name in rows}
+
+        out = []
+        for r in regions:
+            ext = by_slug.get(r.slug)
+            matched = (
+                char_names.get(ext.character_id)
+                if ext and ext.character_id is not None
+                else None
+            )
+            extra = None
+            if r.slug.endswith("_strip"):
+                winner_ext = by_slug.get(r.slug.replace("_strip", "_winner"))
+                if winner_ext is not None and winner_ext.normalized:
+                    extra = f"winner: {winner_ext.normalized}"
+            out.append(
+                {
+                    "region": r,
+                    "ext": ext,
+                    "matched_character": matched,
+                    "extra": extra,
+                }
+            )
+        return out
 
     @app.get("/promo/screenshots/{screenshot_id}/overlay", response_class=HTMLResponse)
     def promo_screenshot_overlay(request: Request, screenshot_id: int) -> Response:

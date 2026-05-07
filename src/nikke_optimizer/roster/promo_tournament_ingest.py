@@ -85,6 +85,9 @@ class IngestStats:
     files_copied: int = 0
     files_skipped: int = 0
     files_moved_deleted: int = 0
+    ocr_screenshots: int = 0
+    ocr_fields: int = 0
+    ocr_skipped: int = 0
     errors: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -98,6 +101,10 @@ class IngestStats:
         ]
         if self.files_moved_deleted:
             parts.append(f"deleted={self.files_moved_deleted}")
+        if self.ocr_screenshots or self.ocr_skipped:
+            parts.append(
+                f"ocr=(processed={self.ocr_screenshots} fields={self.ocr_fields} cached={self.ocr_skipped})"
+            )
         if self.errors:
             parts.append(f"errors={len(self.errors)}")
         return " ".join(parts)
@@ -115,13 +122,19 @@ def ingest_root(
     move: bool = False,
     force: bool = False,
     db_path: Optional[Path] = None,
+    ocr: bool = True,
+    force_ocr: bool = False,
 ) -> IngestStats:
-    """Relocate every ``promotion_tournament_*`` folder under ``staging_root``
-    into ``archive_root`` and persist DB rows.
+    """Relocate every ``promotion_tournament_*`` / ``champions_duel_*``
+    folder under ``staging_root`` into ``archive_root``, persist DB rows,
+    and (by default) run an OCR pass over every screenshot.
 
-    ``archive_root`` defaults to ``<staging_root>/../captures``. The
-    intent is for ``staging_root = <repo>/champion_arena`` and
-    ``archive_root = <repo>/captures``.
+    ``archive_root`` defaults to ``<staging_root>/../captures``.
+
+    ``ocr=False`` skips the OCR pass entirely (useful for tests).
+    ``force_ocr=True`` re-OCRs screenshots that already have extracted
+    fields; otherwise the OCR pass is idempotent and only touches
+    screenshots without prior extractions.
     """
     staging_root = Path(staging_root).resolve()
     if archive_root is None:
@@ -192,7 +205,98 @@ def ingest_root(
             )
             session.commit()
 
+    # OCR pass — runs over every PromoMatchScreenshot row. Idempotent
+    # by default (skips screenshots that already have extracted fields);
+    # ``force_ocr=True`` re-runs.
+    if ocr:
+        _run_ocr_pass(engine, stats=stats, force=force_ocr)
+
     return stats
+
+
+def _run_ocr_pass(engine, *, stats: IngestStats, force: bool) -> None:
+    """Walk every screenshot row and populate PromoExtractedField rows.
+
+    Lazily initializes PaddleOCR (~5–10s) only when there's actual work
+    to do. Uses ``rich.progress`` for an interactive progress bar since
+    a full pass over the user's archive is ~15–25 minutes.
+    """
+    from PIL import Image
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
+
+    from ..data.models import PromoMatchScreenshot
+    from .promo_tournament_ocr import (
+        CharIndex,
+        extract_screenshot,
+        has_extractions,
+        persist_extractions,
+    )
+
+    with Session(engine) as session:
+        all_shots = session.exec(select(PromoMatchScreenshot)).all()
+
+    # Pre-filter to the screenshots we actually need to process so the
+    # progress bar's total reflects real work + we can short-circuit
+    # entirely when there's nothing to do.
+    pending: list[int] = []
+    cached: int = 0
+    with Session(engine) as session:
+        for shot in all_shots:
+            if not force and has_extractions(session, shot.id):
+                cached += 1
+            else:
+                pending.append(shot.id)
+    stats.ocr_skipped = cached
+    if not pending:
+        return
+
+    with Session(engine) as session:
+        char_index = CharIndex.from_session(session)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeRemainingColumn(),
+        transient=False,
+    ) as progress:
+        task = progress.add_task("OCR'ing screenshots", total=len(pending))
+        for shot_id in pending:
+            with Session(engine) as session:
+                shot = session.get(PromoMatchScreenshot, shot_id)
+                if shot is None:
+                    progress.advance(task)
+                    continue
+                try:
+                    image = Image.open(shot.file_path).convert("RGB")
+                except OSError as exc:
+                    stats.errors.append(
+                        f"OCR open failed for screenshot {shot_id}: {exc}"
+                    )
+                    progress.advance(task)
+                    continue
+                try:
+                    extractions = extract_screenshot(
+                        image, shot.kind, char_index=char_index
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    stats.errors.append(
+                        f"OCR extract failed for screenshot {shot_id}: {exc}"
+                    )
+                    progress.advance(task)
+                    continue
+                stats.ocr_fields += persist_extractions(
+                    session, shot_id, extractions
+                )
+                stats.ocr_screenshots += 1
+            progress.advance(task)
 
 
 # ---------------------------------------------------------------------------

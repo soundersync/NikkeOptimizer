@@ -109,7 +109,24 @@
     color: #e5e7eb;
     font-size: 13px;
     font-weight: 500;
-    margin-bottom: 2px;
+    margin-bottom: 3px;
+}
+.region-row .ocr {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #6fdf80;
+    word-break: break-word;
+    line-height: 1.35;
+    margin-bottom: 3px;
+}
+.region-row .ocr.empty { color: #4b5158; font-style: italic; }
+.region-row .ocr.low-conf { color: #fde68a; }
+.region-row .ocr .arrow { color: #6b7280; }
+.region-row .ocr .matched { color: #93c5fd; }
+.region-row .ocr .extra {
+    margin-left: 6px;
+    color: #c4b5fd;
+    font-size: 11px;
 }
 .region-row .meta {
     color: #6b7280;
@@ -117,6 +134,7 @@
     font-size: 10px;
 }
 .region-row .meta .slug { color: #9ca3af; }
+.region-row .meta .conf { color: #6b7280; }
 </style>
 
 <div class="crumb">
@@ -156,7 +174,8 @@
 
     <div class="right-pane">
         {% set ns = namespace(current_group=None) %}
-        {% for r in regions %}
+        {% for vr in view_regions %}
+            {% set r = vr.region %}
             {% if r.group != ns.current_group %}
                 {% if ns.current_group is not none %}
                     </div>
@@ -198,10 +217,36 @@
                             background-position: {{ bg_x }}px {{ bg_y }}px;"></div>
                 <div class="text">
                     <div class="label">{{ r.label }}</div>
+
+                    {% set ext = vr.ext %}
+                    {% set is_image_only = r.slug.endswith(".portrait") or r.slug.endswith(".doll") %}
+                    {% if is_image_only %}
+                        <div class="ocr empty">— image, not OCR'd —</div>
+                    {% elif ext is none %}
+                        <div class="ocr empty">— no extraction yet —</div>
+                    {% elif not ext.text and not ext.normalized %}
+                        <div class="ocr empty">— OCR returned empty —</div>
+                    {% else %}
+                        <div class="ocr {% if ext.confidence and ext.confidence < 0.6 %}low-conf{% endif %}">
+                            {% if ext.text %}{{ ext.text }}{% endif %}
+                            {% if ext.normalized and ext.normalized != ext.text %}
+                                <span class="arrow">→</span> <span class="matched">{{ ext.normalized }}</span>
+                            {% endif %}
+                            {% if vr.matched_character %}
+                                <span class="arrow">→</span> <span class="matched">{{ vr.matched_character }}</span>
+                                {% if ext.character_match_score %}<span class="extra">{{ "%.0f"|format(ext.character_match_score) }}%</span>{% endif %}
+                            {% endif %}
+                            {% if vr.extra %}<span class="extra">{{ vr.extra }}</span>{% endif %}
+                        </div>
+                    {% endif %}
+
                     <div class="meta">
                         <span class="slug">{{ r.slug }}</span>
                         · ({{ x1 }}, {{ y1 }}, {{ x2 }}, {{ y2 }})
                         · {{ bw }}×{{ bh }}
+                        {% if ext and ext.confidence %}
+                            · <span class="conf">conf {{ "%.2f"|format(ext.confidence) }}</span>
+                        {% endif %}
                     </div>
                 </div>
             </div>

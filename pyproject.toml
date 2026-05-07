@@ -27,6 +27,7 @@ dependencies = [
     "rich>=13.7",
     "tkinterdnd2>=0.4",
     "PySide6>=6.6",
+    "rapidfuzz>=3.0",
 ]
 
 [project.optional-dependencies]

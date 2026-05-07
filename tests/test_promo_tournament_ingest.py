@@ -81,7 +81,7 @@ def test_ingest_relocates_and_persists(staging_tree: tuple[Path, Path], tmp_path
     staging, archive = staging_tree
     db_path = tmp_path / "test.sqlite3"
 
-    stats = ingest_root(staging, archive_root=archive, db_path=db_path)
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
     assert stats.errors == [], stats.errors
     assert stats.tournaments == 1
     assert stats.groups == 1
@@ -140,8 +140,8 @@ def test_ingest_idempotent(staging_tree: tuple[Path, Path], tmp_path: Path):
     staging, archive = staging_tree
     db_path = tmp_path / "test.sqlite3"
 
-    s1 = ingest_root(staging, archive_root=archive, db_path=db_path)
-    s2 = ingest_root(staging, archive_root=archive, db_path=db_path)
+    s1 = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
+    s2 = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
 
     assert s2.tournaments == 0
     assert s2.groups == 0
@@ -165,7 +165,7 @@ def test_ingest_move_clears_staging(staging_tree: tuple[Path, Path], tmp_path: P
     pngs_before = list(src.rglob("*.png"))
     assert pngs_before  # sanity
 
-    stats = ingest_root(staging, archive_root=archive, move=True, db_path=db_path)
+    stats = ingest_root(staging, archive_root=archive, move=True, db_path=db_path, ocr=False)
     assert stats.files_moved_deleted > 0
 
     pngs_after = list(src.rglob("*.png"))
@@ -185,7 +185,7 @@ def test_ingest_picks_up_archive_only(tmp_path: Path):
         _png(base / "results" / f"duel_{n}.png")
 
     db_path = tmp_path / "test.sqlite3"
-    stats = ingest_root(tmp_path / "no_staging", archive_root=archive, db_path=db_path)
+    stats = ingest_root(tmp_path / "no_staging", archive_root=archive, db_path=db_path, ocr=False)
     assert stats.tournaments == 1
     assert stats.matches == 1
     assert stats.screenshots == 6
@@ -232,7 +232,7 @@ def test_duel_ingest_relocates_and_persists(
     staging, archive = duel_staging_tree
     db_path = tmp_path / "test.sqlite3"
 
-    stats = ingest_root(staging, archive_root=archive, db_path=db_path)
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
     assert stats.errors == [], stats.errors
     assert stats.tournaments == 1
     # Synthetic group_no=1 for the duel — 1 group expected.
@@ -290,7 +290,7 @@ def test_duel_and_promo_coexist(
     assert promo_staging == duel_staging  # sanity: they share tmp_path
 
     db_path = tmp_path / "joint.sqlite3"
-    stats = ingest_root(promo_staging, archive_root=archive, db_path=db_path)
+    stats = ingest_root(promo_staging, archive_root=archive, db_path=db_path, ocr=False)
     assert stats.errors == []
     assert stats.tournaments == 2
 
@@ -312,7 +312,7 @@ def test_force_creates_suffixed_dir_when_collision(tmp_path: Path):
     _png(src2 / "group_1" / "top_16" / "results" / "overview.png")
 
     db_path = tmp_path / "test.sqlite3"
-    stats = ingest_root(staging, archive_root=archive, force=True, db_path=db_path)
+    stats = ingest_root(staging, archive_root=archive, force=True, db_path=db_path, ocr=False)
     assert stats.errors == []
     assert (archive / "2026-05-05" / "promotion_tournament").is_dir()
     assert (archive / "2026-05-05" / "promotion_tournament_2").is_dir()

@@ -97,6 +97,14 @@ def ingest_tournaments(
         False, "--force",
         help="Allow a second tournament on a date already populated (suffixes _2, _3, ...).",
     ),
+    ocr: bool = typer.Option(
+        True, "--ocr/--no-ocr",
+        help="Run OCR over every screenshot after relocation. Default on.",
+    ),
+    force_ocr: bool = typer.Option(
+        False, "--force-ocr",
+        help="Re-OCR screenshots that already have extracted fields.",
+    ),
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
 ) -> None:
     """Relocate promotion_tournament_* folders into the archive and persist DB rows.
@@ -118,6 +126,8 @@ def ingest_tournaments(
         archive_root=archive,
         move=move,
         force=force,
+        ocr=ocr,
+        force_ocr=force_ocr,
         db_path=db,
     )
     console.print(f"[bold green]Ingest complete[/]: {stats}")

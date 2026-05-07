@@ -485,3 +485,51 @@ class PromoMatchScreenshot(SQLModel, table=True):
         description="1..5 for player_loadout and results_duel; NULL for results_overview.",
     )
     file_path: str = Field(description="Absolute path on disk under storage_root.")
+
+
+class PromoExtractedField(SQLModel, table=True):
+    """OCR / portrait-match output for a single region of a screenshot.
+
+    Populated by `nikkeoptimizer ingest-tournaments` (eager OCR pass).
+    Keyed on (screenshot_id, region_slug) so re-runs are idempotent.
+    For derived fields (e.g., ``round1_winner`` parsed from
+    ``round1_strip``), we store one row with the derived slug.
+    """
+
+    __tablename__ = "promo_extracted_field"
+    __table_args__ = (
+        UniqueConstraint(
+            "screenshot_id", "region_slug",
+            name="uq_promo_extracted_natural",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    screenshot_id: int = Field(
+        foreign_key="promo_match_screenshot.id", index=True
+    )
+    region_slug: str = Field(
+        index=True,
+        description="Slug from promo_tournament_regions (e.g., 'char1.cp', 'left.char3.atk').",
+    )
+    text: Optional[str] = Field(
+        default=None,
+        description="Raw OCR text. NULL if OCR returned nothing or failed.",
+    )
+    normalized: Optional[str] = Field(
+        default=None,
+        description="Canonical form: digits-only for CP fields, 'left'/'right' for round winners, etc.",
+    )
+    character_id: Optional[int] = Field(
+        default=None,
+        foreign_key="character.id",
+        description="For *.name fields: closest match in the Character DB.",
+    )
+    character_match_score: Optional[float] = Field(
+        default=None,
+        description="Fuzzy-match similarity score (0..100) when character_id is set.",
+    )
+    confidence: Optional[float] = Field(
+        default=None, description="OCR confidence score from PaddleOCR (0..1)."
+    )
+    extracted_at: datetime = Field(default_factory=_utcnow)
