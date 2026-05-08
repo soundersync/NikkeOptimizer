@@ -167,6 +167,46 @@ def label_tournament_portraits(
     )
 
 
+@app.command(name="label-tournament-dolls")
+def label_tournament_dolls(
+    label_dir: Optional[Path] = typer.Option(
+        None,
+        "--label-dir",
+        help="Directory of labeled exemplars (defaults to <repo>/debug/labeled-doll-treasure-icons).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Classify the doll/treasure tier on every loadout slot.
+
+    For each player_loadout screenshot's char1..5.doll regions,
+    compares the captured crop to a set of labeled exemplars (R / SR /
+    Treasure with partial-vs-fully-leveled variants) using HSV mean-
+    squared-distance. Persists ``char{n}.doll`` rows in
+    ``PromoExtractedField`` with ``normalized`` set to the canonical
+    key (e.g. ``sr_max``). Idempotent.
+    """
+    from sqlmodel import Session
+
+    from ..data.db import init_db, make_engine
+    from ..roster.promo_tournament_doll_match import (
+        backfill_doll_classifications,
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+    with Session(engine) as session:
+        examined, updated, counts = backfill_doll_classifications(
+            session, label_dir=label_dir,
+        )
+    console.print(
+        f"[bold green]Doll labeling complete[/]: examined={examined} updated={updated}"
+    )
+    if counts:
+        console.print("[bold]Class distribution:[/]")
+        for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            console.print(f"  {key:18s} {n}")
+
+
 @app.command(name="rematch-tournament-characters")
 def rematch_tournament_characters(
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),

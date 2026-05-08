@@ -2192,6 +2192,7 @@ def create_app(
         for n in range(1, 6):
             portrait = by_slug.get(f"char{n}.portrait")
             cp_field = by_slug.get(f"char{n}.cp")
+            doll = by_slug.get(f"char{n}.doll")
             try:
                 cp = (
                     int(cp_field.normalized)
@@ -2209,6 +2210,8 @@ def create_app(
                 "raw_name": portrait.text if portrait else None,
                 "cp": cp,
                 "portrait_bbox": portrait_bbox_by_slug.get(f"char{n}.portrait"),
+                "doll_label": doll.text if doll else None,
+                "doll_key": doll.normalized if doll else None,
             })
 
         # Resolve the source match's round_label.
