@@ -2865,6 +2865,9 @@ def create_app(
     )
 
     # Stable display order across the audit page button row.
+    # ``none`` (absence of any doll/treasure) sits before ``unknown``
+    # — semantically distinct: ``none`` = slot is empty,
+    # ``unknown`` = classifier couldn't decide.
     _DOLL_AUDIT_KEYS: tuple[str, ...] = (
         "r_partial",
         "r_max",
@@ -2872,6 +2875,7 @@ def create_app(
         "sr_max",
         "treasure_partial",
         "treasure_max",
+        "none",
         "unknown",
     )
 

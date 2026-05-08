@@ -50,7 +50,8 @@ DISPLAY_LABELS: dict[str, str] = {
     "sr_max": "SR ★15",
     "treasure_partial": "Treasure",
     "treasure_max": "Treasure φ3",
-    "unknown": "—",
+    "none": "None",       # No doll/treasure equipped (manually marked)
+    "unknown": "—",       # Classifier couldn't decide
 }
 
 # Standard size we resize both exemplars + queries to before comparing.

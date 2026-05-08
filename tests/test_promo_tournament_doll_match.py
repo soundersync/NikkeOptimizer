@@ -128,9 +128,10 @@ def test_classify_separates_two_known_classes():
 
 
 def test_display_labels_cover_every_canonical_key():
-    """Every canonical key (including 'unknown' + future r_max) has
+    """Every canonical key (including unknown + r_max + none) has
     a display label so the UI never falls back to a raw key."""
     for key in EXEMPLAR_FILES.keys():
         assert key in DISPLAY_LABELS, f"missing display label for {key}"
     assert "unknown" in DISPLAY_LABELS
     assert "r_max" in DISPLAY_LABELS  # placeholder for future exemplar
+    assert "none" in DISPLAY_LABELS   # manually marked "no doll/treasure"
