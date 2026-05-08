@@ -172,18 +172,26 @@ def label_tournament_dolls(
     label_dir: Optional[Path] = typer.Option(
         None,
         "--label-dir",
-        help="Directory of labeled exemplars (defaults to <repo>/debug/labeled-doll-treasure-icons).",
+        help="Directory of labeled exemplars (defaults to web/static/doll-icons).",
+    ),
+    backend: str = typer.Option(
+        "auto",
+        "--backend",
+        help="Classifier: auto | vision | hsv. Auto picks Vision when a manually-corrected corpus exists, HSV otherwise.",
     ),
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
 ) -> None:
     """Classify the doll/treasure tier on every loadout slot.
 
-    For each player_loadout screenshot's char1..5.doll regions,
-    compares the captured crop to a set of labeled exemplars (R / SR /
-    Treasure with partial-vs-fully-leveled variants) using HSV mean-
-    squared-distance. Persists ``char{n}.doll`` rows in
-    ``PromoExtractedField`` with ``normalized`` set to the canonical
-    key (e.g. ``sr_max``). Idempotent.
+    Two backends:
+      * ``vision`` (preferred when audited): Apple Vision feature-print
+        K-NN over the manually-corrected corpus. Captures intra-class
+        variation a single exemplar can't.
+      * ``hsv``: mean-squared HSV distance against the labeled
+        exemplar files in ``web/static/doll-icons``. Cold-start friendly.
+      * ``auto``: Vision when the corpus is non-empty, else HSV.
+
+    Manually-corrected rows are sticky — never overwritten on re-run.
     """
     from sqlmodel import Session
 
@@ -196,15 +204,105 @@ def label_tournament_dolls(
     init_db(engine)
     with Session(engine) as session:
         examined, updated, counts = backfill_doll_classifications(
-            session, label_dir=label_dir,
+            session, label_dir=label_dir, backend=backend,
         )
     console.print(
-        f"[bold green]Doll labeling complete[/]: examined={examined} updated={updated}"
+        f"[bold green]Doll labeling complete[/]: examined={examined} updated={updated} backend={backend}"
     )
     if counts:
         console.print("[bold]Class distribution:[/]")
         for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
             console.print(f"  {key:18s} {n}")
+
+
+@app.command(name="audit-vision-disagreements")
+def audit_vision_disagreements(
+    k: int = typer.Option(5, "--k", help="K for nearest-neighbour vote."),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Diagnostic: rows where Vision disagrees with the human label.
+
+    Builds the corpus from every manually-corrected doll row, then
+    re-classifies each one against the corpus *with itself excluded*.
+    Disagreements are either Vision misclassifications worth noting
+    OR audit mistakes the user might want to revisit.
+    """
+    from sqlmodel import Session
+
+    from ..data.db import init_db, make_engine
+    from ..roster.promo_tournament_doll_vision import DollVisionMatcher
+    from ..data.models import PromoExtractedField, PromoMatchScreenshot
+    from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+    from PIL import Image
+    from sqlmodel import select as _sel
+
+    bbox_by_slug = {
+        r.slug: r.bbox for r in PLAYER_LOADOUT if r.slug.endswith(".doll")
+    }
+    engine = make_engine(db)
+    init_db(engine)
+    with Session(engine) as session:
+        matcher = DollVisionMatcher.from_session(session)
+        if len(matcher) == 0:
+            console.print(
+                "[red]No manually-corrected corpus found.[/] Audit some "
+                "doll rows via /audit/dolls first."
+            )
+            raise typer.Exit(code=1)
+        console.print(
+            f"[bold]Corpus size:[/] {len(matcher)} rows · K={k}"
+        )
+
+        rows = session.exec(
+            _sel(PromoExtractedField).where(
+                PromoExtractedField.region_slug.like("%.doll"),
+                PromoExtractedField.manually_corrected == True,  # noqa: E712
+            )
+        ).all()
+        shot_ids = list({r.screenshot_id for r in rows})
+        shots = session.exec(
+            _sel(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.id.in_(shot_ids)
+            )
+        ).all()
+        shot_by_id = {s.id: s for s in shots}
+        images: dict[int, Image.Image] = {}
+
+        disagreements: list[tuple[PromoExtractedField, str, float, int]] = []
+        for row in rows:
+            shot = shot_by_id.get(row.screenshot_id)
+            if shot is None:
+                continue
+            bbox = bbox_by_slug.get(row.region_slug)
+            if bbox is None:
+                continue
+            img = images.get(shot.id)
+            if img is None:
+                try:
+                    img = Image.open(shot.file_path).convert("RGB")
+                except OSError:
+                    continue
+                images[shot.id] = img
+            crop = img.crop(bbox)
+            result = matcher.match(crop, k=k, exclude_field_id=row.id)
+            if result is None or result.canonical_key == row.normalized:
+                continue
+            disagreements.append((row, result.canonical_key, result.distance, result.n_voting))
+
+    if not disagreements:
+        console.print("[bold green]No disagreements.[/] Vision agrees with every human label.")
+        return
+    console.print(
+        f"[bold yellow]{len(disagreements)} disagreement(s)[/] (Vision vs. human label):"
+    )
+    console.print(
+        f"  {'field_id':>9s}  {'human':18s}  {'vision':18s}  {'votes':>5s}  {'mean_dist':>9s}"
+    )
+    for row, vision_class, dist, n_voting in disagreements:
+        console.print(
+            f"  {row.id:>9d}  {row.normalized or '(none)':18s}  "
+            f"{vision_class:18s}  {n_voting:>3d}/{k}  {dist:>9.2f}"
+        )
 
 
 @app.command(name="rematch-tournament-characters")

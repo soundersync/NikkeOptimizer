@@ -202,20 +202,52 @@ def backfill_doll_classifications(
     session: Session,
     *,
     label_dir: Optional[Path] = None,
+    backend: str = "auto",
 ) -> tuple[int, int, Counter]:
     """Walk every player_loadout screenshot and classify all 5 doll
     slots, persisting results to ``PromoExtractedField``.
 
+    ``backend`` selects the classifier:
+      * ``"auto"`` (default): Vision K-NN if there's a non-empty
+        manually-corrected corpus in the DB; HSV exemplars otherwise.
+      * ``"vision"``: Vision K-NN; raises if the corpus is empty.
+      * ``"hsv"``: HSV mean-squared distance against the labeled
+        exemplar files. Original behaviour, useful as a baseline.
+
+    ``manually_corrected=True`` rows are NEVER overwritten — they're
+    the source of truth that builds the Vision corpus, and the user's
+    audit work shouldn't be undone by a re-classification pass.
+
     Returns ``(examined, updated, class_counts)``. Idempotent —
-    re-runs only update rows whose canonical_key changed.
+    re-runs only update rows whose canonical_key actually changes.
     """
     from PIL import Image
 
-    label_dir = Path(label_dir) if label_dir else default_label_dir()
-    exemplars = load_exemplars(str(label_dir))
-    if not exemplars:
-        log.warning("no exemplars loaded from %s — skipping", label_dir)
-        return 0, 0, Counter()
+    if backend not in ("auto", "vision", "hsv"):
+        raise ValueError(f"backend must be auto / vision / hsv, got {backend!r}")
+
+    # Resolve the active classifier based on backend selection.
+    use_vision = False
+    vision_matcher = None
+    exemplars = None
+    if backend in ("auto", "vision"):
+        from .promo_tournament_doll_vision import DollVisionMatcher
+
+        vision_matcher = DollVisionMatcher.from_session(session)
+        if len(vision_matcher) > 0:
+            use_vision = True
+        elif backend == "vision":
+            raise RuntimeError(
+                "Vision backend requested but the manually-corrected "
+                "corpus is empty. Audit some doll classifications first "
+                "(via /audit/dolls in the web UI) before re-running."
+            )
+    if not use_vision:
+        label_dir = Path(label_dir) if label_dir else default_label_dir()
+        exemplars = load_exemplars(str(label_dir))
+        if not exemplars:
+            log.warning("no exemplars loaded from %s — skipping", label_dir)
+            return 0, 0, Counter()
 
     counts: Counter = Counter()
     examined = 0
@@ -237,12 +269,6 @@ def backfill_doll_classifications(
             bbox = _DOLL_BBOX.get(slug)
             if bbox is None:
                 continue
-            crop = image.crop(bbox)
-            classification = classify_doll_crop(crop, exemplars)
-            if classification is None:
-                continue
-            examined += 1
-            counts[classification.canonical_key] += 1
 
             existing = session.exec(
                 select(PromoExtractedField).where(
@@ -250,6 +276,23 @@ def backfill_doll_classifications(
                     PromoExtractedField.region_slug == slug,
                 )
             ).first()
+            # Sticky: once a row is manually corrected, don't touch it.
+            if existing is not None and existing.manually_corrected:
+                examined += 1
+                if existing.normalized:
+                    counts[existing.normalized] += 1
+                continue
+
+            crop = image.crop(bbox)
+            if use_vision:
+                classification = vision_matcher.match(crop)
+            else:
+                classification = classify_doll_crop(crop, exemplars)
+            if classification is None:
+                continue
+            examined += 1
+            counts[classification.canonical_key] += 1
+
             new_text = classification.display_label
             new_norm = classification.canonical_key
             new_conf = classification.confidence
@@ -273,7 +316,6 @@ def backfill_doll_classifications(
                 existing.text = new_text
                 existing.normalized = new_norm
                 existing.confidence = new_conf
-                # Make sure character_id stays None (defensive).
                 existing.character_id = None
                 existing.character_match_score = None
                 session.add(existing)
