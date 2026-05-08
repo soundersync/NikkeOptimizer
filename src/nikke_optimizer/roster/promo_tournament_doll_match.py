@@ -33,9 +33,12 @@ log = logging.getLogger(__name__)
 
 
 # Canonical key → exemplar filename. Add a new entry per labeled image
-# the user provides. Pending: ``r_max`` (R level-15, no exemplar yet).
+# the user provides. ``none`` is intentionally absent — there's no
+# meaningful "absence of doll" reference image; the audit page renders
+# the placeholder for that key.
 EXEMPLAR_FILES: dict[str, str] = {
     "r_partial": "has-r-doll-not-fully-leveld-up.png",
+    "r_max": "has-r-doll-level-15-fully-leveld-up.png",
     "sr_partial": "has-sr-doll-not-fully-leveled-up.png",
     "sr_max": "has-sr-doll-level-15-fully-leveld-up.png",
     "treasure_partial": "has-treasure-not-fully-leveled-up.png",
