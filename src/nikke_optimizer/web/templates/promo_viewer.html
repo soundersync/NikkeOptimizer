@@ -283,11 +283,29 @@
                     <div class="label">{{ r.label }}</div>
 
                     {% set ext = vr.ext %}
-                    {% set is_image_only = r.slug.endswith(".portrait") or r.slug.endswith(".doll") %}
-                    {% if is_image_only %}
-                        <div class="ocr empty">— image, not OCR'd —</div>
-                    {% elif ext is none %}
+                    {% set is_doll = r.slug.endswith(".doll") %}
+                    {% set is_portrait = r.slug.endswith(".portrait") %}
+                    {% if ext is none %}
+                        {% if is_portrait or is_doll %}
+                        <div class="ocr empty">— image, not yet matched —</div>
+                        {% else %}
                         <div class="ocr empty">— no extraction yet —</div>
+                        {% endif %}
+                    {% elif is_doll and ext.normalized %}
+                        {# Doll/treasure: render the same coloured pill the
+                           canonical-team panel uses (CSS lives in _base.html). #}
+                        <div class="ocr">
+                            <span class="doll-pill {{ ext.normalized }}">{{ ext.text or ext.normalized }}</span>
+                        </div>
+                    {% elif is_portrait and vr.matched_character %}
+                        {# Portrait: show the matched character name even
+                           though the OCR text is just the duel-result
+                           name we copied in via slot-correspondence. #}
+                        <div class="ocr">
+                            {% if ext.text %}{{ ext.text }} <span class="arrow">→</span>{% endif %}
+                            <span class="matched">{{ vr.matched_character }}</span>
+                            {% if ext.character_match_score %}<span class="extra">{{ "%.0f"|format(ext.character_match_score) }}%</span>{% endif %}
+                        </div>
                     {% elif not ext.text and not ext.normalized %}
                         <div class="ocr empty">— OCR returned empty —</div>
                     {% else %}

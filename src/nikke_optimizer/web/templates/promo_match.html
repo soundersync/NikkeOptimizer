@@ -170,7 +170,7 @@ h1 { margin: 0 0 4px; }
     <span class="pill">{% if match.has_loadouts %}with loadouts{% else %}results-only{% endif %}</span>
 </div>
 
-{% if not match.has_loadouts and canonical %}
+{% if canonical %}
 <section style="margin-bottom: 26px;">
     <h2 style="font-size: 14px; font-weight: 600; color: #e5e7eb; margin: 0 0 10px; padding-bottom: 6px; border-bottom: 1px solid #1f2228;">
         Canonical team
@@ -237,26 +237,12 @@ h1 { margin: 0 0 4px; }
         color: #9ca3af;
         text-align: center;
     }
-    .doll-pill {
+    /* Per-tier colors live in _base.html; the canon-card layout
+       just needs the surrounding spacing. */
+    .canon-char .doll-pill {
+        display: block;
         margin: 0 8px 4px;
-        padding: 2px 6px;
-        border-radius: 999px;
-        font-size: 9px;
-        font-family: "SF Mono", Menlo, monospace;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        text-align: center;
-        border: 1px solid;
     }
-    /* Per-tier colors keyed off the icon's dominant border hue. */
-    .doll-pill.r_partial      { color: #67e8f9; border-color: #155e75; background: #0e2935; }
-    .doll-pill.r_max          { color: #38bdf8; border-color: #0c4a6e; background: #0a2335; }
-    .doll-pill.sr_partial     { color: #f9a8d4; border-color: #831843; background: #2a0e1f; }
-    .doll-pill.sr_max         { color: #c4b5fd; border-color: #4c1d95; background: #1e1432; }
-    .doll-pill.treasure_partial { color: #fef3c7; border-color: #78350f; background: #2a210b; }
-    .doll-pill.treasure_max   { color: #fdba74; border-color: #7c2d12; background: #2a160a; }
-    .doll-pill.unknown        { color: #6b7280; border-color: #1f2228; background: #14161b; }
     .canon-missing { color: #6b7280; font-style: italic; font-size: 12px; }
     </style>
 

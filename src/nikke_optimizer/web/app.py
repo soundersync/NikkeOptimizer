@@ -2526,38 +2526,37 @@ def create_app(
                         "row": s,
                         "url": _promo_image_url(s.file_path),
                     })
-            # For results-only matches: derive team comps from duel
-            # results AND look up each player's canonical loadout
-            # (round_64 / quarterfinals) for portraits + CPs. The
-            # overview screenshot id + side gets passed in so the
-            # canonical lookup can fall back to image-hash matching
-            # when its OCR text is empty.
-            derived_loadouts = None
+            # Derived team comps from duel results AND the canonical
+            # loadout lookup (round_64 / quarterfinals where loadouts
+            # exist) for portraits + CPs + dolls. Always compute when
+            # there's a results overview — round_64 matches benefit
+            # from the same canonical-team panel that results-only
+            # matches use, since the OCR-based lookup naturally
+            # picks each side's own loadout.
+            derived_loadouts = _promo_derived_loadouts(session, match_id)
             canonical = None
-            if not match.has_loadouts:
-                derived_loadouts = _promo_derived_loadouts(session, match_id)
-                if derived_loadouts:
-                    overview = session.exec(
-                        select(PromoMatchScreenshot).where(
-                            PromoMatchScreenshot.match_id == match_id,
-                            PromoMatchScreenshot.kind == "results_overview",
-                        )
-                    ).first()
-                    overview_id = overview.id if overview else None
-                    canonical = {
-                        "left": _promo_canonical_loadout(
-                            session,
-                            derived_loadouts["left"]["name"],
-                            current_overview_id=overview_id,
-                            current_side="left",
-                        ),
-                        "right": _promo_canonical_loadout(
-                            session,
-                            derived_loadouts["right"]["name"],
-                            current_overview_id=overview_id,
-                            current_side="right",
-                        ),
-                    }
+            if derived_loadouts:
+                overview = session.exec(
+                    select(PromoMatchScreenshot).where(
+                        PromoMatchScreenshot.match_id == match_id,
+                        PromoMatchScreenshot.kind == "results_overview",
+                    )
+                ).first()
+                overview_id = overview.id if overview else None
+                canonical = {
+                    "left": _promo_canonical_loadout(
+                        session,
+                        derived_loadouts["left"]["name"],
+                        current_overview_id=overview_id,
+                        current_side="left",
+                    ),
+                    "right": _promo_canonical_loadout(
+                        session,
+                        derived_loadouts["right"]["name"],
+                        current_overview_id=overview_id,
+                        current_side="right",
+                    ),
+                }
         return templates.TemplateResponse(
             request,
             "promo_match.html",
