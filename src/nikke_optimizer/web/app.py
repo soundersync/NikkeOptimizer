@@ -2902,150 +2902,210 @@ def create_app(
             },
         )
 
-    @app.get("/audit/dolls", response_class=HTMLResponse)
-    def audit_dolls_root() -> Response:
-        with get_session(engine) as session:
-            rows = _audit_doll_sorted(session)
-            if not rows:
-                return RedirectResponse("/audit/dolls/0", status_code=302)
-            return RedirectResponse(
-                f"/audit/dolls/{rows[0].id}", status_code=302
+    _DOLL_DEFAULT_CLASS = "r_partial"
+
+    def _audit_doll_class_counts(session) -> dict[str, int]:
+        """``{class_key: count}`` over all ``%.doll`` rows."""
+        from sqlalchemy import func as sa_func
+
+        rows = session.exec(
+            select(
+                PromoExtractedField.normalized,
+                sa_func.count(PromoExtractedField.id),
             )
-
-    def _audit_doll_sorted(session) -> list[PromoExtractedField]:
-        """All ``%.doll`` extractions in priority order.
-
-        Sort: ``manually_corrected ASC`` (un-audited first), then
-        ``confidence ASC NULLS FIRST`` (suspicious first), then ``id ASC``.
-        Field-id-based audit URLs use this list for prev/next + position
-        lookup. Confidence and manually_corrected only change via the
-        audit POSTs, so the order between requests is stable enough for
-        per-field URLs.
-        """
-        return session.exec(
-            select(PromoExtractedField)
             .where(PromoExtractedField.region_slug.like("%.doll"))
+            .group_by(PromoExtractedField.normalized)
+        ).all()
+        out: dict[str, int] = {}
+        for normalized, count in rows:
+            key = normalized if normalized in _DOLL_AUDIT_KEYS else "unknown"
+            out[key] = out.get(key, 0) + int(count)
+        for k in _DOLL_AUDIT_KEYS:
+            out.setdefault(k, 0)
+        return out
+
+    def _audit_doll_class_rows(session, class_key: str):
+        """Return rows for ``class_key`` enriched with per-icon context.
+
+        Sort: manually_corrected ASC (un-audited first), then confidence
+        ASC NULLS FIRST (suspicious first), then id ASC. Each entry
+        carries the data the grid template needs to render a cropped
+        icon button.
+        """
+        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
+        # Doll bbox by slug, so we can resolve per-row crop coords.
+        doll_bbox_by_slug = {
+            r.slug: r.bbox for r in PLAYER_LOADOUT if r.slug.endswith(".doll")
+        }
+
+        rows = session.exec(
+            select(PromoExtractedField)
+            .where(
+                PromoExtractedField.region_slug.like("%.doll"),
+                PromoExtractedField.normalized == class_key,
+            )
             .order_by(
                 PromoExtractedField.manually_corrected.asc(),
                 PromoExtractedField.confidence.asc().nulls_first(),
                 PromoExtractedField.id.asc(),
             )
         ).all()
+        if not rows:
+            return []
 
-    def _audit_doll_neighbors(
-        rows: list[PromoExtractedField], field_id: int
-    ) -> tuple[int, Optional[int], Optional[int]]:
-        """Return ``(position_index, prev_id, next_id)`` for the field
-        with ``field_id`` in the sorted list. ``-1, None, None`` when
-        not found."""
-        for i, r in enumerate(rows):
-            if r.id == field_id:
-                prev_id = rows[i - 1].id if i > 0 else None
-                next_id = rows[i + 1].id if i < len(rows) - 1 else None
-                return i, prev_id, next_id
-        return -1, None, None
-
-    @app.get("/audit/dolls/{field_id}", response_class=HTMLResponse)
-    def audit_dolls(request: Request, field_id: int) -> Response:
-        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
-
-        with get_session(engine) as session:
-            rows = _audit_doll_sorted(session)
-            if not rows:
-                return templates.TemplateResponse(
-                    request,
-                    "audit_dolls.html",
-                    {"empty": True, "total": 0},
-                )
-            position, prev_id, next_id = _audit_doll_neighbors(rows, field_id)
-            if position < 0:
-                # Field doesn't match a doll-slug row — redirect to the
-                # head of the list rather than 404 so the audit flow
-                # stays usable.
-                return RedirectResponse(
-                    f"/audit/dolls/{rows[0].id}", status_code=302
-                )
-            field = rows[position]
-            shot = session.get(PromoMatchScreenshot, field.screenshot_id)
-            total = len(rows)
-            match = session.get(PromoMatch, shot.match_id) if shot else None
-            tournament = (
-                session.get(PromoTournament, match.tournament_id)
-                if match else None
+        # Batch-fetch screenshots + per-screenshot context fields so
+        # each grid row doesn't trigger N queries.
+        shot_ids = list({r.screenshot_id for r in rows})
+        shots = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.id.in_(shot_ids)
             )
-            group = (
-                session.get(PromoGroup, match.group_id) if match else None
-            )
-            # Player + same-slot character_id from the loadout's other
-            # extractions, for breadcrumb context.
-            player_name_field = session.exec(
-                select(PromoExtractedField).where(
-                    PromoExtractedField.screenshot_id == shot.id,
-                    PromoExtractedField.region_slug == "player_name",
-                )
-            ).first() if shot else None
-            slot = field.region_slug.split(".")[0]  # e.g. "char3"
-            portrait_field = session.exec(
-                select(PromoExtractedField).where(
-                    PromoExtractedField.screenshot_id == shot.id,
-                    PromoExtractedField.region_slug == f"{slot}.portrait",
-                )
-            ).first() if shot else None
-            character_name = None
-            if portrait_field and portrait_field.character_id:
-                row = session.exec(
-                    select(Character.name).where(
-                        Character.id == portrait_field.character_id
-                    )
-                ).first()
-                character_name = str(row) if row else None
+        ).all()
+        shot_by_id = {s.id: s for s in shots}
 
-        # Compute the source image URL + bbox for this doll region so
-        # the page can render the icon via background-position.
-        image_url = _promo_image_url(shot.file_path) if shot else None
-        bbox = next(
-            (r.bbox for r in PLAYER_LOADOUT if r.slug == field.region_slug),
-            None,
+        # Pull player_name + char.portrait extractions for tooltip context.
+        slugs_needed = {"player_name"}
+        for r in rows:
+            slot = r.region_slug.split(".")[0]  # "char3"
+            slugs_needed.add(f"{slot}.portrait")
+        ctx_fields = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.screenshot_id.in_(shot_ids),
+                PromoExtractedField.region_slug.in_(list(slugs_needed)),
+            )
+        ).all()
+        ctx_by_shot: dict[int, dict[str, PromoExtractedField]] = {}
+        for f in ctx_fields:
+            ctx_by_shot.setdefault(f.screenshot_id, {})[f.region_slug] = f
+
+        char_ids: set[int] = set()
+        for slug_map in ctx_by_shot.values():
+            for slug, f in slug_map.items():
+                if slug.endswith(".portrait") and f.character_id:
+                    char_ids.add(f.character_id)
+        char_names: dict[int, str] = {}
+        if char_ids:
+            crows = session.exec(
+                select(Character.id, Character.name).where(
+                    Character.id.in_(char_ids)
+                )
+            ).all()
+            char_names = {int(cid): str(name) for cid, name in crows}
+
+        match_ids = list({s.match_id for s in shots})
+        matches = session.exec(
+            select(PromoMatch).where(PromoMatch.id.in_(match_ids))
+        ).all()
+        match_by_id = {m.id: m for m in matches}
+
+        out = []
+        for f in rows:
+            shot = shot_by_id.get(f.screenshot_id)
+            if shot is None:
+                continue
+            slot = f.region_slug.split(".")[0]
+            ctx = ctx_by_shot.get(shot.id, {})
+            player_field = ctx.get("player_name")
+            portrait_field = ctx.get(f"{slot}.portrait")
+            character_name = (
+                char_names.get(portrait_field.character_id)
+                if portrait_field and portrait_field.character_id
+                else None
+            )
+            match = match_by_id.get(shot.match_id)
+            tooltip_parts = []
+            if player_field and player_field.text:
+                tooltip_parts.append(player_field.text)
+            if character_name:
+                tooltip_parts.append(character_name)
+            elif portrait_field and portrait_field.text:
+                tooltip_parts.append(portrait_field.text)
+            if match:
+                ml = match.round_label.replace("_", " ")
+                tooltip_parts.append(
+                    f"{ml}{(' #' + str(match.match_no)) if match.match_no else ''}"
+                )
+            tooltip_parts.append(f"{shot.side or '-'} round {shot.round_no or '-'}")
+            tooltip_parts.append(f"slot {slot[4:]}")
+            if f.confidence is not None:
+                tooltip_parts.append(f"conf {f.confidence:.2f}")
+            if f.manually_corrected:
+                tooltip_parts.append("manually corrected")
+            out.append({
+                "field": f,
+                "image_url": _promo_image_url(shot.file_path),
+                "bbox": doll_bbox_by_slug.get(f.region_slug),
+                "tooltip": " · ".join(tooltip_parts),
+            })
+        return out
+
+    @app.get("/audit/dolls", response_class=HTMLResponse)
+    def audit_dolls_root() -> Response:
+        return RedirectResponse(
+            f"/audit/dolls/{_DOLL_DEFAULT_CLASS}", status_code=302
         )
-        ref_w, ref_h = PROMO_REF_SIZE
 
-        # Build the choice list for the buttons row.
-        choices = []
-        for key in _DOLL_AUDIT_KEYS:
-            filename = _DOLL_EXEMPLAR_FILES.get(key)
-            choices.append({
-                "key": key,
-                "label": _DOLL_DISPLAY_LABELS.get(key, key),
+    @app.get("/audit/dolls/{class_key}", response_class=HTMLResponse)
+    def audit_dolls(request: Request, class_key: str) -> Response:
+        if class_key not in _DOLL_AUDIT_KEYS:
+            return RedirectResponse(
+                f"/audit/dolls/{_DOLL_DEFAULT_CLASS}", status_code=302
+            )
+        with get_session(engine) as session:
+            counts = _audit_doll_class_counts(session)
+            entries = _audit_doll_class_rows(session, class_key)
+
+        # Build the dropdown options (preserves canonical order).
+        class_options = [
+            {
+                "key": k,
+                "label": _DOLL_DISPLAY_LABELS.get(k, k),
+                "count": counts.get(k, 0),
+                "is_current": k == class_key,
+            }
+            for k in _DOLL_AUDIT_KEYS
+        ]
+
+        # Reference image for the currently-selected class — None for
+        # classes without an exemplar (r_max / none / unknown).
+        exemplar_filename = _DOLL_EXEMPLAR_FILES.get(class_key)
+        reference_url = (
+            f"/static/doll-icons/{exemplar_filename}"
+            if exemplar_filename else None
+        )
+
+        # Reassign-popover choices: same shape as the dropdown but
+        # always with the small reference thumbnail.
+        reassign_choices = []
+        for k in _DOLL_AUDIT_KEYS:
+            filename = _DOLL_EXEMPLAR_FILES.get(k)
+            reassign_choices.append({
+                "key": k,
+                "label": _DOLL_DISPLAY_LABELS.get(k, k),
                 "exemplar_url": (
                     f"/static/doll-icons/{filename}" if filename else None
                 ),
-                "is_current": (field.normalized == key),
+                "is_current": k == class_key,
             })
 
+        ref_w, ref_h = PROMO_REF_SIZE
+        n_corrected = sum(
+            1 for e in entries if e["field"].manually_corrected
+        )
         return templates.TemplateResponse(
             request,
             "audit_dolls.html",
             {
-                "empty": False,
-                "field": field,
-                "shot": shot,
-                "match": match,
-                "tournament": tournament,
-                "group": group,
-                "player_name": (
-                    player_name_field.text if player_name_field else None
-                ),
-                "slot": slot,
-                "character_name": character_name,
-                "image_url": image_url,
-                "bbox": bbox,
+                "class_key": class_key,
+                "class_label": _DOLL_DISPLAY_LABELS.get(class_key, class_key),
+                "reference_url": reference_url,
+                "class_options": class_options,
+                "entries": entries,
+                "reassign_choices": reassign_choices,
                 "ref_w": ref_w,
                 "ref_h": ref_h,
-                "choices": choices,
-                "total": total,
-                "position": position,
-                "prev_id": prev_id,
-                "next_id": next_id,
+                "n_corrected": n_corrected,
             },
         )
 
@@ -3053,7 +3113,7 @@ def create_app(
     def audit_dolls_correct(
         field_id: int,
         normalized: str = Form(...),
-        next_id: Optional[int] = Form(None),
+        return_class: str = Form(""),
     ) -> Response:
         if normalized not in _DOLL_AUDIT_KEYS:
             raise HTTPException(400, f"unknown doll key: {normalized}")
@@ -3067,28 +3127,13 @@ def create_app(
             field.manually_corrected = True
             session.add(field)
             session.commit()
-        # Auto-advance to the embedded next field so that browser-back
-        # always returns to the just-corrected field with the user's
-        # pick highlighted. If we computed "next" post-correction the
-        # field would have shuffled to the end of the sorted list.
-        if next_id is not None:
-            return RedirectResponse(
-                f"/audit/dolls/{next_id}", status_code=303
-            )
-        return RedirectResponse(
-            f"/audit/dolls/{field_id}", status_code=303
+        # Stay on the class page the user was viewing — the reassigned
+        # icon disappears from this view; user keeps auditing.
+        target = (
+            return_class
+            if return_class in _DOLL_AUDIT_KEYS
+            else _DOLL_DEFAULT_CLASS
         )
-
-    @app.post("/audit/dolls/{field_id}/skip")
-    def audit_dolls_skip(
-        field_id: int,
-        prev_id: Optional[int] = Form(None),
-        next_id: Optional[int] = Form(None),
-        direction: str = Form("next"),
-    ) -> Response:
-        target = prev_id if direction == "prev" else next_id
-        if target is None:
-            target = field_id
         return RedirectResponse(
             f"/audit/dolls/{target}", status_code=303
         )
