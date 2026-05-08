@@ -17,6 +17,7 @@
             <a href="/captures">Captures</a>
             <a href="/captures?review_only=true">Needs review</a>
             <a href="/captures?session_kind=predictions&amp;since=7d">Awaiting results</a>
+            <a href="/audit">Audit</a>
             <a href="/promo">Tournaments</a>
             <a href="/optimize/rookie">Rookie</a>
             <a href="/optimize/sp">SP Arena</a>
@@ -171,6 +172,15 @@ input[list] {
 .doll-pill.treasure_partial { color: #fef3c7; border-color: #78350f; background: #2a210b; }
 .doll-pill.treasure_max   { color: #fdba74; border-color: #7c2d12; background: #2a160a; }
 .doll-pill.unknown        { color: #6b7280; border-color: #1f2228; background: #14161b; }
+/* Audit-applied indicator: subtle gold halo + ✓ on the pill anywhere
+   it renders. Kept lightweight so it doesn't drown the rarity colour. */
+.doll-pill.manually-corrected {
+    box-shadow: 0 0 0 1px #fde68a, 0 0 0 2px rgba(253, 230, 138, 0.20);
+}
+.doll-pill.manually-corrected::after {
+    content: " ✓";
+    color: #fde68a;
+}
 </style>
 <script>
 // Slice #137 — hover-preview helper. Wraps any element with

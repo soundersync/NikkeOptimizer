@@ -352,7 +352,7 @@ h1 { margin: 0 0 4px; }
                             {% if char.cp %}{{ "{:,}".format(char.cp) }}{% else %}—{% endif %}
                         </div>
                         {% if char.doll_label and char.doll_key %}
-                        <div class="doll-pill {{ char.doll_key }}">{{ char.doll_label }}</div>
+                        <div class="doll-pill {{ char.doll_key }}{% if char.doll_manually_corrected %} manually-corrected{% endif %}">{{ char.doll_label }}</div>
                         {% endif %}
                     </div>
                     {% endfor %}

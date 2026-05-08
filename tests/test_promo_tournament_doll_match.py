@@ -43,11 +43,11 @@ def _label_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_default_label_dir_resolves_under_repo():
+def test_default_label_dir_resolves_under_web_static():
     d = default_label_dir()
-    # Repo-root-relative resolution; doesn't have to exist for this test.
-    assert d.name == "labeled-doll-treasure-icons"
-    assert d.parent.name == "debug"
+    assert d.name == "doll-icons"
+    assert d.parent.name == "static"
+    assert d.parent.parent.name == "web"
 
 
 def test_load_exemplars_skips_missing_silently(tmp_path):

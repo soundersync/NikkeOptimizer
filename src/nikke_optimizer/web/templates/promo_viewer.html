@@ -295,7 +295,7 @@
                         {# Doll/treasure: render the same coloured pill the
                            canonical-team panel uses (CSS lives in _base.html). #}
                         <div class="ocr">
-                            <span class="doll-pill {{ ext.normalized }}">{{ ext.text or ext.normalized }}</span>
+                            <span class="doll-pill {{ ext.normalized }}{% if ext.manually_corrected %} manually-corrected{% endif %}">{{ ext.text or ext.normalized }}</span>
                         </div>
                     {% elif is_portrait and vr.matched_character %}
                         {# Portrait: show the matched character name even

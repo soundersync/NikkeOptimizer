@@ -532,4 +532,11 @@ class PromoExtractedField(SQLModel, table=True):
     confidence: Optional[float] = Field(
         default=None, description="OCR confidence score from PaddleOCR (0..1)."
     )
+    manually_corrected: bool = Field(
+        default=False,
+        description=(
+            "True when the user overrode the auto-classification via the audit UI. "
+            "Sticky against future re-runs of label/match commands."
+        ),
+    )
     extracted_at: datetime = Field(default_factory=_utcnow)

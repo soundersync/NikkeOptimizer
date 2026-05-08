@@ -55,6 +55,30 @@ def make_engine(db_path: Optional[Path] = None, *, echo: bool = False):
 def init_db(engine) -> None:
     """Idempotently create all tables. Safe to call on every startup."""
     SQLModel.metadata.create_all(engine)
+    _ensure_promo_extracted_field_columns(engine)
+
+
+def _ensure_promo_extracted_field_columns(engine) -> None:
+    """Add columns added to ``PromoExtractedField`` since the table was
+    first created. SQLite doesn't support ``ALTER ... ADD IF NOT EXISTS``
+    so we check ``pragma_table_info`` and ALTER only when the column is
+    missing. Idempotent — safe on every boot.
+    """
+    with engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in conn.exec_driver_sql(
+                "PRAGMA table_info(promo_extracted_field)"
+            )
+        }
+        if not cols:
+            return  # table not yet created (e.g. fresh in-memory DB before create_all)
+        if "manually_corrected" not in cols:
+            conn.exec_driver_sql(
+                "ALTER TABLE promo_extracted_field "
+                "ADD COLUMN manually_corrected INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.commit()
 
 
 def get_session(engine) -> Session:

@@ -1,0 +1,49 @@
+{% extends "_base.html" %}
+{% block title %}Audit — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.audit-page h1 { margin-bottom: 4px; }
+.audit-page .lead { color: #9ca3af; margin-bottom: 24px; font-size: 13px; }
+.audit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+.audit-card {
+    display: block;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 18px 20px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.1s ease, background 0.1s ease;
+}
+.audit-card:hover { border-color: #3a4250; background: #181b21; }
+.audit-card h3 { margin: 0 0 6px; color: #e5e7eb; font-size: 14px; }
+.audit-card p { margin: 0; color: #9ca3af; font-size: 12px; }
+.audit-card .stats {
+    margin-top: 12px; display: flex; gap: 14px;
+    font-size: 12px; color: #d1d5db;
+}
+.audit-card .stats strong { color: #f87171; }
+</style>
+
+<div class="audit-page">
+<h1>Audit</h1>
+<p class="lead">Review and correct the auto-classified extractions one item at a time.</p>
+
+<div class="audit-grid">
+    <a class="audit-card" href="/audit/dolls">
+        <h3>Doll / Treasure</h3>
+        <p>Step through every classified doll/treasure icon, sorted by lowest confidence first.</p>
+        <div class="stats">
+            <span><strong>{{ doll_total }}</strong> total</span>
+            <span><strong>{{ doll_corrected }}</strong> manually corrected</span>
+        </div>
+    </a>
+</div>
+</div>
+
+{% endblock %}

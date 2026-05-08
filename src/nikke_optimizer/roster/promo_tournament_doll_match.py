@@ -69,11 +69,18 @@ _DOLL_BBOX: dict[str, tuple[int, int, int, int]] = {
 
 
 def default_label_dir() -> Path:
-    """Repo-root-relative location of the labeled exemplars."""
+    """Versioned, web-served location of the labeled exemplars.
+
+    Lives under the web app's static dir so the audit page can serve
+    them via ``/static/doll-icons/...`` and the matcher can read them
+    off disk. Files are part of the package source tree (committed) —
+    not in the gitignored ``/debug/`` dir where they originally lived.
+    """
     return (
-        Path(__file__).resolve().parents[3]
-        / "debug"
-        / "labeled-doll-treasure-icons"
+        Path(__file__).resolve().parents[1]
+        / "web"
+        / "static"
+        / "doll-icons"
     )
 
 

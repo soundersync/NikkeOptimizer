@@ -2249,6 +2249,9 @@ def create_app(
                     ),
                     "doll_label": doll.text if doll else None,
                     "doll_key": doll.normalized if doll else None,
+                    "doll_manually_corrected": (
+                        doll.manually_corrected if doll else False
+                    ),
                 })
             return {
                 "round_no": loadout.round_no,
@@ -2850,6 +2853,199 @@ def create_app(
                 "kinds": PROMO_KINDS,
                 "format": fmt,
             },
+        )
+
+    # ------------------------------------------------------------------
+    # Audit — review + correct extracted-field classifications
+    # ------------------------------------------------------------------
+
+    from ..roster.promo_tournament_doll_match import (
+        DISPLAY_LABELS as _DOLL_DISPLAY_LABELS,
+        EXEMPLAR_FILES as _DOLL_EXEMPLAR_FILES,
+    )
+
+    # Stable display order across the audit page button row.
+    _DOLL_AUDIT_KEYS: tuple[str, ...] = (
+        "r_partial",
+        "r_max",
+        "sr_partial",
+        "sr_max",
+        "treasure_partial",
+        "treasure_max",
+        "unknown",
+    )
+
+    @app.get("/audit", response_class=HTMLResponse)
+    def audit_index(request: Request) -> Response:
+        with get_session(engine) as session:
+            doll_total = len(session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.doll")
+                )
+            ).all())
+            doll_corrected = len(session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.doll"),
+                    PromoExtractedField.manually_corrected == True,  # noqa: E712
+                )
+            ).all())
+        return templates.TemplateResponse(
+            request,
+            "audit_index.html",
+            {
+                "doll_total": doll_total,
+                "doll_corrected": doll_corrected,
+            },
+        )
+
+    @app.get("/audit/dolls", response_class=HTMLResponse)
+    def audit_dolls_root() -> Response:
+        return RedirectResponse("/audit/dolls/0", status_code=302)
+
+    def _audit_doll_at_cursor(session, cursor: int):
+        """Return ``(field_row, screenshot_row, total_count, cursor)``.
+
+        Sort order: confidence ASC NULLS FIRST, id ASC. Out-of-range
+        cursors are clamped to the valid range.
+        """
+        rows = session.exec(
+            select(PromoExtractedField)
+            .where(PromoExtractedField.region_slug.like("%.doll"))
+            .order_by(
+                PromoExtractedField.confidence.asc().nulls_first(),
+                PromoExtractedField.id.asc(),
+            )
+        ).all()
+        total = len(rows)
+        if total == 0:
+            return None, None, 0, 0
+        cursor = max(0, min(cursor, total - 1))
+        field = rows[cursor]
+        shot = session.get(PromoMatchScreenshot, field.screenshot_id)
+        return field, shot, total, cursor
+
+    @app.get("/audit/dolls/{cursor}", response_class=HTMLResponse)
+    def audit_dolls(request: Request, cursor: int) -> Response:
+        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
+        with get_session(engine) as session:
+            field, shot, total, cursor = _audit_doll_at_cursor(session, cursor)
+            if field is None:
+                return templates.TemplateResponse(
+                    request,
+                    "audit_dolls.html",
+                    {"empty": True, "total": 0, "cursor": 0},
+                )
+            match = session.get(PromoMatch, shot.match_id) if shot else None
+            tournament = (
+                session.get(PromoTournament, match.tournament_id)
+                if match else None
+            )
+            group = (
+                session.get(PromoGroup, match.group_id) if match else None
+            )
+            # Player + same-slot character_id from the loadout's other
+            # extractions, for breadcrumb context.
+            player_name_field = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.screenshot_id == shot.id,
+                    PromoExtractedField.region_slug == "player_name",
+                )
+            ).first() if shot else None
+            slot = field.region_slug.split(".")[0]  # e.g. "char3"
+            portrait_field = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.screenshot_id == shot.id,
+                    PromoExtractedField.region_slug == f"{slot}.portrait",
+                )
+            ).first() if shot else None
+            character_name = None
+            if portrait_field and portrait_field.character_id:
+                row = session.exec(
+                    select(Character.name).where(
+                        Character.id == portrait_field.character_id
+                    )
+                ).first()
+                character_name = str(row) if row else None
+
+        # Compute the source image URL + bbox for this doll region so
+        # the page can render the icon via background-position.
+        image_url = _promo_image_url(shot.file_path) if shot else None
+        bbox = next(
+            (r.bbox for r in PLAYER_LOADOUT if r.slug == field.region_slug),
+            None,
+        )
+        ref_w, ref_h = PROMO_REF_SIZE
+
+        # Build the choice list for the buttons row.
+        choices = []
+        for key in _DOLL_AUDIT_KEYS:
+            filename = _DOLL_EXEMPLAR_FILES.get(key)
+            choices.append({
+                "key": key,
+                "label": _DOLL_DISPLAY_LABELS.get(key, key),
+                "exemplar_url": (
+                    f"/static/doll-icons/{filename}" if filename else None
+                ),
+                "is_current": (field.normalized == key),
+            })
+
+        return templates.TemplateResponse(
+            request,
+            "audit_dolls.html",
+            {
+                "empty": False,
+                "field": field,
+                "shot": shot,
+                "match": match,
+                "tournament": tournament,
+                "group": group,
+                "player_name": (
+                    player_name_field.text if player_name_field else None
+                ),
+                "slot": slot,
+                "character_name": character_name,
+                "image_url": image_url,
+                "bbox": bbox,
+                "ref_w": ref_w,
+                "ref_h": ref_h,
+                "choices": choices,
+                "total": total,
+                "cursor": cursor,
+            },
+        )
+
+    @app.post("/audit/dolls/{field_id}/correct")
+    def audit_dolls_correct(
+        field_id: int,
+        normalized: str = Form(...),
+        cursor: int = Form(0),
+    ) -> Response:
+        if normalized not in _DOLL_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown doll key: {normalized}")
+        with get_session(engine) as session:
+            field = session.get(PromoExtractedField, field_id)
+            if field is None:
+                raise HTTPException(404, f"field {field_id} not found")
+            field.normalized = normalized
+            field.text = _DOLL_DISPLAY_LABELS.get(normalized, normalized)
+            field.confidence = 1.0
+            field.manually_corrected = True
+            session.add(field)
+            session.commit()
+        return RedirectResponse(
+            f"/audit/dolls/{cursor + 1}", status_code=303
+        )
+
+    @app.post("/audit/dolls/{field_id}/skip")
+    def audit_dolls_skip(
+        field_id: int,
+        cursor: int = Form(0),
+        direction: str = Form("next"),
+    ) -> Response:
+        delta = -1 if direction == "prev" else 1
+        return RedirectResponse(
+            f"/audit/dolls/{max(0, cursor + delta)}", status_code=303
         )
 
     @app.get("/healthz")
