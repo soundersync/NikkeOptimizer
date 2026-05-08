@@ -2900,42 +2900,70 @@ def create_app(
 
     @app.get("/audit/dolls", response_class=HTMLResponse)
     def audit_dolls_root() -> Response:
-        return RedirectResponse("/audit/dolls/0", status_code=302)
+        with get_session(engine) as session:
+            rows = _audit_doll_sorted(session)
+            if not rows:
+                return RedirectResponse("/audit/dolls/0", status_code=302)
+            return RedirectResponse(
+                f"/audit/dolls/{rows[0].id}", status_code=302
+            )
 
-    def _audit_doll_at_cursor(session, cursor: int):
-        """Return ``(field_row, screenshot_row, total_count, cursor)``.
+    def _audit_doll_sorted(session) -> list[PromoExtractedField]:
+        """All ``%.doll`` extractions in priority order.
 
-        Sort order: confidence ASC NULLS FIRST, id ASC. Out-of-range
-        cursors are clamped to the valid range.
+        Sort: ``manually_corrected ASC`` (un-audited first), then
+        ``confidence ASC NULLS FIRST`` (suspicious first), then ``id ASC``.
+        Field-id-based audit URLs use this list for prev/next + position
+        lookup. Confidence and manually_corrected only change via the
+        audit POSTs, so the order between requests is stable enough for
+        per-field URLs.
         """
-        rows = session.exec(
+        return session.exec(
             select(PromoExtractedField)
             .where(PromoExtractedField.region_slug.like("%.doll"))
             .order_by(
+                PromoExtractedField.manually_corrected.asc(),
                 PromoExtractedField.confidence.asc().nulls_first(),
                 PromoExtractedField.id.asc(),
             )
         ).all()
-        total = len(rows)
-        if total == 0:
-            return None, None, 0, 0
-        cursor = max(0, min(cursor, total - 1))
-        field = rows[cursor]
-        shot = session.get(PromoMatchScreenshot, field.screenshot_id)
-        return field, shot, total, cursor
 
-    @app.get("/audit/dolls/{cursor}", response_class=HTMLResponse)
-    def audit_dolls(request: Request, cursor: int) -> Response:
+    def _audit_doll_neighbors(
+        rows: list[PromoExtractedField], field_id: int
+    ) -> tuple[int, Optional[int], Optional[int]]:
+        """Return ``(position_index, prev_id, next_id)`` for the field
+        with ``field_id`` in the sorted list. ``-1, None, None`` when
+        not found."""
+        for i, r in enumerate(rows):
+            if r.id == field_id:
+                prev_id = rows[i - 1].id if i > 0 else None
+                next_id = rows[i + 1].id if i < len(rows) - 1 else None
+                return i, prev_id, next_id
+        return -1, None, None
+
+    @app.get("/audit/dolls/{field_id}", response_class=HTMLResponse)
+    def audit_dolls(request: Request, field_id: int) -> Response:
         from ..roster.promo_tournament_regions import PLAYER_LOADOUT
 
         with get_session(engine) as session:
-            field, shot, total, cursor = _audit_doll_at_cursor(session, cursor)
-            if field is None:
+            rows = _audit_doll_sorted(session)
+            if not rows:
                 return templates.TemplateResponse(
                     request,
                     "audit_dolls.html",
-                    {"empty": True, "total": 0, "cursor": 0},
+                    {"empty": True, "total": 0},
                 )
+            position, prev_id, next_id = _audit_doll_neighbors(rows, field_id)
+            if position < 0:
+                # Field doesn't match a doll-slug row — redirect to the
+                # head of the list rather than 404 so the audit flow
+                # stays usable.
+                return RedirectResponse(
+                    f"/audit/dolls/{rows[0].id}", status_code=302
+                )
+            field = rows[position]
+            shot = session.get(PromoMatchScreenshot, field.screenshot_id)
+            total = len(rows)
             match = session.get(PromoMatch, shot.match_id) if shot else None
             tournament = (
                 session.get(PromoTournament, match.tournament_id)
@@ -3011,7 +3039,9 @@ def create_app(
                 "ref_h": ref_h,
                 "choices": choices,
                 "total": total,
-                "cursor": cursor,
+                "position": position,
+                "prev_id": prev_id,
+                "next_id": next_id,
             },
         )
 
@@ -3019,7 +3049,7 @@ def create_app(
     def audit_dolls_correct(
         field_id: int,
         normalized: str = Form(...),
-        cursor: int = Form(0),
+        next_id: Optional[int] = Form(None),
     ) -> Response:
         if normalized not in _DOLL_AUDIT_KEYS:
             raise HTTPException(400, f"unknown doll key: {normalized}")
@@ -3033,19 +3063,30 @@ def create_app(
             field.manually_corrected = True
             session.add(field)
             session.commit()
+        # Auto-advance to the embedded next field so that browser-back
+        # always returns to the just-corrected field with the user's
+        # pick highlighted. If we computed "next" post-correction the
+        # field would have shuffled to the end of the sorted list.
+        if next_id is not None:
+            return RedirectResponse(
+                f"/audit/dolls/{next_id}", status_code=303
+            )
         return RedirectResponse(
-            f"/audit/dolls/{cursor + 1}", status_code=303
+            f"/audit/dolls/{field_id}", status_code=303
         )
 
     @app.post("/audit/dolls/{field_id}/skip")
     def audit_dolls_skip(
         field_id: int,
-        cursor: int = Form(0),
+        prev_id: Optional[int] = Form(None),
+        next_id: Optional[int] = Form(None),
         direction: str = Form("next"),
     ) -> Response:
-        delta = -1 if direction == "prev" else 1
+        target = prev_id if direction == "prev" else next_id
+        if target is None:
+            target = field_id
         return RedirectResponse(
-            f"/audit/dolls/{max(0, cursor + delta)}", status_code=303
+            f"/audit/dolls/{target}", status_code=303
         )
 
     @app.get("/healthz")

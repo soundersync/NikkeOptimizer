@@ -126,7 +126,7 @@
 <div class="crumb"><a href="/audit">Audit</a> /</div>
 <h1>
     Doll/Treasure Audit
-    <span class="counter">{{ cursor + 1 }} / {{ total }}</span>
+    <span class="counter">{{ position + 1 }} / {{ total }}</span>
 </h1>
 <div class="crumb">
     {% if tournament %}<a href="/promo/{{ tournament.id }}">{{ tournament.capture_date }}</a> · {% endif %}
@@ -145,9 +145,10 @@
 {# Big extracted-icon view + prev/skip arrows on either side #}
 <div class="audit-stage">
     <form method="post" action="/audit/dolls/{{ field.id }}/skip" class="nav-form">
-        <input type="hidden" name="cursor" value="{{ cursor }}">
+        <input type="hidden" name="prev_id" value="{{ prev_id or '' }}">
+        <input type="hidden" name="next_id" value="{{ next_id or '' }}">
         <input type="hidden" name="direction" value="prev">
-        <button type="submit" class="audit-arrow" {% if cursor == 0 %}disabled{% endif %} title="Previous icon">←</button>
+        <button type="submit" class="audit-arrow" {% if prev_id is none %}disabled{% endif %} title="Previous icon">←</button>
     </form>
 
     {% if image_url and bbox %}
@@ -168,9 +169,10 @@
     {% endif %}
 
     <form method="post" action="/audit/dolls/{{ field.id }}/skip" class="nav-form">
-        <input type="hidden" name="cursor" value="{{ cursor }}">
+        <input type="hidden" name="prev_id" value="{{ prev_id or '' }}">
+        <input type="hidden" name="next_id" value="{{ next_id or '' }}">
         <input type="hidden" name="direction" value="next">
-        <button type="submit" class="audit-arrow" title="Skip — leave as-is and move on">→</button>
+        <button type="submit" class="audit-arrow" {% if next_id is none %}disabled{% endif %} title="Skip — leave as-is and move on">→</button>
     </form>
 </div>
 
@@ -182,7 +184,7 @@
     {% for c in choices %}
     <form method="post" action="/audit/dolls/{{ field.id }}/correct" class="choice-form">
         <input type="hidden" name="normalized" value="{{ c.key }}">
-        <input type="hidden" name="cursor" value="{{ cursor }}">
+        <input type="hidden" name="next_id" value="{{ next_id or '' }}">
         <button type="submit" class="choice-button {{ 'current' if c.is_current }}"
                 title="{{ c.key }}{{ ' (current)' if c.is_current }}">
             {% if c.exemplar_url %}
