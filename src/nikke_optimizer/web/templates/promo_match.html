@@ -205,6 +205,49 @@ h1 { margin: 0 0 4px; }
         grid-template-columns: repeat(5, minmax(0, 1fr));
         gap: 8px;
     }
+    /* Per-round tabs above each side's team grid. */
+    .canon-tabs {
+        display: flex;
+        gap: 4px;
+        margin: 0 0 10px;
+        border-bottom: 1px solid #1f2228;
+    }
+    .canon-tab {
+        background: transparent;
+        border: none;
+        color: #6b7280;
+        padding: 6px 12px;
+        font-size: 12px;
+        font-family: inherit;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        transition: color 0.08s ease, border-color 0.08s ease;
+    }
+    .canon-tab:hover { color: #d1d5db; }
+    .canon-tab.active {
+        color: #f87171;
+        border-bottom-color: #f87171;
+        font-weight: 600;
+    }
+    .canon-round-panel { display: none; }
+    .canon-round-panel.active { display: block; }
+    .canon-round-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #1f2228;
+        font-size: 11px;
+        color: #9ca3af;
+    }
+    .canon-round-meta .team-cp {
+        font-family: "SF Mono", Menlo, monospace;
+        color: #f87171;
+    }
+    .canon-round-meta a { color: #6b7280; text-decoration: none; }
+    .canon-round-meta a:hover { color: #f87171; }
     .canon-char {
         background: #0f1116;
         border: 1px solid #1f2228;
@@ -252,9 +295,6 @@ h1 { margin: 0 0 4px; }
     <div class="canon-side">
         <div class="header">
             <span class="name">{{ side.player_name or "(unknown)" }}</span>
-            {% if side.team_cp %}
-            <span class="team-cp">CP {{ "{:,}".format(side.team_cp) }}</span>
-            {% endif %}
             {% if side.match_tier == "image-hash" %}
             <span style="font-size: 10px; color: #93c5fd; font-family: 'SF Mono', Menlo, monospace; padding: 1px 6px; background: #1b1f29; border: 1px solid #1e3a5f; border-radius: 999px;" title="Player identified via overview-name-crop image hashing (OCR text was missing)">image-hash{% if side.hash_distance is not none %} d={{ side.hash_distance }}{% endif %}</span>
             {% endif %}
@@ -265,46 +305,66 @@ h1 { margin: 0 0 4px; }
                 </a>
             </span>
         </div>
-        <div class="canon-team">
-            {% for char in side.characters %}
-            {% set bbox = char.portrait_bbox %}
-            {% if bbox and side.source_image_url %}
-                {% set bx1, by1, bx2, by2 = bbox %}
-                {% set bw = bx2 - bx1 %}
-                {% set bh = by2 - by1 %}
-                {# Percentage-based background-size + position. The
-                   container's rendered width can vary with viewport;
-                   percentages keep the bbox cropped exactly regardless.
-                   Math:
-                     bg-size: ref / bbox  (so bbox-sized region fills the container)
-                     bg-pos:  bx1 / (ref - bbox)  (puts bbox top-left at 0,0)   #}
-                {% set bg_size_x = ref_w / bw * 100 %}
-                {% set bg_size_y = ref_h / bh * 100 %}
-                {% set bg_pos_x = bx1 / (ref_w - bw) * 100 %}
-                {% set bg_pos_y = by1 / (ref_h - bh) * 100 %}
-            {% endif %}
-            <div class="canon-char">
-                <div class="canon-portrait"
-                     {% if bbox and side.source_image_url %}
-                     style="background-image: url('{{ side.source_image_url }}');
-                            background-size: {{ "%.4f"|format(bg_size_x) }}% {{ "%.4f"|format(bg_size_y) }}%;
-                            background-position: {{ "%.4f"|format(bg_pos_x) }}% {{ "%.4f"|format(bg_pos_y) }}%;"
-                     {% endif %}></div>
-                <div class="label">
-                    {% if char.character_name %}
-                        <a href="/characters/{{ char.character_name }}">{{ char.character_name }}</a>
-                    {% elif char.raw_name %}
-                        {{ char.raw_name }}
-                    {% else %}
-                        <span style="color: #4b5158;">—</span>
+
+        {# Per-round tabs. Each round shows a different team — Champions
+           Arena teams are season-locked but cycle 5 different lineups
+           per match, one per round. #}
+        <div class="canon-tabs" data-canon-side="{{ side_key }}">
+            {% for round in side.rounds %}
+            <button type="button" class="canon-tab {% if loop.first %}active{% endif %}"
+                    data-round="{{ round.round_no }}">Round {{ round.round_no }}</button>
+            {% endfor %}
+        </div>
+
+        <div class="canon-panels" data-canon-side="{{ side_key }}">
+            {% for round in side.rounds %}
+            <div class="canon-round-panel {% if loop.first %}active{% endif %}"
+                 data-round="{{ round.round_no }}">
+                <div class="canon-team">
+                    {% for char in round.characters %}
+                    {% set bbox = char.portrait_bbox %}
+                    {% if bbox and round.source_image_url %}
+                        {% set bx1, by1, bx2, by2 = bbox %}
+                        {% set bw = bx2 - bx1 %}
+                        {% set bh = by2 - by1 %}
+                        {% set bg_size_x = ref_w / bw * 100 %}
+                        {% set bg_size_y = ref_h / bh * 100 %}
+                        {% set bg_pos_x = bx1 / (ref_w - bw) * 100 %}
+                        {% set bg_pos_y = by1 / (ref_h - bh) * 100 %}
                     {% endif %}
+                    <div class="canon-char">
+                        <div class="canon-portrait"
+                             {% if bbox and round.source_image_url %}
+                             style="background-image: url('{{ round.source_image_url }}');
+                                    background-size: {{ "%.4f"|format(bg_size_x) }}% {{ "%.4f"|format(bg_size_y) }}%;
+                                    background-position: {{ "%.4f"|format(bg_pos_x) }}% {{ "%.4f"|format(bg_pos_y) }}%;"
+                             {% endif %}></div>
+                        <div class="label">
+                            {% if char.character_name %}
+                                <a href="/characters/{{ char.character_name }}">{{ char.character_name }}</a>
+                            {% elif char.raw_name %}
+                                {{ char.raw_name }}
+                            {% else %}
+                                <span style="color: #4b5158;">—</span>
+                            {% endif %}
+                        </div>
+                        <div class="cp">
+                            {% if char.cp %}{{ "{:,}".format(char.cp) }}{% else %}—{% endif %}
+                        </div>
+                        {% if char.doll_label and char.doll_key %}
+                        <div class="doll-pill {{ char.doll_key }}">{{ char.doll_label }}</div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
                 </div>
-                <div class="cp">
-                    {% if char.cp %}{{ "{:,}".format(char.cp) }}{% else %}—{% endif %}
+                <div class="canon-round-meta">
+                    <span>
+                        {% if round.team_cp %}
+                        <span class="team-cp">Team CP {{ "{:,}".format(round.team_cp) }}</span>
+                        {% endif %}
+                    </span>
+                    <a href="/promo/screenshots/{{ round.source_screenshot_id }}?from_match={{ match.id }}">view round {{ round.round_no }} loadout →</a>
                 </div>
-                {% if char.doll_label and char.doll_key %}
-                <div class="doll-pill {{ char.doll_key }}">{{ char.doll_label }}</div>
-                {% endif %}
             </div>
             {% endfor %}
         </div>
@@ -315,6 +375,31 @@ h1 { margin: 0 0 4px; }
     </div>
     {% endif %}
     {% endfor %}
+
+    <script>
+    // Tab switching for canonical-team panels. Scoped per-side so
+    // left tabs don't toggle right-side rounds and vice versa.
+    (function () {
+        document.querySelectorAll(".canon-tabs").forEach(function (tabsContainer) {
+            var sideKey = tabsContainer.dataset.canonSide;
+            var panelsContainer = tabsContainer.parentElement.querySelector(
+                '.canon-panels[data-canon-side="' + sideKey + '"]'
+            );
+            if (!panelsContainer) return;
+            tabsContainer.querySelectorAll(".canon-tab").forEach(function (tab) {
+                tab.addEventListener("click", function () {
+                    var round = tab.dataset.round;
+                    tabsContainer.querySelectorAll(".canon-tab").forEach(function (t) {
+                        t.classList.toggle("active", t.dataset.round === round);
+                    });
+                    panelsContainer.querySelectorAll(".canon-round-panel").forEach(function (p) {
+                        p.classList.toggle("active", p.dataset.round === round);
+                    });
+                });
+            });
+        });
+    })();
+    </script>
 </section>
 {% endif %}
 

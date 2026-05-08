@@ -2142,38 +2142,61 @@ def create_app(
         """Assemble the canonical-loadout view-model dict from a chosen
         source loadout screenshot.
 
+        Champions Arena teams are season-locked but each ROUND uses a
+        different 5-character team. The view-model exposes all 5
+        round-N team comps (sourced from the same match + same side
+        as ``source``) so the template can render them as tabs. Player
+        identity metadata (name, tier, source match) lives at the top
+        level since it's shared across rounds.
+
         Shared between the OCR-based path (tier 1) and the image-hash
-        fallback (tier 2). ``player_name`` defaults to the loadout's
-        own ``player_name`` OCR text when not supplied. ``tier`` and
-        ``hash_distance`` get passed through so the template can
-        annotate which lookup strategy was used.
+        fallback (tier 2). ``player_name`` defaults to the source
+        loadout's own ``player_name`` OCR text when not supplied.
         """
         from ..roster.promo_tournament_regions import PLAYER_LOADOUT
 
-        fields = session.exec(
+        # Find every sibling round-N loadout for the same match + side.
+        # In a complete capture this gives us 5 (one per round). Some
+        # captures may have fewer — we render whatever's available.
+        siblings = session.exec(
+            select(PromoMatchScreenshot)
+            .where(
+                PromoMatchScreenshot.match_id == source.match_id,
+                PromoMatchScreenshot.kind == "player_loadout",
+                PromoMatchScreenshot.side == source.side,
+            )
+            .order_by(PromoMatchScreenshot.round_no)
+        ).all()
+        if not siblings:
+            siblings = [source]
+
+        # Pre-fetch every PromoExtractedField row for the sibling
+        # screenshots in one query, then pivot by screenshot_id.
+        sibling_ids = [s.id for s in siblings]
+        all_fields = session.exec(
             select(PromoExtractedField).where(
-                PromoExtractedField.screenshot_id == source.id
+                PromoExtractedField.screenshot_id.in_(sibling_ids)
             )
         ).all()
-        by_slug = {f.region_slug: f for f in fields}
+        fields_by_screenshot: dict[int, dict[str, PromoExtractedField]] = {}
+        for f in all_fields:
+            fields_by_screenshot.setdefault(f.screenshot_id, {})[
+                f.region_slug
+            ] = f
 
+        # Resolve player_name from the source loadout if not passed in.
+        source_fields = fields_by_screenshot.get(source.id, {})
         if player_name is None:
-            pn_field = by_slug.get("player_name")
+            pn_field = source_fields.get("player_name")
             player_name = (pn_field.text if pn_field else None) or None
 
-        team_cp_field = by_slug.get("team_cp")
-        try:
-            team_cp = (
-                int(team_cp_field.normalized)
-                if team_cp_field and team_cp_field.normalized else None
-            )
-        except (TypeError, ValueError):
-            team_cp = None
-
-        char_ids = {
-            f.character_id for f in fields
-            if f.character_id and f.region_slug.endswith(".portrait")
-        }
+        # Collect every distinct character_id across all siblings'
+        # portrait rows so the Character-name lookup is one query.
+        char_ids: set[int] = set()
+        for slug_map in fields_by_screenshot.values():
+            for slug, f in slug_map.items():
+                if f.character_id and slug.endswith(".portrait"):
+                    char_ids.add(f.character_id)
         char_names: dict[int, str] = {}
         if char_ids:
             crows = session.exec(
@@ -2188,43 +2211,64 @@ def create_app(
             if r.slug.endswith(".portrait")
         }
 
-        characters = []
-        for n in range(1, 6):
-            portrait = by_slug.get(f"char{n}.portrait")
-            cp_field = by_slug.get(f"char{n}.cp")
-            doll = by_slug.get(f"char{n}.doll")
+        def _build_round_data(loadout: PromoMatchScreenshot) -> dict:
+            by_slug = fields_by_screenshot.get(loadout.id, {})
+
+            team_cp_field = by_slug.get("team_cp")
             try:
-                cp = (
-                    int(cp_field.normalized)
-                    if cp_field and cp_field.normalized else None
+                team_cp = (
+                    int(team_cp_field.normalized)
+                    if team_cp_field and team_cp_field.normalized else None
                 )
             except (TypeError, ValueError):
-                cp = None
-            characters.append({
-                "slot": n,
-                "character_id": portrait.character_id if portrait else None,
-                "character_name": (
-                    char_names.get(portrait.character_id)
-                    if portrait and portrait.character_id else None
-                ),
-                "raw_name": portrait.text if portrait else None,
-                "cp": cp,
-                "portrait_bbox": portrait_bbox_by_slug.get(f"char{n}.portrait"),
-                "doll_label": doll.text if doll else None,
-                "doll_key": doll.normalized if doll else None,
-            })
+                team_cp = None
 
-        # Resolve the source match's round_label.
+            characters = []
+            for n in range(1, 6):
+                portrait = by_slug.get(f"char{n}.portrait")
+                cp_field = by_slug.get(f"char{n}.cp")
+                doll = by_slug.get(f"char{n}.doll")
+                try:
+                    cp = (
+                        int(cp_field.normalized)
+                        if cp_field and cp_field.normalized else None
+                    )
+                except (TypeError, ValueError):
+                    cp = None
+                characters.append({
+                    "slot": n,
+                    "character_id": portrait.character_id if portrait else None,
+                    "character_name": (
+                        char_names.get(portrait.character_id)
+                        if portrait and portrait.character_id else None
+                    ),
+                    "raw_name": portrait.text if portrait else None,
+                    "cp": cp,
+                    "portrait_bbox": portrait_bbox_by_slug.get(
+                        f"char{n}.portrait"
+                    ),
+                    "doll_label": doll.text if doll else None,
+                    "doll_key": doll.normalized if doll else None,
+                })
+            return {
+                "round_no": loadout.round_no,
+                "team_cp": team_cp,
+                "source_screenshot_id": loadout.id,
+                "source_image_url": _promo_image_url(loadout.file_path),
+                "characters": characters,
+            }
+
+        rounds_data = [_build_round_data(ld) for ld in siblings]
+
+        # Resolve the source match's round_label (tournament-stage label).
         source_match = session.get(PromoMatch, source.match_id)
         source_round_label = source_match.round_label if source_match else None
 
         return {
             "player_name": player_name,
-            "team_cp": team_cp,
             "source_screenshot_id": source.id,
             "source_round_label": source_round_label,
-            "source_image_url": _promo_image_url(source.file_path),
-            "characters": characters,
+            "rounds": rounds_data,
             "match_tier": tier,
             "hash_distance": hash_distance,
         }
