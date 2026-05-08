@@ -263,24 +263,23 @@ h1 { margin: 0 0 4px; }
                 {% set bx1, by1, bx2, by2 = bbox %}
                 {% set bw = bx2 - bx1 %}
                 {% set bh = by2 - by1 %}
-                {# Choose a display width that gives the portrait crop a
-                   readable size; the height follows naturally via the
-                   aspect-ratio. We compute background-size + position
-                   so the bbox region of the source image fills the
-                   .canon-portrait container.                            #}
-                {% set disp_w = 128 %}
-                {% set scale = disp_w / bw %}
-                {% set bg_w = (ref_w * scale)|round(0, 'common')|int %}
-                {% set bg_h = (ref_h * scale)|round(0, 'common')|int %}
-                {% set bg_x = -1 * (bx1 * scale)|round(0, 'common')|int %}
-                {% set bg_y = -1 * (by1 * scale)|round(0, 'common')|int %}
+                {# Percentage-based background-size + position. The
+                   container's rendered width can vary with viewport;
+                   percentages keep the bbox cropped exactly regardless.
+                   Math:
+                     bg-size: ref / bbox  (so bbox-sized region fills the container)
+                     bg-pos:  bx1 / (ref - bbox)  (puts bbox top-left at 0,0)   #}
+                {% set bg_size_x = ref_w / bw * 100 %}
+                {% set bg_size_y = ref_h / bh * 100 %}
+                {% set bg_pos_x = bx1 / (ref_w - bw) * 100 %}
+                {% set bg_pos_y = by1 / (ref_h - bh) * 100 %}
             {% endif %}
             <div class="canon-char">
                 <div class="canon-portrait"
                      {% if bbox and side.source_image_url %}
                      style="background-image: url('{{ side.source_image_url }}');
-                            background-size: {{ bg_w }}px {{ bg_h }}px;
-                            background-position: {{ bg_x }}px {{ bg_y }}px;"
+                            background-size: {{ "%.4f"|format(bg_size_x) }}% {{ "%.4f"|format(bg_size_y) }}%;
+                            background-position: {{ "%.4f"|format(bg_pos_x) }}% {{ "%.4f"|format(bg_pos_y) }}%;"
                      {% endif %}></div>
                 <div class="label">
                     {% if char.character_name %}
