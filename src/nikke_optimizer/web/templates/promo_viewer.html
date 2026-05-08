@@ -144,6 +144,70 @@
     {% if match %}/ <a href="/promo/{{ tournament.id }}/matches/{{ match.id }}">{% if match.match_no %}Match {{ match.match_no }}{% else %}Final{% endif %}</a> /{% endif %}
 </div>
 
+{% if provenance %}
+<style>
+.provenance-banner {
+    background: #14161b;
+    border: 1px solid #1e3a5f;
+    border-left: 3px solid #93c5fd;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    color: #d1d5db;
+    line-height: 1.6;
+}
+.provenance-banner .crumb-from { color: #9ca3af; }
+.provenance-banner .crumb-from a { color: #93c5fd; }
+.provenance-banner code {
+    background: #0f1116; padding: 1px 5px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace; color: #e5e7eb;
+}
+.provenance-banner .tier-pill {
+    display: inline-block; padding: 1px 6px;
+    border-radius: 999px; font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin-left: 4px;
+}
+.tier-pill.exact { background: #14271b; color: #6fdf80; border: 1px solid #1f3d2a; }
+.tier-pill.case-insensitive { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
+.tier-pill.fuzzy { background: #261e14; color: #fde68a; border: 1px solid #4a3a1a; }
+.tier-pill.unmatched { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
+.provenance-banner .losers { color: #6b7280; }
+</style>
+<div class="provenance-banner">
+    <span class="crumb-from">
+        Used as canonical team for
+        <a href="/promo/{{ provenance.from_match_tournament_id }}/matches/{{ provenance.from_match_id }}">{{ provenance.from_match_label }}</a> ·
+    </span>
+    {% if provenance.matched_side %}
+        <strong>{{ provenance.matched_side }}</strong> player
+        {% if provenance.tier == "exact" %}
+            <span class="tier-pill exact">exact match</span>
+        {% elif provenance.tier == "case-insensitive" %}
+            <span class="tier-pill case-insensitive">case-insensitive</span>
+        {% elif provenance.tier == "fuzzy" %}
+            <span class="tier-pill fuzzy">fuzzy {{ "%.0f"|format(provenance.score) }}%</span>
+        {% endif %}
+        ·
+        loadout <code>{{ provenance.loadout_player_name or "(empty)" }}</code>
+        ↔
+        overview <code>{{ (provenance.left_name if provenance.matched_side == "left" else provenance.right_name) or "(empty)" }}</code>
+        <span class="losers">
+            (other side:
+            <code>{{ (provenance.right_name if provenance.matched_side == "left" else provenance.left_name) or "(empty)" }}</code>)
+        </span>
+    {% else %}
+        <span class="tier-pill unmatched">no match</span>
+        loadout <code>{{ provenance.loadout_player_name or "(empty)" }}</code>
+        ·
+        overview left <code>{{ provenance.left_name or "(empty)" }}</code> ·
+        right <code>{{ provenance.right_name or "(empty)" }}</code>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="viewer-header">
     <h1>
         {% if screenshot.kind == "player_loadout" %}

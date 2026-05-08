@@ -251,7 +251,7 @@ h1 { margin: 0 0 4px; }
             {% endif %}
             <span class="source">
                 source:
-                <a href="/promo/screenshots/{{ side.source_screenshot_id }}">
+                <a href="/promo/screenshots/{{ side.source_screenshot_id }}?from_match={{ match.id }}">
                     {{ side.source_round_label or "?" }}
                 </a>
             </span>

@@ -2483,12 +2483,105 @@ def create_app(
             },
         )
 
+    def _promo_matching_provenance(
+        session, viewer_screenshot_id: int, from_match_id: int
+    ) -> Optional[dict]:
+        """Explain how this loadout came to be picked as canonical for
+        ``from_match_id``.
+
+        Compares the loadout's ``player_name`` OCR against the from-match's
+        overview ``left_name`` / ``right_name`` and reports which side
+        matched + at what tier (exact / case-insensitive / fuzzy %).
+        """
+        from rapidfuzz import fuzz
+
+        viewer = session.get(PromoMatchScreenshot, viewer_screenshot_id)
+        if viewer is None or viewer.kind != "player_loadout":
+            return None
+        from_match = session.get(PromoMatch, from_match_id)
+        if from_match is None:
+            return None
+
+        loadout_player_field = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.screenshot_id == viewer_screenshot_id,
+                PromoExtractedField.region_slug == "player_name",
+            )
+        ).first()
+        loadout_player = (loadout_player_field.text if loadout_player_field else None) or None
+
+        from_overview = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.match_id == from_match_id,
+                PromoMatchScreenshot.kind == "results_overview",
+            )
+        ).first()
+        left_name = right_name = None
+        if from_overview is not None:
+            for f in session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.screenshot_id == from_overview.id,
+                    PromoExtractedField.region_slug.in_(["left_name", "right_name"]),
+                )
+            ).all():
+                if f.region_slug == "left_name":
+                    left_name = f.text
+                elif f.region_slug == "right_name":
+                    right_name = f.text
+
+        matched_side = None
+        tier = None
+        score: Optional[float] = None
+        if loadout_player:
+            lp = loadout_player.strip()
+            if (left_name or "").strip() == lp:
+                matched_side, tier = "left", "exact"
+            elif (right_name or "").strip() == lp:
+                matched_side, tier = "right", "exact"
+            elif left_name and (left_name).strip().lower() == lp.lower():
+                matched_side, tier = "left", "case-insensitive"
+            elif right_name and (right_name).strip().lower() == lp.lower():
+                matched_side, tier = "right", "case-insensitive"
+            else:
+                ls = fuzz.ratio(lp.lower(), (left_name or "").lower()) if left_name else 0
+                rs = fuzz.ratio(lp.lower(), (right_name or "").lower()) if right_name else 0
+                if max(ls, rs) >= 60:
+                    if ls >= rs:
+                        matched_side, score = "left", float(ls)
+                    else:
+                        matched_side, score = "right", float(rs)
+                    tier = "fuzzy"
+
+        # Build a human-readable label for the from-match.
+        if from_match.match_no is not None:
+            label = f"{from_match.round_label.replace('_', ' ')} match {from_match.match_no}"
+        else:
+            label = from_match.round_label.replace("_", " ")
+
+        return {
+            "from_match_id": from_match_id,
+            "from_match_tournament_id": from_match.tournament_id,
+            "from_match_label": label,
+            "loadout_player_name": loadout_player,
+            "left_name": left_name,
+            "right_name": right_name,
+            "matched_side": matched_side,
+            "tier": tier,
+            "score": score,
+        }
+
     @app.get("/promo/screenshots/{screenshot_id}", response_class=HTMLResponse)
-    def promo_screenshot_viewer(request: Request, screenshot_id: int) -> Response:
+    def promo_screenshot_viewer(
+        request: Request,
+        screenshot_id: int,
+        from_match: Optional[int] = None,
+    ) -> Response:
         """Double-pane viewer: original on left, labeled crops on right.
 
         Hovering a crop on the right highlights its bbox over the
-        original on the left.
+        original on the left. ``?from_match={id}`` populates a banner
+        at the top explaining how this loadout was selected as that
+        match's canonical team.
         """
         with get_session(engine) as session:
             screenshot = session.get(PromoMatchScreenshot, screenshot_id)
@@ -2512,6 +2605,12 @@ def create_app(
         regions = promo_regions_for_kind(screenshot.kind)
         ref_w, ref_h = PROMO_REF_SIZE
         view_regions = _promo_view_regions(engine, screenshot.id, regions)
+        provenance = None
+        if from_match is not None:
+            with get_session(engine) as session:
+                provenance = _promo_matching_provenance(
+                    session, screenshot.id, from_match
+                )
         return templates.TemplateResponse(
             request,
             "promo_viewer.html",
@@ -2526,6 +2625,7 @@ def create_app(
                 "ref_w": ref_w,
                 "ref_h": ref_h,
                 "format": fmt,
+                "provenance": provenance,
             },
         )
 
