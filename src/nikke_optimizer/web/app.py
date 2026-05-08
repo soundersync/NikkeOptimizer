@@ -3109,6 +3109,86 @@ def create_app(
             },
         )
 
+    _BULK_CORRECT_LIMIT = 5000  # safety net against a runaway POST
+
+    @app.post("/audit/dolls/bulk-correct")
+    def audit_dolls_bulk_correct(
+        field_ids: str = Form(...),
+        normalized: str = Form(...),
+        return_class: str = Form(""),
+    ) -> Response:
+        """Reassign many doll-classification rows in a single request.
+
+        ``field_ids`` is a comma-separated list of integer ids — what
+        the multi-select toolbar's hidden input emits. We validate +
+        cap the count, then update each row's ``normalized`` / ``text``
+        / ``confidence`` / ``manually_corrected`` together.
+        """
+        if normalized not in _DOLL_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown doll key: {normalized}")
+        try:
+            ids = [int(x) for x in field_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "field_ids must be a CSV of ints")
+        if not ids:
+            raise HTTPException(400, "field_ids is empty")
+        if len(ids) > _BULK_CORRECT_LIMIT:
+            raise HTTPException(
+                400,
+                f"refusing to update more than {_BULK_CORRECT_LIMIT} rows at once",
+            )
+
+        new_text = _DOLL_DISPLAY_LABELS.get(normalized, normalized)
+        with get_session(engine) as session:
+            rows = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.id.in_(ids)
+                )
+            ).all()
+            for row in rows:
+                if not row.region_slug.endswith(".doll"):
+                    # Defensive: this endpoint is doll-specific; skip
+                    # unrelated rows even if their id was passed in.
+                    continue
+                row.normalized = normalized
+                row.text = new_text
+                row.confidence = 1.0
+                row.manually_corrected = True
+                session.add(row)
+            session.commit()
+
+        target = (
+            return_class
+            if return_class in _DOLL_AUDIT_KEYS
+            else _DOLL_DEFAULT_CLASS
+        )
+        return RedirectResponse(
+            f"/audit/dolls/{target}", status_code=303
+        )
+
+    @app.post("/audit/dolls/{class_key}/confirm-all")
+    def audit_dolls_confirm_all(class_key: str) -> Response:
+        """Mark every row currently classified as ``class_key`` as
+        manually corrected. Idempotent — already-corrected rows stay
+        corrected, ``normalized`` is unchanged."""
+        if class_key not in _DOLL_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown class: {class_key}")
+        with get_session(engine) as session:
+            rows = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.doll"),
+                    PromoExtractedField.normalized == class_key,
+                )
+            ).all()
+            for row in rows:
+                if not row.manually_corrected:
+                    row.manually_corrected = True
+                    session.add(row)
+            session.commit()
+        return RedirectResponse(
+            f"/audit/dolls/{class_key}", status_code=303
+        )
+
     @app.post("/audit/dolls/{field_id}/correct")
     def audit_dolls_correct(
         field_id: int,
