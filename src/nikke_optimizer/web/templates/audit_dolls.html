@@ -144,6 +144,20 @@
 .confirm-all-button:disabled {
     opacity: 0.4; cursor: not-allowed;
 }
+/* Reclassify-auto button — sits next to confirm-all, blue to read
+   as "evaluate against the corpus" vs the green "lock in" colour. */
+.reclassify-form { margin-left: 8px; }
+.reclassify-button {
+    background: #1b1f29;
+    color: #93c5fd;
+    border: 1px solid #1e3a5f;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+.reclassify-button:hover { border-color: #60a5fa; }
 .grid-empty {
     color: #6b7280; font-style: italic;
     border: 1px dashed #1f2228;
@@ -225,6 +239,16 @@
         </option>
         {% endfor %}
     </select>
+    {% if n_auto and n_auto > 0 %}
+    <form method="post"
+          action="/audit/dolls/{{ class_key }}/reclassify-auto"
+          class="reclassify-form">
+        <button type="submit" class="reclassify-button"
+                title="Re-run Vision classifier on every auto-labeled row in this class. Manually-corrected rows are unaffected.">
+            Re-classify {{ n_auto }} auto row{{ "s" if n_auto != 1 else "" }}
+        </button>
+    </form>
+    {% endif %}
     {% if entries %}
     <form method="post"
           action="/audit/dolls/{{ class_key }}/confirm-all"

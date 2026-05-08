@@ -3093,6 +3093,7 @@ def create_app(
         n_corrected = sum(
             1 for e in entries if e["field"].manually_corrected
         )
+        n_auto = len(entries) - n_corrected
         return templates.TemplateResponse(
             request,
             "audit_dolls.html",
@@ -3106,6 +3107,7 @@ def create_app(
                 "ref_w": ref_w,
                 "ref_h": ref_h,
                 "n_corrected": n_corrected,
+                "n_auto": n_auto,
             },
         )
 
@@ -3164,6 +3166,28 @@ def create_app(
         )
         return RedirectResponse(
             f"/audit/dolls/{target}", status_code=303
+        )
+
+    @app.post("/audit/dolls/{class_key}/reclassify-auto")
+    def audit_dolls_reclassify_auto(class_key: str) -> Response:
+        """Re-classify every auto row in this class against the
+        current Vision corpus. ``manually_corrected`` rows are
+        untouched. Rows whose Vision-predicted class differs from
+        ``class_key`` will appear under the new class's URL.
+        """
+        if class_key not in _DOLL_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown class: {class_key}")
+        from ..roster.promo_tournament_doll_match import (
+            reclassify_class_auto_rows,
+        )
+        from ..roster.promo_tournament_doll_vision import DollVisionMatcher
+
+        with get_session(engine) as session:
+            matcher = DollVisionMatcher.from_session(session)
+            if len(matcher) > 0:
+                reclassify_class_auto_rows(session, matcher, class_key)
+        return RedirectResponse(
+            f"/audit/dolls/{class_key}", status_code=303
         )
 
     @app.post("/audit/dolls/{class_key}/confirm-all")

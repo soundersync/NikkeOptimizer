@@ -326,3 +326,79 @@ def backfill_doll_classifications(
         session.commit()
 
     return examined, updated, counts
+
+
+def reclassify_class_auto_rows(
+    session: Session,
+    matcher,  # DollVisionMatcher — typed loosely to avoid the import here
+    class_key: str,
+) -> tuple[int, int]:
+    """Re-classify every auto (``manually_corrected=False``) row currently
+    labeled ``class_key`` against ``matcher``.
+
+    Returns ``(examined, updated)``. Manually-corrected rows are
+    intentionally not touched even if their slug matches — the
+    ``manually_corrected=False`` filter in the query enforces that.
+    Rows that the matcher moves to a different class will silently
+    leave this view (they appear under the new class's audit URL).
+    """
+    from PIL import Image
+
+    rows = session.exec(
+        select(PromoExtractedField).where(
+            PromoExtractedField.region_slug.like("%.doll"),
+            PromoExtractedField.normalized == class_key,
+            PromoExtractedField.manually_corrected == False,  # noqa: E712
+        )
+    ).all()
+    if not rows:
+        return 0, 0
+
+    # Batch-load the source screenshots once per file to avoid
+    # re-opening PNGs per row.
+    shot_ids = list({r.screenshot_id for r in rows})
+    shots = session.exec(
+        select(PromoMatchScreenshot).where(
+            PromoMatchScreenshot.id.in_(shot_ids)
+        )
+    ).all()
+    shot_by_id = {s.id: s for s in shots}
+    images: dict[int, "Image.Image"] = {}
+
+    examined = 0
+    updated = 0
+    for row in rows:
+        bbox = _DOLL_BBOX.get(row.region_slug)
+        shot = shot_by_id.get(row.screenshot_id)
+        if bbox is None or shot is None:
+            continue
+        img = images.get(shot.id)
+        if img is None:
+            try:
+                img = Image.open(shot.file_path).convert("RGB")
+            except OSError as exc:
+                log.warning(
+                    "reclassify open failed for %s: %s", shot.file_path, exc
+                )
+                continue
+            images[shot.id] = img
+        crop = img.crop(bbox)
+        result = matcher.match(crop)
+        if result is None:
+            continue
+        examined += 1
+        new_text = result.display_label
+        new_norm = result.canonical_key
+        new_conf = result.confidence
+        if (
+            row.normalized != new_norm
+            or row.text != new_text
+            or row.confidence != new_conf
+        ):
+            row.normalized = new_norm
+            row.text = new_text
+            row.confidence = new_conf
+            session.add(row)
+            updated += 1
+    session.commit()
+    return examined, updated
