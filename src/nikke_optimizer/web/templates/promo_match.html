@@ -245,9 +245,12 @@ h1 { margin: 0 0 4px; }
     {% if side %}
     <div class="canon-side">
         <div class="header">
-            <span class="name">{{ side.player_name }}</span>
+            <span class="name">{{ side.player_name or "(unknown)" }}</span>
             {% if side.team_cp %}
             <span class="team-cp">CP {{ "{:,}".format(side.team_cp) }}</span>
+            {% endif %}
+            {% if side.match_tier == "image-hash" %}
+            <span style="font-size: 10px; color: #93c5fd; font-family: 'SF Mono', Menlo, monospace; padding: 1px 6px; background: #1b1f29; border: 1px solid #1e3a5f; border-radius: 999px;" title="Player identified via overview-name-crop image hashing (OCR text was missing)">image-hash{% if side.hash_distance is not none %} d={{ side.hash_distance }}{% endif %}</span>
             {% endif %}
             <span class="source">
                 source:

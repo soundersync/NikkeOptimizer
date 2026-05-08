@@ -2021,21 +2021,58 @@ def create_app(
     }
 
     def _promo_canonical_loadout(
-        session, player_name: Optional[str]
+        session,
+        player_name: Optional[str],
+        *,
+        current_overview_id: Optional[int] = None,
+        current_side: Optional[str] = None,
     ) -> Optional[dict]:
         """Find a representative loadout for ``player_name``.
 
-        Searches every player_loadout screenshot whose ``player_name``
-        OCR matches (exact → case-insensitive → fuzzy ratio ≥ 80) and
-        picks the one with the earliest round_label by
-        ``_CANONICAL_ROUND_PRIORITY``. Returns a dict with the team_cp,
-        5 character entries (slot, character_id, character_name, cp,
-        portrait_bbox) and the source-screenshot URL so the template
-        can render portrait crops via CSS object-position.
+        Tier 1 (OCR-based, fast):
+          Searches every player_loadout screenshot whose ``player_name``
+          OCR matches (exact → case-insensitive → fuzzy ratio ≥ 80) and
+          picks the one with the earliest round_label by
+          ``_CANONICAL_ROUND_PRIORITY``.
+
+        Tier 2 (image-hash fallback):
+          When tier 1 has nothing to search by (player_name is empty),
+          and the caller supplied ``current_overview_id`` /
+          ``current_side``, perceptually-hash that overview's name crop
+          and find another overview whose ``left_name`` / ``right_name``
+          crop is the same player. Use that match's loadouts as the
+          canonical source. Handles the case where the current match's
+          overview name OCR returned nothing.
         """
         from rapidfuzz import fuzz
 
         from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
+        # ---- Tier 2 prep: resolve canonical via image hashing -------
+        if not player_name and current_overview_id and current_side:
+            from ..roster.promo_tournament_player_match import (
+                find_canonical_match_via_image,
+                loadout_for_matched_overview,
+            )
+
+            query_ov = session.get(PromoMatchScreenshot, current_overview_id)
+            if query_ov is not None:
+                hash_match = find_canonical_match_via_image(
+                    session, query_ov, current_side
+                )
+                if hash_match is not None:
+                    source = loadout_for_matched_overview(
+                        session,
+                        hash_match.matched_match_id,
+                        hash_match.matched_side,
+                    )
+                    if source is not None:
+                        return _build_canonical_from_loadout(
+                            session,
+                            source,
+                            tier="image-hash",
+                            hash_distance=hash_match.distance,
+                        )
 
         if not player_name:
             return None
@@ -2090,8 +2127,29 @@ def create_app(
             )
         matches.sort(key=_key)
         _, source = matches[0]
+        return _build_canonical_from_loadout(
+            session, source, player_name=pn, tier="ocr"
+        )
 
-        # Pull the full slug-keyed extraction map for the source loadout.
+    def _build_canonical_from_loadout(
+        session,
+        source: PromoMatchScreenshot,
+        *,
+        player_name: Optional[str] = None,
+        tier: Optional[str] = None,
+        hash_distance: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Assemble the canonical-loadout view-model dict from a chosen
+        source loadout screenshot.
+
+        Shared between the OCR-based path (tier 1) and the image-hash
+        fallback (tier 2). ``player_name`` defaults to the loadout's
+        own ``player_name`` OCR text when not supplied. ``tier`` and
+        ``hash_distance`` get passed through so the template can
+        annotate which lookup strategy was used.
+        """
+        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
         fields = session.exec(
             select(PromoExtractedField).where(
                 PromoExtractedField.screenshot_id == source.id
@@ -2099,13 +2157,19 @@ def create_app(
         ).all()
         by_slug = {f.region_slug: f for f in fields}
 
+        if player_name is None:
+            pn_field = by_slug.get("player_name")
+            player_name = (pn_field.text if pn_field else None) or None
+
         team_cp_field = by_slug.get("team_cp")
         try:
-            team_cp = int(team_cp_field.normalized) if team_cp_field and team_cp_field.normalized else None
+            team_cp = (
+                int(team_cp_field.normalized)
+                if team_cp_field and team_cp_field.normalized else None
+            )
         except (TypeError, ValueError):
             team_cp = None
 
-        # Resolve character names for the portrait character_ids.
         char_ids = {
             f.character_id for f in fields
             if f.character_id and f.region_slug.endswith(".portrait")
@@ -2119,7 +2183,6 @@ def create_app(
             ).all()
             char_names = {int(cid): str(name) for cid, name in crows}
 
-        # Coords for the 5 portrait regions in source-image pixel space.
         portrait_bbox_by_slug = {
             r.slug: r.bbox for r in PLAYER_LOADOUT
             if r.slug.endswith(".portrait")
@@ -2130,7 +2193,10 @@ def create_app(
             portrait = by_slug.get(f"char{n}.portrait")
             cp_field = by_slug.get(f"char{n}.cp")
             try:
-                cp = int(cp_field.normalized) if cp_field and cp_field.normalized else None
+                cp = (
+                    int(cp_field.normalized)
+                    if cp_field and cp_field.normalized else None
+                )
             except (TypeError, ValueError):
                 cp = None
             characters.append({
@@ -2145,13 +2211,19 @@ def create_app(
                 "portrait_bbox": portrait_bbox_by_slug.get(f"char{n}.portrait"),
             })
 
+        # Resolve the source match's round_label.
+        source_match = session.get(PromoMatch, source.match_id)
+        source_round_label = source_match.round_label if source_match else None
+
         return {
-            "player_name": pn,
+            "player_name": player_name,
             "team_cp": team_cp,
             "source_screenshot_id": source.id,
-            "source_round_label": match_label.get(source.match_id),
+            "source_round_label": source_round_label,
             "source_image_url": _promo_image_url(source.file_path),
             "characters": characters,
+            "match_tier": tier,
+            "hash_distance": hash_distance,
         }
 
     def _promo_derived_loadouts(session, match_id: int) -> Optional[dict]:
@@ -2453,18 +2525,34 @@ def create_app(
                     })
             # For results-only matches: derive team comps from duel
             # results AND look up each player's canonical loadout
-            # (round_64 / quarterfinals) for portraits + CPs.
+            # (round_64 / quarterfinals) for portraits + CPs. The
+            # overview screenshot id + side gets passed in so the
+            # canonical lookup can fall back to image-hash matching
+            # when its OCR text is empty.
             derived_loadouts = None
             canonical = None
             if not match.has_loadouts:
                 derived_loadouts = _promo_derived_loadouts(session, match_id)
                 if derived_loadouts:
+                    overview = session.exec(
+                        select(PromoMatchScreenshot).where(
+                            PromoMatchScreenshot.match_id == match_id,
+                            PromoMatchScreenshot.kind == "results_overview",
+                        )
+                    ).first()
+                    overview_id = overview.id if overview else None
                     canonical = {
                         "left": _promo_canonical_loadout(
-                            session, derived_loadouts["left"]["name"]
+                            session,
+                            derived_loadouts["left"]["name"],
+                            current_overview_id=overview_id,
+                            current_side="left",
                         ),
                         "right": _promo_canonical_loadout(
-                            session, derived_loadouts["right"]["name"]
+                            session,
+                            derived_loadouts["right"]["name"],
+                            current_overview_id=overview_id,
+                            current_side="right",
                         ),
                     }
         return templates.TemplateResponse(
