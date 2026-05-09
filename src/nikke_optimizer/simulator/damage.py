@@ -160,7 +160,17 @@ class DamageResolution:
     # Per-team aggregates (5-Nikke totals)
     attacker_team_dps: float = 0.0  # attacker damage output per second
     attacker_burst_payload: float = 0.0  # attacker one-shot burst total
-    defender_effective_hp: float = 0.0  # defender pool to deplete
+    defender_effective_hp: float = 0.0  # defender pool to deplete (HP + post-burst shield + heals over match)
+
+    # Defender sustainability breakdown — added 2026-05-09 in support
+    # of heal/shield modeling. Validation against tournament match
+    # data showed the prior model under-predicted opponent EHP by 3×
+    # because heal-per-second was tracked but never applied to the
+    # damage-budget calculation. Shield was only counted at one-time
+    # post-burst-chain value; multi-cycle re-application is deferred.
+    defender_base_hp: float = 0.0       # raw HP only (no shield, no heal)
+    defender_shield_total: float = 0.0  # shields applied (post-burst-chain)
+    defender_heal_total: float = 0.0    # cumulative healing over match duration
 
     # Composite damage breakdown
     attacker_atk_damage_per_sec: float = 0.0  # base ATK channel
@@ -180,6 +190,9 @@ class DamageResolution:
             "attacker_team_dps": self.attacker_team_dps,
             "attacker_burst_payload": self.attacker_burst_payload,
             "defender_effective_hp": self.defender_effective_hp,
+            "defender_base_hp": self.defender_base_hp,
+            "defender_shield_total": self.defender_shield_total,
+            "defender_heal_total": self.defender_heal_total,
             "attacker_atk_damage_per_sec": self.attacker_atk_damage_per_sec,
             "attacker_true_damage_per_sec": self.attacker_true_damage_per_sec,
             "attacker_other_damage_per_sec": self.attacker_other_damage_per_sec,
@@ -295,12 +308,56 @@ def resolve(
 
     out = DamageResolution()
 
-    # Defender side: use mean DEF across the team and effective HP totals.
-    defender_team_hp = sum(m.effective_hp for m in defender.members)
+    # Defender side breakdown:
+    #   base_hp          = raw HP totals (excl. shield)
+    #   shield_total     = shields applied during the burst chain
+    #   heal_total       = healing accumulated over the match duration,
+    #                      bounded by heal_duration × number_of_burst_cycles
+    #                      (most NIKKE heals are 10-15s window per burst,
+    #                      not always-on for the full 5-minute match).
+    #   effective_hp     = base_hp + shield_total + heal_total
+    # Pre-2026-05-09 the model used (base_hp + shield) only and never
+    # applied healing — leading to ~3× under-prediction of defender
+    # EHP on shield/heal-heavy tournament defenses.
+    defender_base_hp = sum(m.base_hp + m.flat_hp_bonus for m in defender.members)
+    defender_shield_total = sum(m.shield_value for m in defender.members)
+    # Take MAX heal-per-sec across team rather than summing — when an
+    # "all-allies" heal lands, every member's heal_per_second slot
+    # captures the same source, so summing 5× over-counts. Max gives
+    # the dominant healer's contribution. Multi-healer comps undercount
+    # slightly but stay in the same order of magnitude.
+    defender_heal_per_sec = max(
+        (m.heal_per_second for m in defender.members), default=0.0
+    )
+    # Compute bursts_in_match here — used both for heal cycle count
+    # and shield refresh below.
+    if cycle_period_sec > 0 and first_burst_sec < MATCH_LENGTH_SEC:
+        bursts_in_match = max(
+            1,
+            int((MATCH_LENGTH_SEC - first_burst_sec) / cycle_period_sec) + 1,
+        )
+    else:
+        bursts_in_match = 1
+    # Heal duration per cycle = the longest active heal-window across
+    # the team (typically 10-15s). Total heal active time = duration ×
+    # number of burst rotations.
+    defender_heal_duration_per_cycle = max(
+        (m.heal_duration for m in defender.members), default=0.0
+    )
+    heal_active_seconds = min(
+        MATCH_LENGTH_SEC,
+        defender_heal_duration_per_cycle * bursts_in_match,
+    )
+    defender_heal_total = defender_heal_per_sec * heal_active_seconds
+    defender_team_hp = defender_base_hp + defender_shield_total + defender_heal_total
+
     defender_avg_def = (
         sum(m.effective_def for m in defender.members) / max(len(defender.members), 1)
     )
     out.defender_effective_hp = defender_team_hp
+    out.defender_base_hp = defender_base_hp
+    out.defender_shield_total = defender_shield_total
+    out.defender_heal_total = defender_heal_total
 
     # Per-member damage budget — sum a per-second contribution and a one-
     # shot burst payload. The DEF-reduction depends on per-member ATK,
@@ -374,14 +431,10 @@ def resolve(
     # `burst_total / cycle_period_sec` time-averaged DPS gives a
     # closer first-order approximation: the 5-minute window slowly
     # accumulates cumulative burst damage at a steady rate.
+    # bursts_in_match was already computed above for heal cycle counting.
     if cycle_period_sec > 0 and first_burst_sec < MATCH_LENGTH_SEC:
-        bursts_in_match = max(
-            1,
-            int((MATCH_LENGTH_SEC - first_burst_sec) / cycle_period_sec) + 1,
-        )
         burst_dps_equivalent = burst_total / cycle_period_sec
     else:
-        bursts_in_match = 1
         burst_dps_equivalent = 0.0
 
     # ``attacker_burst_payload`` keeps its display semantics —

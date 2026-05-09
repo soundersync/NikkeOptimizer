@@ -45,6 +45,15 @@ from .dsl import (
 )
 from .registry import get as registry_get
 
+# Ceiling for heal-per-second magnitude as a fraction of caster's max
+# HP. NIKKE's strongest realistic healers sit around 3-5% of HP per
+# second; values above this in the DSL are usually mis-encoded buff
+# amplifiers (e.g. "HP Potency +13.65%" being shoehorned into a
+# HEAL_PER_SECOND effect). The cap bounds simulator-side error from
+# those inconsistencies. Should be relaxed once DSL heal encodings
+# are audited and ``scaling_source`` is set everywhere.
+HEAL_RATE_CEILING = 0.05  # 5% of caster max HP per second
+
 
 # Triggers that the evaluator considers "active" in the snapshot. We
 # treat the team as if these conditions have all been met — i.e. burst
@@ -370,6 +379,35 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
         if kind is EffectKind.BUFF_DEFENSE and scaling is ScalingSource.CASTER_DEF:
             target.flat_def_bonus += caster.base_def * (mag / 100.0)
             return
+        # HEAL_PER_SECOND with scaling_source — magnitude is %-of-caster
+        # ATK/MAX_HP/DEF (most NIKKE healing skills are scaled this way).
+        # Without this the magnitude was treated as a literal HP-per-sec
+        # number, producing 100x-1000x under-prediction of heal totals.
+        if kind in (EffectKind.HEAL_PER_SECOND, EffectKind.HEAL_HP_FLAT):
+            base = (
+                caster.base_atk if scaling is ScalingSource.CASTER_ATK
+                else caster.base_hp if scaling is ScalingSource.CASTER_MAX_HP
+                else caster.base_def if scaling is ScalingSource.CASTER_DEF
+                else 0
+            )
+            scaled_mag = base * (mag / 100.0)
+            target.heal_per_second = max(target.heal_per_second, scaled_mag)
+            target.heal_duration = max(
+                target.heal_duration, effect.duration_seconds or 1.0
+            )
+            return
+        # GRANT_SHIELD — same treatment for ATK/DEF scaled shields. The
+        # default branch below already handles CASTER_MAX_HP shields
+        # (via caster.base_hp × mag/100), so only fix non-HP scaling.
+        if kind is EffectKind.GRANT_SHIELD and scaling is not ScalingSource.NONE:
+            base = (
+                caster.base_atk if scaling is ScalingSource.CASTER_ATK
+                else caster.base_hp if scaling is ScalingSource.CASTER_MAX_HP
+                else caster.base_def if scaling is ScalingSource.CASTER_DEF
+                else caster.base_hp  # safe fallback
+            )
+            target.shield_value += base * (mag / 100.0)
+            return
         # Unhandled scaling+kind combo — fall through to literal % below
         # so the value isn't silently dropped.
 
@@ -409,12 +447,25 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
         # Magnitude is % of caster's max HP — caster's HP, not target's.
         target.shield_value += caster.base_hp * (mag / 100.0)
     elif kind is EffectKind.HEAL_PER_SECOND:
-        target.heal_per_second = max(target.heal_per_second, mag)
+        # Most NIKKE heals are %-of-caster-HP per second. The DSL
+        # encoders didn't always set scaling_source, but the magnitude
+        # is in percent. Treat unscaled heal magnitudes as
+        # CASTER_MAX_HP-scaled. Cap at HEAL_RATE_CEILING of caster HP/s
+        # to bound damage from inconsistent DSL encodings (some skills
+        # mis-encode buff amplifiers like 'HP Potency +13.65%' as
+        # HEAL_PER_SECOND with mag=13.65, which would otherwise inflate
+        # heal magnitudes by 100×).
+        scaled = caster.base_hp * (mag / 100.0)
+        capped = min(scaled, caster.base_hp * HEAL_RATE_CEILING)
+        target.heal_per_second = max(target.heal_per_second, capped)
         target.heal_duration = max(target.heal_duration, effect.duration_seconds or 0.0)
     elif kind is EffectKind.HEAL_HP_FLAT:
-        # One-time heal — modeled as a heal-per-second pulse with 1s
-        # duration so it shows in the sustain index.
-        target.heal_per_second = max(target.heal_per_second, mag)
+        # One-time burst heal — usually "heal X% of caster's max HP".
+        # Modeled as a 1-sec heal-per-second pulse equal to the full
+        # heal amount. Same ceiling as HEAL_PER_SECOND applies.
+        scaled = caster.base_hp * (mag / 100.0)
+        capped = min(scaled, caster.base_hp * HEAL_RATE_CEILING)
+        target.heal_per_second = max(target.heal_per_second, capped)
         target.heal_duration = max(target.heal_duration, 1.0)
     elif kind is EffectKind.BUFF_PIERCE:
         target.has_pierce = True
@@ -443,6 +494,22 @@ def _walk_skill_effects(
             _apply_effect_to_snapshot(eff, caster, team, burst_user)
 
 
+# Map captured OL gear bonus types to NikkeSnapshot buff fields. PvP
+# is 100% hit rate so HIT_RATE / AMMUNITION_CAPACITY are dropped.
+_GEAR_BONUS_TYPE_TO_SNAPSHOT_FIELD = {
+    "ATK":              "atk_buff_pct",
+    "DEFENSE":          "def_buff_pct",
+    "ELEMENT_DAMAGE":   "element_damage_buff_pct",
+    "CHARGE_DAMAGE":    "charge_damage_buff_pct",
+    "CHARGE_SPEED":     "charge_speed_buff_pct",
+    "CRITICAL_RATE":    "crit_rate_buff_pct",
+    "CRITICAL_DAMAGE":  "crit_damage_buff_pct",
+    # HP gear buffs apply multiplicatively to base_hp instead of
+    # going into a *_buff_pct field — handled separately in
+    # apply_gear_buffs.
+}
+
+
 def evaluate_team(
     team_skills: Iterable[CharacterSkillSet],
     *,
@@ -451,6 +518,7 @@ def evaluate_team(
     base_def: int = 30_000,
     identities: Optional[dict[str, dict]] = None,
     per_name_stats: Optional[dict[str, dict]] = None,
+    per_name_gear_buffs: Optional[dict[str, dict[str, float]]] = None,
 ) -> TeamEvaluation:
     """Compute the post-burst-chain snapshot for a 5-Nikke team.
 
@@ -475,6 +543,7 @@ def evaluate_team(
     sets = list(team_skills)
     identities = identities or {}
     per_name_stats = per_name_stats or {}
+    per_name_gear_buffs = per_name_gear_buffs or {}
 
     def _stat(name: str, key: str, fallback: int) -> int:
         value = per_name_stats.get(name, {}).get(key)
@@ -494,6 +563,27 @@ def evaluate_team(
         )
         for cs in sets
     ]
+
+    # ----- Phase 0: Apply gear % buffs BEFORE DSL effects -----
+    # Equipment OL gear has up to 3 % effects per slot (4 slots = up
+    # to 12 effects total). These are captured as OLGearBonus rows
+    # but never reached the damage formula until 2026-05-09. Apply
+    # them now as additive contributions to the same *_buff_pct
+    # fields that DSL effects feed into. NIKKE's damage formula
+    # treats gear buffs as additive within type then multiplicative
+    # across types (per nikke.gg).
+    for snap in team:
+        gear = per_name_gear_buffs.get(snap.name, {})
+        for bonus_type, pct in gear.items():
+            field_name = _GEAR_BONUS_TYPE_TO_SNAPSHOT_FIELD.get(bonus_type)
+            if field_name is not None:
+                setattr(snap, field_name, getattr(snap, field_name) + pct)
+            elif bonus_type == "HP":
+                # HP % buff applies multiplicatively to base_hp.
+                snap.base_hp = int(snap.base_hp * (1.0 + pct / 100.0))
+            # HIT_RATE / AMMUNITION_CAPACITY / MAX_AMMUNITION_CAPACITY
+            # have no PvP-relevant impact (100% hit rate, mag-clip
+            # mechanics ignored in our model).
 
     # ----- Phase 1: ALWAYS + ON_BATTLE_START (once per Nikke) -----
     # Persistent passives (Pierce, base buff stacks, on-battle-start
@@ -607,7 +697,54 @@ def evaluate_by_names(
             for base, routed in zip(name_list, routed_names)
             if base in base_stats
         }
+    if "per_name_gear_buffs" not in kwargs:
+        base_gear = _load_owned_gear_buffs(name_list)
+        kwargs["per_name_gear_buffs"] = {
+            routed: base_gear[base]
+            for base, routed in zip(name_list, routed_names)
+            if base in base_gear
+        }
     return evaluate_team(sets, **kwargs)
+
+
+def _load_owned_gear_buffs(names: list[str]) -> dict[str, dict[str, float]]:
+    """Sum each character's OL gear bonus % per OLBonusType.
+
+    Returns ``{character_name: {"ATK": 45.14, "ELEMENT_DAMAGE": 113.84, ...}}``.
+    Only ``highlighted=True`` bonuses are counted (active vs grayed).
+    """
+    try:
+        from ..data.db import default_db_path, make_engine, get_session
+        from ..data.models import Character, OwnedCharacter, OLGear, OLGearBonus
+        from sqlmodel import select
+        engine = make_engine(default_db_path())
+        out: dict[str, dict[str, float]] = {}
+        with get_session(engine) as session:
+            for name in names:
+                row = session.exec(
+                    select(OwnedCharacter, Character)
+                    .where(OwnedCharacter.character_id == Character.id)
+                    .where(Character.name == name)
+                ).one_or_none()
+                if row is None:
+                    continue
+                owned, _ = row
+                buffs: dict[str, float] = {}
+                for gear in owned.ol_gear or []:
+                    for bonus in gear.bonuses or []:
+                        if not bonus.highlighted:
+                            continue
+                        if bonus.bonus_type is None or bonus.percent is None:
+                            continue
+                        # bonus.bonus_type is OLBonusType enum; use its
+                        # name (e.g. "ATK", "ELEMENT_DAMAGE") as the key.
+                        key = bonus.bonus_type.name
+                        buffs[key] = buffs.get(key, 0.0) + bonus.percent
+                if buffs:
+                    out[name] = buffs
+        return out
+    except Exception:
+        return {}
 
 
 def _route_treasure_forms(names: list[str]) -> list[str]:
