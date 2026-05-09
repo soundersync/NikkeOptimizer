@@ -112,22 +112,30 @@ def compute_burst_chain_offsets(
     weapon_classes: Iterable[Optional[str]],
     *,
     member_names: Optional[Iterable[Optional[str]]] = None,
+    member_cubes: Optional[Iterable[tuple[Optional[str], Optional[int]]]] = None,
     chain_step_sec: float = _BURST_CHAIN_STEP_SEC,
     fallback_per_member: float = _FALLBACK_BURST_GEN_RATE,
 ) -> tuple[float, float, float, float, float]:
-    """Burst-chain offsets derived from team weapon mix + skill bonuses.
+    """Burst-chain offsets derived from team weapon mix + skill + cube bonuses.
 
     The first burst (index 0) fires at ``T = 100 / total_rate`` where
-    ``total_rate`` sums each member's per-weapon contribution **plus**
-    optional per-character skill bonuses (slice #78 — Liter S1, Naga,
-    Anchor, etc.) when ``member_names`` is supplied. Each subsequent
-    member's offset is +``chain_step_sec`` (modeling the 1-second cast
-    chain B1→B2→B3 and pushing the 4th/5th past the Full Burst window).
-    Unknown weapons use ``fallback_per_member``.
+    ``total_rate`` sums each member's per-weapon contribution **plus**:
+
+    - Per-character skill bonuses (slice #78 — Liter S1, Naga,
+      Anchor, etc.) when ``member_names`` is supplied.
+    - Per-cube burst-gauge contribution (slice 2026-05-09 — Quantum
+      Cube primarily, but other cubes contribute marginally) when
+      ``member_cubes`` is supplied. Each entry is a ``(cube_name,
+      cube_level)`` tuple in the same order as ``weapon_classes``.
+
+    Each subsequent member's offset is +``chain_step_sec`` (modeling
+    the 1-second cast chain B1→B2→B3 and pushing the 4th/5th past the
+    Full Burst window). Unknown weapons use ``fallback_per_member``.
 
     Calibrated so the canonical SMG/MG/MG/SR/SR Crown comp returns
     ``(10.0, 11.0, 12.0, 13.0, 14.0)`` — preserving the legacy schedule
-    when no skill bonuses are passed.
+    when no skill bonuses are passed. With a 5× LV15 Quantum Cube load
+    that t0 drops to ~7.5s — the "first to burst wins" PvP advantage.
     """
     total = 0.0
     for w in weapon_classes:
@@ -139,6 +147,11 @@ def compute_burst_chain_offsets(
             if not name:
                 continue
             total += BURST_GAUGE_SKILL_BONUS_PCT_PER_SEC.get(name, 0.0)
+
+    if member_cubes is not None:
+        from .cube_effects import cube_burst_gen_bonus_pct_per_sec
+        for cube_name, cube_level in member_cubes:
+            total += cube_burst_gen_bonus_pct_per_sec(cube_name, cube_level)
 
     if total <= 0:
         # Empty / all-unknown teams fall back to the legacy default.

@@ -534,6 +534,7 @@ def evaluate_team(
     per_name_stats: Optional[dict[str, dict]] = None,
     per_name_gear_buffs: Optional[dict[str, dict[str, float]]] = None,
     per_name_doll_buffs: Optional[dict[str, dict[str, float]]] = None,
+    per_name_treasure_buffs: Optional[dict[str, dict[str, float]]] = None,
 ) -> TeamEvaluation:
     """Compute the post-burst-chain snapshot for a 5-Nikke team.
 
@@ -560,6 +561,7 @@ def evaluate_team(
     per_name_stats = per_name_stats or {}
     per_name_gear_buffs = per_name_gear_buffs or {}
     per_name_doll_buffs = per_name_doll_buffs or {}
+    per_name_treasure_buffs = per_name_treasure_buffs or {}
 
     def _stat(name: str, key: str, fallback: int) -> int:
         value = per_name_stats.get(name, {}).get(key)
@@ -600,6 +602,32 @@ def evaluate_team(
             # HIT_RATE / AMMUNITION_CAPACITY / MAX_AMMUNITION_CAPACITY
             # have no PvP-relevant impact (100% hit rate, mag-clip
             # mechanics ignored in our model).
+
+    # ----- Phase 0c: Apply SSR Treasure parsed-prose effects -----
+    # TreasureSkill rows hold per-(char, skill, phase) descriptions that
+    # we run through ``treasure_parser.parse_treasure_description`` to
+    # extract structured magnitudes. Effects from all rows up to the
+    # user's treasure_phase are summed onto the snapshot.
+    for snap in team:
+        treas = per_name_treasure_buffs.get(snap.name, {})
+        for key, val in treas.items():
+            if key.endswith("_buff_pct"):
+                # Direct stat-buff field — additive.
+                if hasattr(snap, key):
+                    setattr(snap, key, getattr(snap, key) + val)
+            elif key == "shield_pct_caster_hp":
+                snap.shield_value += snap.base_hp * (val / 100.0)
+            elif key == "heal_pct_caster_hp_per_sec":
+                snap.heal_per_second = max(
+                    snap.heal_per_second,
+                    snap.base_hp * (val / 100.0),
+                )
+                snap.heal_duration = max(snap.heal_duration, 10.0)
+            elif key == "max_hp_buff_pct":
+                snap.base_hp = int(snap.base_hp * (1.0 + val / 100.0))
+            elif key == "damage_taken_reduction_pct":
+                if val < 100:
+                    snap.base_hp = int(snap.base_hp / (1.0 - val / 100.0))
 
     # ----- Phase 0b: Apply Doll/Treasure phase effects -----
     # Doll skill effects from DollSkillPhase rows (12 dolls × 15
@@ -747,7 +775,80 @@ def evaluate_by_names(
             for base, routed in zip(name_list, routed_names)
             if base in base_dolls
         }
+    if "per_name_treasure_buffs" not in kwargs:
+        # Treasure lookups are keyed by ROUTED name (the simulator-side
+        # "(Treasure)" character row holds the TreasureSkill rows), but
+        # we read treasure_phase from the BASE name's OwnedCharacter row.
+        kwargs["per_name_treasure_buffs"] = _load_owned_treasure_buffs(
+            base_names=name_list, routed_names=routed_names,
+        )
     return evaluate_team(sets, **kwargs)
+
+
+def _load_owned_treasure_buffs(
+    base_names: list[str], routed_names: list[str]
+) -> dict[str, dict[str, float]]:
+    """Load + parse Treasure (SSR Favorite) skill effects per character.
+
+    Returns ``{routed_name: {effect_key: magnitude, ...}}`` where keys
+    match what ``parse_treasure_description`` emits (atk_buff_pct,
+    shield_pct_caster_hp, etc.).
+
+    Sums effects from all TreasureSkill rows where ``upgrade_phase <=
+    user's treasure_phase`` — this models the in-game reality that
+    each phase unlocks a new skill upgrade incrementally.
+    """
+    try:
+        from ..data.db import default_db_path, make_engine, get_session
+        from ..data.models import (
+            Character, OwnedCharacter, TreasureSkill,
+        )
+        from .treasure_parser import parse_treasure_description
+        from sqlmodel import select
+
+        engine = make_engine(default_db_path())
+        out: dict[str, dict[str, float]] = {}
+        with get_session(engine) as session:
+            for base_name, routed_name in zip(base_names, routed_names):
+                # Treasure routing only applied for chars where user
+                # has Treasure unlocked (rarity SSR + phase >= 1).
+                if routed_name == base_name:
+                    continue  # not a Treasure-routed char
+                # Pull user's treasure_phase from base-name row.
+                row = session.exec(
+                    select(OwnedCharacter, Character)
+                    .where(OwnedCharacter.character_id == Character.id)
+                    .where(Character.name == base_name)
+                ).one_or_none()
+                if row is None:
+                    continue
+                owned, _ = row
+                user_phase = owned.treasure_phase or 0
+                if user_phase <= 0:
+                    continue
+                # TreasureSkill rows are keyed by the routed character.
+                treasure_char = session.exec(
+                    select(Character).where(Character.name == routed_name)
+                ).one_or_none()
+                if treasure_char is None:
+                    continue
+                ts_rows = session.exec(
+                    select(TreasureSkill)
+                    .where(TreasureSkill.character_id == treasure_char.id)
+                    .where(TreasureSkill.upgrade_phase <= user_phase)
+                ).all()
+                buffs: dict[str, float] = {}
+                for ts in ts_rows:
+                    parsed = parse_treasure_description(
+                        ts.description_treasured or ""
+                    )
+                    for k, v in parsed.items():
+                        buffs[k] = buffs.get(k, 0.0) + v
+                if buffs:
+                    out[routed_name] = buffs
+        return out
+    except Exception:
+        return {}
 
 
 def _load_owned_doll_buffs(names: list[str]) -> dict[str, dict[str, float]]:

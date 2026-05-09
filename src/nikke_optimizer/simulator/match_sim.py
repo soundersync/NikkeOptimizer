@@ -39,6 +39,29 @@ from .damage import (
     _per_member_atk_damage_multiplier,
 )
 from .evaluator import TeamEvaluation
+from .timeline import compute_burst_chain_offsets
+
+
+def derive_first_burst_sec(
+    team: TeamEvaluation,
+    member_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
+) -> float:
+    """Compute when the team's first burst chain completes.
+
+    Uses ``compute_burst_chain_offsets`` from timeline.py with weapon
+    classes + member names (for skill-based gauge bonuses) + optional
+    cube info (Quantum LV15 = +1.5%/s gauge per Nikke equipped).
+
+    Returns the time of the FIRST burst (offsets[0]). Subsequent
+    bursts in the chain land 1s apart; the Full Burst window opens
+    at offsets[2].
+    """
+    weapons = [m.weapon_class for m in team.members]
+    names = [m.name for m in team.members]
+    offsets = compute_burst_chain_offsets(
+        weapons, member_names=names, member_cubes=member_cubes
+    )
+    return offsets[0]
 
 
 @dataclass
@@ -138,19 +161,34 @@ def simulate(
     attacker: TeamEvaluation,
     defender: TeamEvaluation,
     *,
-    first_burst_sec: float = DEFAULT_FIRST_BURST_SEC,
+    first_burst_sec: Optional[float] = None,
+    defender_first_burst_sec: Optional[float] = None,
     cycle_period_sec: float = DEFAULT_CYCLE_PERIOD_SEC,
     match_length_sec: float = MATCH_LENGTH_SEC,
     dt: float = 1.0,
+    attacker_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
+    defender_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
 ) -> TimeSteppedResult:
     """Run a discrete-time match simulation and return who's left standing.
 
     Both teams take damage simultaneously each second. Bursts fire at
-    ``first_burst_sec`` and every ``cycle_period_sec`` afterwards. Heals
-    apply for ``heal_duration`` seconds following each burst. The match
-    ends when either team's HP hits 0 or the timer reaches
-    ``match_length_sec``. In NIKKE PvP, the defender wins on timeout.
+    each team's own derived first_burst_sec (and every
+    ``cycle_period_sec`` afterwards). Heals apply for ``heal_duration``
+    seconds following each burst. The match ends when either team's HP
+    hits 0 or the timer reaches ``match_length_sec``. In NIKKE PvP, the
+    defender wins on timeout.
+
+    When ``first_burst_sec`` / ``defender_first_burst_sec`` are None,
+    they're auto-derived from each team's weapon mix + character skill
+    bonuses + cube contributions (Quantum cubes accelerate burst gen,
+    decisive in tight Champions Arena matches). Pass cube info via
+    ``attacker_cubes`` / ``defender_cubes`` as ``[(cube_name,
+    cube_level), ...]`` lists in member order.
     """
+    if first_burst_sec is None:
+        first_burst_sec = derive_first_burst_sec(attacker, attacker_cubes)
+    if defender_first_burst_sec is None:
+        defender_first_burst_sec = derive_first_burst_sec(defender, defender_cubes)
     # Pre-compute team metrics — both teams use the OPPOSING team's avg
     # DEF for damage-through calculations.
     a_avg_def = (
@@ -175,13 +213,20 @@ def simulate(
     d_timeline: list[float] = []
     notes: list[str] = []
 
-    # Burst schedule — both teams burst on the same cadence (simplification).
-    burst_times = []
-    t_burst = first_burst_sec
-    while t_burst < match_length_sec:
-        burst_times.append(t_burst)
-        t_burst += cycle_period_sec
-    burst_set = set(int(t) for t in burst_times)
+    # Per-team burst schedules — each team bursts at their own derived
+    # first_burst_sec. Faster team bursts first; this is THE pivotal
+    # PvP advantage at peer LV-400.
+    def _burst_schedule(t0: float) -> list[float]:
+        out: list[float] = []
+        t_b = t0
+        while t_b < match_length_sec:
+            out.append(t_b)
+            t_b += cycle_period_sec
+        return out
+    a_burst_times = _burst_schedule(first_burst_sec)
+    d_burst_times = _burst_schedule(defender_first_burst_sec)
+    a_burst_set = set(int(t) for t in a_burst_times)
+    d_burst_set = set(int(t) for t in d_burst_times)
 
     t = 0.0
     end_reason = "timeout"
@@ -190,9 +235,10 @@ def simulate(
         d_dmg_this_tick = a["sustained_dps"] * dt
         a_dmg_this_tick = d["sustained_dps"] * dt
 
-        # Burst payload — landed in one shot at scheduled times.
-        if int(t) in burst_set:
+        # Burst payload — each team's burst lands on their own schedule.
+        if int(t) in a_burst_set:
             d_dmg_this_tick += a["burst_payload"]
+        if int(t) in d_burst_set:
             a_dmg_this_tick += d["burst_payload"]
 
         # Apply damage (both simultaneously)
@@ -202,14 +248,14 @@ def simulate(
         d_total_damage_dealt += a_dmg_this_tick
 
         # Healing — applies during heal_duration seconds following each
-        # burst. For simplicity: apply heal_per_sec × dt continuously
-        # while inside any heal-active window.
+        # team's burst. Each team only heals during their OWN burst
+        # windows.
         if a["heal_per_sec"] > 0 and any(
-            bt <= t < bt + a["heal_duration"] for bt in burst_times
+            bt <= t < bt + a["heal_duration"] for bt in a_burst_times
         ):
             a_hp = min(a_max_hp, a_hp + a["heal_per_sec"] * dt)
         if d["heal_per_sec"] > 0 and any(
-            bt <= t < bt + d["heal_duration"] for bt in burst_times
+            bt <= t < bt + d["heal_duration"] for bt in d_burst_times
         ):
             d_hp = min(d_max_hp, d_hp + d["heal_per_sec"] * dt)
 
