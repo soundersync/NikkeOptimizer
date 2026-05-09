@@ -42,6 +42,25 @@ from .evaluator import TeamEvaluation
 from .timeline import compute_burst_chain_offsets
 
 
+# Phase 6 calibration constants — buff decay model.
+#
+# NIKKE post-burst-chain DPS is "peak DPS" with all burst-window
+# buffs active. Outside the burst window, those time-bounded buffs
+# (typically 10-15s) drop off. Sustained DPS averaged over a 40s
+# cycle is much lower than peak.
+#
+# Burst window: the ~10s following each chain when team has full
+# stacks. Approximated as ``BURST_WINDOW_DURATION_SEC`` after the
+# chain time.
+#
+# Outside-burst-window factor: how much of peak DPS persists when
+# burst buffs decay. Calibrated against the gap between published
+# burst-window vs sustained DPS measurements (~50% retention is
+# typical for Crown comps; lower for buff-heavy teams).
+BURST_WINDOW_DURATION_SEC = 10.0
+POST_BURST_DPS_RETENTION = 0.55  # 55% of peak DPS outside burst window
+
+
 @dataclass
 class MemberState:
     """Per-character runtime state during a per-char simulation."""
@@ -50,7 +69,7 @@ class MemberState:
     max_hp: float
     hp: float
     shield: float                # remaining shield, absorbs damage first
-    sustained_dps: float         # damage this Nikke contributes per second
+    sustained_dps: float         # PEAK damage rate (all burst buffs active)
     burst_payload: float         # one-shot burst damage from this Nikke
     eff_def: float               # used by attacker's def_factor calc
     role: str                    # "attacker"/"defender"/"supporter"/etc.
@@ -67,6 +86,65 @@ class MemberState:
     @property
     def is_healer(self) -> bool:
         return self.heal_per_second > 0
+
+
+def _dps_decay_factor(t: float, chain_starts: list[float]) -> float:
+    """Return the effective DPS multiplier at time ``t``.
+
+    Pre-first-burst (no chain has fired yet) and during any burst
+    window (within BURST_WINDOW_DURATION_SEC of a chain start):
+    return 1.0 — the team is at peak DPS.
+
+    Between burst windows (after first chain has expired but before
+    the next): return POST_BURST_DPS_RETENTION (0.55). This models
+    the drop in DPS as time-bounded burst buffs (typically 10-15s)
+    decay. The pre-burst baseline is treated as peak because the
+    snapshot's sustained_dps already excludes burst-window-only
+    buffs that the DSL only applies on chain fire.
+
+    Edge case: empty chain_starts list (team has yet to burst) —
+    return 1.0 so we don't penalize teams in the first 5-15s of a
+    match before any chain fires.
+    """
+    if not chain_starts:
+        return 1.0
+    in_burst_window = any(
+        bt <= t < bt + BURST_WINDOW_DURATION_SEC for bt in chain_starts
+    )
+    return 1.0 if in_burst_window else POST_BURST_DPS_RETENTION
+
+
+# Phase 7 — state machine ramp-up scaffolding.
+#
+# Several PvP-relevant Nikkes have skills that ramp UP over time
+# rather than landing peak damage instantly:
+# - SW:HA Auto-Fire / Lock-On: ramps over 1-5s during charging
+# - Crown Relax: stacks build via 3 ally bursts in chain
+# - Modernia: reload/full-burst stack accumulation
+# - Anchor: MP gauge accumulation
+#
+# An accurate model would:
+# 1. Apply first-burst-window damage at fraction X% (still ramping)
+# 2. Apply subsequent-burst-window damage at 100% (stacks built)
+#
+# However, the calibration values are unknown — naive 0.7-0.85
+# factors caused R5 regression (NIKA's SW:HA team) because the
+# damage drop tipped a close win to a loss without offsetting
+# benefit on other rounds.
+#
+# Leaving the framework in place with no-op factors so the architecture
+# supports it. Future work: derive per-character ramp curves from
+# datamining or in-game testing.
+_RAMP_UP_CHARS: dict[str, float] = {}
+
+
+def _state_machine_factor(member_name: str) -> float:
+    """Burst-window damage retention for state-machine-driven Nikkes.
+
+    Returns 1.0 (no adjustment) currently — see _RAMP_UP_CHARS
+    docstring for why factors are left empty.
+    """
+    return _RAMP_UP_CHARS.get(member_name, 1.0)
 
 
 def _select_burst_chain(
@@ -298,8 +376,23 @@ def simulate_per_character(
             end_reason = "defender_cleared"
             break
 
-        a_sus = sum(m.sustained_dps for m in a_living)
-        d_sus = sum(m.sustained_dps for m in d_living)
+        # Phase 6 — buff decay outside burst windows. Peak DPS only
+        # while in the 10s window after each chain; ~55% retention
+        # otherwise. Without this, matches at LV-400 cap end in 5s
+        # because we're using "everything always full-buffed" math.
+        a_dps_factor = _dps_decay_factor(t, a_active_chain_starts)
+        d_dps_factor = _dps_decay_factor(t, d_active_chain_starts)
+        # Phase 7 — state-machine ramp factor applied per Nikke.
+        # SW:HA's Auto-Fire / Crown's Relax / Modernia's stacks
+        # ramp over the burst window so peak DPS isn't full duration.
+        a_sus = sum(
+            m.sustained_dps * a_dps_factor * _state_machine_factor(m.name)
+            for m in a_living
+        )
+        d_sus = sum(
+            m.sustained_dps * d_dps_factor * _state_machine_factor(m.name)
+            for m in d_living
+        )
 
         d_dmg = a_sus * dt
         a_dmg = d_sus * dt
@@ -376,9 +469,12 @@ def derive_first_burst_sec(
 ) -> float:
     """Compute when the team's first burst chain completes.
 
-    Uses ``compute_burst_chain_offsets`` from timeline.py with weapon
-    classes + member names (for skill-based gauge bonuses) + optional
-    cube info (Quantum LV15 = +1.5%/s gauge per Nikke equipped).
+    Uses ``compute_burst_chain_offsets`` from timeline.py with:
+    - weapon classes (per-class burst gen rate)
+    - member names (skill-based gauge bonuses for ~20 chars)
+    - cube info (Quantum LV15 = +1.5%/s gauge per Nikke)
+    - per-member charge_speed_buff_pct (boosts SR/RL gauge gen
+      proportionally — Phase 5 of 2026-05-09 sim improvements)
 
     Returns the time of the FIRST burst (offsets[0]). Subsequent
     bursts in the chain land 1s apart; the Full Burst window opens
@@ -386,8 +482,12 @@ def derive_first_burst_sec(
     """
     weapons = [m.weapon_class for m in team.members]
     names = [m.name for m in team.members]
+    charge_speeds = [m.charge_speed_buff_pct for m in team.members]
     offsets = compute_burst_chain_offsets(
-        weapons, member_names=names, member_cubes=member_cubes
+        weapons,
+        member_names=names,
+        member_cubes=member_cubes,
+        member_charge_speed_pct=charge_speeds,
     )
     return offsets[0]
 

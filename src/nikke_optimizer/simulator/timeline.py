@@ -113,6 +113,7 @@ def compute_burst_chain_offsets(
     *,
     member_names: Optional[Iterable[Optional[str]]] = None,
     member_cubes: Optional[Iterable[tuple[Optional[str], Optional[int]]]] = None,
+    member_charge_speed_pct: Optional[Iterable[float]] = None,
     chain_step_sec: float = _BURST_CHAIN_STEP_SEC,
     fallback_per_member: float = _FALLBACK_BURST_GEN_RATE,
 ) -> tuple[float, float, float, float, float]:
@@ -152,6 +153,26 @@ def compute_burst_chain_offsets(
         from .cube_effects import cube_burst_gen_bonus_pct_per_sec
         for cube_name, cube_level in member_cubes:
             total += cube_burst_gen_bonus_pct_per_sec(cube_name, cube_level)
+
+    if member_charge_speed_pct is not None:
+        # Charge speed amplifies shots-per-second on charge weapons (SR/RL),
+        # which directly boosts gauge gen for those weapons. Apply the
+        # buff as a multiplier on each member's WEAPON contribution
+        # (not skill bonuses, not cube bonuses — those are flat).
+        # Implemented as a final adjustment to total based on the
+        # weighted average of charge_speed across SR/RL members.
+        # Simplification: apply (1 + charge_speed/100) to the sum of
+        # SR/RL weapon contributions specifically.
+        wc_list = list(weapon_classes)
+        cs_list = list(member_charge_speed_pct)
+        if len(cs_list) == len(wc_list):
+            for w, cs in zip(wc_list, cs_list):
+                wn = (w or "").strip().lower()
+                if wn in ("sr", "rl") and cs > 0:
+                    base_rate = BURST_GEN_RATE_BY_WEAPON_PCT_PER_SEC.get(
+                        wn, fallback_per_member
+                    )
+                    total += base_rate * (cs / 100.0)
 
     if total <= 0:
         # Empty / all-unknown teams fall back to the legacy default.
