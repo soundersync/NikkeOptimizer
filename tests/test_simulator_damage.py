@@ -175,16 +175,21 @@ def test_clear_time_no_longer_collapses_to_first_burst_when_burst_huge():
 
 def test_weapon_class_table_differentiates_classes():
     """Slice #97 — per-WeaponClass damage factor. The table must give
-    SR/RL distinctly lower fractions than MG/SMG so the optimizer's
-    win-margin output reflects fire-rate differences."""
+    SR/RL distinctly lower per-second fractions than the sustained-DPS
+    classes so the optimizer's win-margin output reflects fire-rate
+    differences. Recalibrated 2026-05-09 against published per-shot ×
+    fire-rate values from nikke.gg/damage-formula.
+    """
     from nikke_optimizer.simulator.damage import (
         WEAPON_DAMAGE_PER_SECOND_FRACTION,
     )
-    assert WEAPON_DAMAGE_PER_SECOND_FRACTION["MG"] > WEAPON_DAMAGE_PER_SECOND_FRACTION["SR"]
-    assert WEAPON_DAMAGE_PER_SECOND_FRACTION["SMG"] > WEAPON_DAMAGE_PER_SECOND_FRACTION["RL"]
-    # AR sits between fast and slow extremes.
-    assert (
-        WEAPON_DAMAGE_PER_SECOND_FRACTION["RL"]
-        <= WEAPON_DAMAGE_PER_SECOND_FRACTION["AR"]
-        <= WEAPON_DAMAGE_PER_SECOND_FRACTION["MG"]
-    )
+    # Sustained-DPS classes outpace SR/RL per-second even before
+    # charge damage compensation (SR/RL get +150% via charge_mult).
+    sustained = {"AR", "SMG", "MG", "SG"}
+    slow = {"SR", "RL"}
+    for w in sustained:
+        for s in slow:
+            assert (
+                WEAPON_DAMAGE_PER_SECOND_FRACTION[w]
+                > WEAPON_DAMAGE_PER_SECOND_FRACTION[s]
+            ), f"{w} per-sec ({WEAPON_DAMAGE_PER_SECOND_FRACTION[w]}) should exceed {s} ({WEAPON_DAMAGE_PER_SECOND_FRACTION[s]})"

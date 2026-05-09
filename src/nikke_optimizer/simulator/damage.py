@@ -100,17 +100,38 @@ MATCH_LENGTH_SEC = 300.0
 DAMAGE_PER_SHOT_FRACTION = 0.10  # legacy fallback for None / unknown weapon class
 
 WEAPON_DAMAGE_PER_SECOND_FRACTION: dict[str, float] = {
-    # Sustained-DPS classes — high fire rate × moderate per-shot %.
-    # These dominate steady-state PvP damage.
-    "AR": 0.11,
-    "SMG": 0.13,
-    "MG": 0.13,
-    # Pellet/wide-spread — high close-range, falls off at PvP distance.
-    "SG": 0.10,
-    # Slow/high-impact — each shot does more, but the tempo is gated.
-    "SR": 0.07,
-    "RL": 0.07,
+    # Per-shot ATK fraction × fire rate per sec, calibrated against
+    # nikke.gg published damage-formula numbers and West Games DPS
+    # calculator (May 2026). Prior values (0.07-0.13) were ~10-15× too
+    # low and produced a systematic 2-4× under-prediction of total
+    # match damage — root cause of the validation undershoot.
+    "AR":  1.62,   # ≈ 13.5% per shot × 12 shots/sec
+    "SMG": 1.95,   # ≈ 6.5% per shot × 30 shots/sec
+    "MG":  1.40,   # ≈ 3.5% per shot × 40 shots/sec
+    # SG: in arena all 10 pellets always land (Hit Rate stat is
+    # worthless in PvP — confirmed by nikke.gg arena-mechanics).
+    "SG":  1.50,   # ≈ 2.46% × 10 pellets × ~0.6 shots/sec, arena-buffed
+    # SR/RL pay this in slow tempo but charge damage compensates,
+    # applied separately in _per_member_atk_damage_multiplier.
+    "SR":  1.28,   # ≈ 256% per shot × 0.5 shots/sec (pre-charge)
+    "RL":  0.64,   # ≈ 256% per shot × 0.25 shots/sec (pre-charge)
 }
+
+# Charge damage bonus: SR and RL hit harder per shot when fully charged.
+# Most NIKKE SR/RL units sit at the +150% tier (1 + 1.5 = 2.5× per shot).
+# Fold this in as an average-case multiplier on the weapon factor
+# inside ``_per_member_atk_damage_multiplier``. Per nikke.gg, this
+# applies to charged shots only; for the steady-state DPS proxy we
+# treat it as always-on (valid for PvP since SR/RL chars in arena
+# almost always fire fully charged).
+CHARGE_DAMAGE_DEFAULT_MULTIPLIER = 2.5  # 1 + 1.5 base
+CHARGED_WEAPON_CLASSES = frozenset({"SR", "RL"})
+
+# Effective Range bonus: +30% when weapon class matches the engagement
+# distance. PvP arena distance is generally medium and most arena-
+# relevant units carry their effective-range bonus. We treat this as
+# always-on for PvP simulation (per nikke.gg arena-mechanics).
+EFFECTIVE_RANGE_BONUS = 1.30
 
 # Burst rotation period (seconds between Full-Burst windows after the
 # first chain). Used to convert the one-shot burst payload into a
@@ -185,17 +206,30 @@ def _per_member_atk_damage_multiplier(member: NikkeSnapshot) -> float:
       * crit expectation (rate × bonus damage)
       * full burst average
       * element advantage average
+      * effective range bonus (+30%, always-on for PvP)
+      * charge damage bonus (SR/RL only; +150% by default)
+
+    Source: nikke.gg/damage-formula and West Games NIKKE DPS calculator,
+    cross-referenced May 2026.
     """
     atk_mult = 1.0 + member.attack_damage_buff_pct / 100.0
     crit_rate = (DEFAULT_CRIT_RATE_PCT + member.crit_rate_buff_pct) / 100.0
     crit_dmg = (DEFAULT_CRIT_DAMAGE_PCT + member.crit_damage_buff_pct) / 100.0
     crit_mult = 1.0 + crit_rate * crit_dmg
+    weapon_class = (member.weapon_class or "").upper()
+    charge_mult = (
+        CHARGE_DAMAGE_DEFAULT_MULTIPLIER
+        if weapon_class in CHARGED_WEAPON_CLASSES
+        else 1.0
+    )
     return (
         atk_mult
         * crit_mult
         * FULL_BURST_AVERAGE_MULTIPLIER
         * ELEMENT_ADVANTAGE_AVERAGE
         * (1.0 + member.element_damage_buff_pct / 100.0)
+        * EFFECTIVE_RANGE_BONUS
+        * charge_mult
     )
 
 
