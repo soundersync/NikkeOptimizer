@@ -1041,16 +1041,19 @@ def _load_identities(names: list[str]) -> dict[str, dict]:
                 role = ""
                 if ch.role_tags:
                     role = ch.role_tags[0] if ch.role_tags else ""
-                # Owned cooldown override (some chars have CDR via skills).
-                owned = session.exec(
-                    select(OwnedCharacter).where(OwnedCharacter.character_id == ch.id)
-                ).one_or_none()
-                cd = (owned.burst_cooldown_seconds if owned else None) or 20.0
+                # Burst cooldown — prefer the per-character lookup
+                # table (BitTopup-sourced 20/40/60s values) over the
+                # OwnedCharacter row, since the latter is rarely
+                # populated. Falls back to 40s for B3 / 20s for
+                # B1/B2/flex when a Nikke isn't in the table.
+                from .burst_cooldowns import get_burst_cooldown
+                burst_pos_str = burst_pos_map.get(ch.burst_type, "flex") if ch.burst_type else "flex"
+                cd = get_burst_cooldown(name, burst_pos_str)
                 out[name] = {
                     "element": ch.element.value if ch.element else "",
                     "weapon_class": ch.weapon_class.value if ch.weapon_class else "",
                     "role": role,
-                    "burst_position": burst_pos_map.get(ch.burst_type, "flex") if ch.burst_type else None,
+                    "burst_position": burst_pos_str,
                     "burst_cooldown_sec": cd,
                 }
         return out
