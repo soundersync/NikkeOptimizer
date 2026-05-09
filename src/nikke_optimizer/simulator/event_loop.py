@@ -48,6 +48,7 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import registry
 from .damage import (
     DEFAULT_FIRST_BURST_SEC,
     MATCH_LENGTH_SEC,
@@ -56,11 +57,65 @@ from .damage import (
     _def_reduction_factor,
     _per_member_atk_damage_multiplier,
 )
+from .dsl import (
+    CharacterSkillSet,
+    EffectKind,
+    TargetKind,
+    TriggerKind,
+)
 from .evaluator import TeamEvaluation
 from .timeline import (
     BURST_GAUGE_SKILL_BONUS_PCT_PER_SEC,
     BURST_GEN_RATE_BY_WEAPON_PCT_PER_SEC,
 )
+
+
+# Effect kinds that multiply outgoing damage. Each adds a flat % to a
+# team-wide damage multiplier while the buff is active. (BUFF_ATK is
+# the most common; the *_DAMAGE kinds are damage-type specific.)
+_DAMAGE_BUFF_KINDS: frozenset[EffectKind] = frozenset({
+    EffectKind.BUFF_ATK,
+    EffectKind.BUFF_ATTACK_DAMAGE,
+    EffectKind.BUFF_TRUE_DAMAGE,
+    EffectKind.BUFF_CRIT_DAMAGE,
+    EffectKind.BUFF_CHARGE_DAMAGE,
+    EffectKind.BUFF_PIERCE_DAMAGE,
+    EffectKind.BUFF_ELEMENT_DAMAGE,
+    EffectKind.BUFF_CORE_DAMAGE,
+    EffectKind.BUFF_DAMAGE_TO_PARTS,
+    EffectKind.BUFF_SUSTAINED_DAMAGE,
+    EffectKind.BUFF_BURST_SKILL_DAMAGE,
+    EffectKind.BUFF_SHIELD_DAMAGE,
+})
+
+# Trigger kinds that fire during a chain. ALWAYS triggers are baked into
+# baseline already; we only schedule the chain-conditional ones.
+_BURST_TRIGGER_KINDS: frozenset[TriggerKind] = frozenset({
+    TriggerKind.ON_BURST_USE,
+    TriggerKind.ON_ALLY_BURST_USE,
+    TriggerKind.ON_FULL_BURST_START,
+})
+
+# Target kinds that count as buffing the team (i.e. boosting our DPS).
+_ALLY_TARGET_KINDS: frozenset[TargetKind] = frozenset({
+    TargetKind.SELF,
+    TargetKind.ALL_ALLIES,
+    TargetKind.NEAREST_ALLIES,
+    TargetKind.ALLY_HIGHEST_ATK,
+    TargetKind.ALLY_LOWEST_HP,
+    TargetKind.BURST_USER,
+})
+
+# Target kinds that count as debuffing the enemy (i.e. boosting our DPS
+# via reduced enemy DEF or ATK).
+_ENEMY_TARGET_KINDS: frozenset[TargetKind] = frozenset({
+    TargetKind.ALL_ENEMIES,
+    TargetKind.ENEMY_HIGHEST_HP,
+    TargetKind.ENEMY_LOWEST_HP,
+    TargetKind.ENEMY_FRONT,
+    TargetKind.ENEMIES_RANDOM_K,
+    TargetKind.PRIMARY_TARGET,
+})
 
 
 # Frame rate for the event loop. 10 Hz balances precision (matches
@@ -85,6 +140,28 @@ SHOTS_PER_SEC_BY_WEAPON: dict[str, float] = {
 }
 
 
+# Per-character shots-per-second overrides. Most Nikkes follow the
+# weapon-class default, but a few have unique mechanics that change
+# their effective per-shot cadence:
+#
+# - Snow White: Heavy Arms — technically SR but her "Seven Dwarves"
+#   weapon fires 5 sequential pierce shots per 1.2s charge (15 during
+#   burst). Effective shots/sec = 5 / 1.2 = ~4.17 out of burst. Without
+#   this override the per-shot damage is ~8x too large in the event-loop
+#   per-shot damage model, which one-shots defenders before bursts fire.
+#   Source: nikke.gg/snow-white-heavy-arms-analysis-should-you-pull
+# - Modernia — wind-up MG with full-auto sustained fire, fires faster
+#   than baseline MG once spun up.
+# - SAnis (Anis: Sparkling Summer) — burst-skill-modified weapon.
+SHOTS_PER_SEC_OVERRIDES: dict[str, float] = {
+    "Snow White: Heavy Arms": 4.17,  # 5 shots / 1.2s charge cycle
+    "Modernia": 50.0,                # ~50/s post wind-up
+    "Alice": 0.6,                    # charge SR with ammo magazine
+    "Maxwell": 0.5,                  # SR-style charge
+    "Red Hood": 12.0,                # AR/SMG hybrid in PvE; AR base in PvP
+}
+
+
 @dataclass(order=True)
 class _Event:
     """Heap-ordered event."""
@@ -102,7 +179,8 @@ class EventLoopMember:
     hp: float
     max_hp: float
     shield: float
-    atk: float                # effective ATK after all snapshot buffs
+    atk: float                # peak per-shot damage (full-burst stack)
+    base_atk: float           # baseline per-shot damage (passive only)
     weapon_class: str
     burst_position: str       # "1" / "2" / "3" / "flex"
     burst_payload: float      # one-shot burst-skill damage
@@ -114,9 +192,25 @@ class EventLoopMember:
     is_taunting: bool
     heal_per_second: float
     heal_window_until: float  # while sim_time < this, heals tick
+    skills: Optional[CharacterSkillSet] = None  # DSL data for this Nikke
     alive: bool = True
     damage_dealt: float = 0.0
     damage_taken: float = 0.0
+
+
+@dataclass
+class _ActiveBuff:
+    """One scheduled buff with an expiration time."""
+    expires_at: float
+    magnitude_pct: float  # added to team-wide damage multiplier
+    kind: EffectKind
+
+
+@dataclass
+class _ActiveDebuff:
+    """Defense debuff applied to enemy team."""
+    expires_at: float
+    magnitude_pct: float  # % DEF reduction
 
 
 @dataclass
@@ -149,40 +243,92 @@ class EventLoopResult:
         }
 
 
+def _enumerate_burst_buffs(
+    skills: CharacterSkillSet,
+) -> tuple[float, float]:
+    """Return (team_damage_uplift_pct, enemy_def_reduction_pct).
+
+    Sums all burst-window damage % buffs targeting allies, and all
+    DEF debuffs targeting enemies. Used to:
+      1. Decompose snapshot ATK into baseline (passive) + burst-window.
+      2. Identify what to schedule when a chain fires.
+
+    Effects with NEAREST_ALLIES weight by count/5 since they only hit
+    a subset of the team.
+    """
+    team_uplift = 0.0
+    enemy_def_reduction = 0.0
+    for slot in (skills.skill1, skills.skill2, skills.burst_skill):
+        for se in slot:
+            if se.trigger.kind not in _BURST_TRIGGER_KINDS:
+                continue
+            for eff in se.effects:
+                if eff.duration_seconds <= 0:
+                    continue
+                if (eff.kind in _DAMAGE_BUFF_KINDS
+                        and eff.target.kind in _ALLY_TARGET_KINDS):
+                    weight = (
+                        eff.target.count / 5.0
+                        if eff.target.kind == TargetKind.NEAREST_ALLIES
+                        else 1.0
+                    )
+                    team_uplift += eff.magnitude * weight
+                elif (eff.kind == EffectKind.DEBUFF_DEFENSE
+                        and eff.target.kind in _ENEMY_TARGET_KINDS):
+                    enemy_def_reduction += eff.magnitude
+    return team_uplift, enemy_def_reduction
+
+
+def _team_burst_uplift_total(team_skills: list[Optional[CharacterSkillSet]]) -> tuple[float, float]:
+    """Sum of (uplift, def_reduction) across team."""
+    u_total = 0.0
+    d_total = 0.0
+    for skills in team_skills:
+        if skills is None:
+            continue
+        u, d = _enumerate_burst_buffs(skills)
+        u_total += u
+        d_total += d
+    return u_total, d_total
+
+
 def _build_member(
-    snap, opponent_avg_def: float
+    snap, opponent_avg_def: float, total_burst_uplift_pct: float,
+    member_peak_dps: float,
 ) -> EventLoopMember:
-    """Convert a NikkeSnapshot into runtime EventLoopMember state."""
+    """Convert a NikkeSnapshot into runtime EventLoopMember state.
+
+    ``member_peak_dps`` is the calibrated allocation from team
+    ``dps_estimate`` (already calibrated against tournament data) so we
+    don't re-derive DPS from scratch — that path produces nonphysical
+    per-shot damages because snapshot ATK has many compounding buffs
+    baked in.
+    """
     weapon = (snap.weapon_class or "").lower()
-    sps = SHOTS_PER_SEC_BY_WEAPON.get(weapon, 5.0)
+    sps = SHOTS_PER_SEC_OVERRIDES.get(
+        snap.name, SHOTS_PER_SEC_BY_WEAPON.get(weapon, 5.0)
+    )
     eff_atk = snap.effective_atk
-    # Per-shot damage fraction × weapon mult is precomputed below;
-    # we still need a fallback "DPS-equivalent" for sustained channels.
-    weapon_factor = WEAPON_DAMAGE_PER_SECOND_FRACTION.get(weapon.upper(), 0.10)
-    atk_mult = _per_member_atk_damage_multiplier(snap)
     def_factor = max(
         MIN_DAMAGE_FRACTION_THROUGH_DEF,
         _def_reduction_factor(eff_atk, opponent_avg_def),
     )
-    # Per-shot damage = (DPS / shots-per-sec).
-    dps = (
-        eff_atk * atk_mult * def_factor * weapon_factor
-        + eff_atk * (snap.true_damage_buff_pct / 100.0) * weapon_factor
-        + eff_atk * (
-            (snap.pierce_damage_buff_pct / 100.0) * 0.5
-            + (snap.shield_damage_buff_pct / 100.0) * 0.3
-            + (snap.sustained_damage_buff_pct / 100.0) * 0.2
-        ) * weapon_factor
-    )
     # Burst payload precomputed from snapshot.
     burst = snap.burst_damage_magnitude * eff_atk * def_factor
+    peak_per_shot = member_peak_dps / sps if sps > 0 else 0.0
+    # Decompose into baseline (passive only) and burst-window peak.
+    # Snapshot is the "all buffs active" peak; baseline divides out the
+    # burst-window uplift so out-of-burst damage doesn't double-count it.
+    base_per_shot = peak_per_shot / max(1.0 + total_burst_uplift_pct / 100.0, 1.0)
+    skills = registry.get(snap.name)
 
     return EventLoopMember(
         name=snap.name,
         hp=float(snap.base_hp + snap.flat_hp_bonus),
         max_hp=float(snap.base_hp + snap.flat_hp_bonus),
         shield=float(snap.shield_value),
-        atk=dps / sps if sps > 0 else 0.0,  # per-shot damage
+        atk=peak_per_shot,
+        base_atk=base_per_shot,
         weapon_class=weapon,
         burst_position=snap.burst_position or "flex",
         burst_payload=burst,
@@ -194,6 +340,7 @@ def _build_member(
         is_taunting=snap.is_taunting,
         heal_per_second=float(snap.heal_per_second),
         heal_window_until=0.0,
+        skills=skills,
         alive=True,
     )
 
@@ -277,6 +424,91 @@ def _apply_damage(team: list[EventLoopMember], damage: float) -> float:
     return applied
 
 
+def _schedule_chain_buffs(
+    chain: list[EventLoopMember],
+    ally_team: list[EventLoopMember],
+    enemy_team: list[EventLoopMember],
+    current_time: float,
+    active_buffs: list[_ActiveBuff],
+    active_debuffs: list[_ActiveDebuff],
+) -> None:
+    """Walk each chain member's burst-triggered effects and schedule them.
+
+    Chain firing makes ON_BURST_USE / ON_FULL_BURST_START / ON_ALLY_BURST_USE
+    triggers fire. For each effect, we schedule a buff/debuff that
+    expires at current_time + duration_seconds.
+
+    Cross-stat scaling effects (CASTER_ATK etc.) are skipped here — those
+    are flat ATK additions, not % multipliers, and the snapshot already
+    bakes them in.
+    """
+    for caster in chain:
+        if caster.skills is None:
+            continue
+        for slot in (caster.skills.skill1, caster.skills.skill2,
+                     caster.skills.burst_skill):
+            for se in slot:
+                if se.trigger.kind not in _BURST_TRIGGER_KINDS:
+                    continue
+                for eff in se.effects:
+                    if eff.duration_seconds <= 0:
+                        continue
+                    # Skip cross-stat scaling — flat additions, baked into snapshot.
+                    from .dsl import ScalingSource
+                    if eff.scaling_source != ScalingSource.NONE:
+                        continue
+                    if (eff.kind in _DAMAGE_BUFF_KINDS
+                            and eff.target.kind in _ALLY_TARGET_KINDS):
+                        weight = (
+                            eff.target.count / 5.0
+                            if eff.target.kind == TargetKind.NEAREST_ALLIES
+                            else 1.0
+                        )
+                        active_buffs.append(_ActiveBuff(
+                            expires_at=current_time + eff.duration_seconds,
+                            magnitude_pct=eff.magnitude * weight,
+                            kind=eff.kind,
+                        ))
+                    elif (eff.kind == EffectKind.DEBUFF_DEFENSE
+                            and eff.target.kind in _ENEMY_TARGET_KINDS):
+                        active_debuffs.append(_ActiveDebuff(
+                            expires_at=current_time + eff.duration_seconds,
+                            magnitude_pct=eff.magnitude,
+                        ))
+
+
+def _current_buff_multiplier(
+    buffs: list[_ActiveBuff], current_time: float
+) -> float:
+    """Sum of currently-active damage buff %s, returned as a multiplier.
+
+    Side effect: prunes expired buffs from the list to keep it small.
+    """
+    total_pct = 0.0
+    buffs[:] = [b for b in buffs if b.expires_at > current_time]
+    for b in buffs:
+        total_pct += b.magnitude_pct
+    return 1.0 + total_pct / 100.0
+
+
+def _current_debuff_multiplier(
+    debuffs: list[_ActiveDebuff], current_time: float
+) -> float:
+    """Multiplier for damage-through-DEF when enemy DEF is debuffed.
+
+    Side effect: prunes expired debuffs.
+    """
+    debuffs[:] = [d for d in debuffs if d.expires_at > current_time]
+    if not debuffs:
+        return 1.0
+    total_red = sum(d.magnitude_pct for d in debuffs)
+    # Approximation: each 1% DEF reduction → ~0.5% damage uplift through
+    # the def-reduction formula in the typical level-difference regime.
+    # Real formula is in damage._def_reduction_factor; this is a
+    # first-order linearization.
+    return 1.0 + total_red / 200.0
+
+
 def simulate_event_loop(
     attacker: TeamEvaluation,
     defender: TeamEvaluation,
@@ -284,7 +516,7 @@ def simulate_event_loop(
     tick_dt: float = DEFAULT_TICK_DT_SEC,
     match_length_sec: float = MATCH_LENGTH_SEC,
 ) -> EventLoopResult:
-    """Event-loop match resolution at 10 Hz.
+    """Event-loop match resolution at 10 Hz with DSL effect scheduling.
 
     Differences from ``simulate_per_character``:
     1. Burst gauge fills via per-shot accumulation, not preset
@@ -294,6 +526,10 @@ def simulate_event_loop(
        (clip reload approximated by uniform fire rate).
     3. Death events propagate: when a Nikke dies, her shots stop AND
        team burst-gen rate recomputes for the next tick.
+    4. Buffs are scheduled per-chain-fire from the DSL: each chain
+       activates burst-window buffs that expire at +duration_seconds.
+       Out-of-burst-window damage uses ``base_atk`` (snapshot ATK with
+       burst-window uplift removed).
     """
     a_avg_def = sum(m.effective_def for m in attacker.members) / max(
         len(attacker.members), 1
@@ -301,8 +537,32 @@ def simulate_event_loop(
     d_avg_def = sum(m.effective_def for m in defender.members) / max(
         len(defender.members), 1
     )
-    a_team = [_build_member(m, d_avg_def) for m in attacker.members]
-    d_team = [_build_member(m, a_avg_def) for m in defender.members]
+
+    # Compute team-wide burst-window uplift from DSL to decompose snapshot.
+    a_skills = [registry.get(m.name) for m in attacker.members]
+    d_skills = [registry.get(m.name) for m in defender.members]
+    a_uplift_pct, _ = _team_burst_uplift_total(a_skills)
+    d_uplift_pct, _ = _team_burst_uplift_total(d_skills)
+
+    # Allocate calibrated team DPS proportionally by member ATK weight.
+    # ``dps_estimate`` is the in-burst peak (already calibrated against
+    # tournament outcomes) — we slice it by member contribution.
+    def _member_dps_alloc(team_eval) -> list[float]:
+        weights = [max(m.effective_atk, 1.0) for m in team_eval.members]
+        total = sum(weights)
+        return [team_eval.dps_estimate * w / total for w in weights]
+
+    a_member_dps = _member_dps_alloc(attacker)
+    d_member_dps = _member_dps_alloc(defender)
+
+    a_team = [
+        _build_member(m, d_avg_def, a_uplift_pct, dps)
+        for m, dps in zip(attacker.members, a_member_dps)
+    ]
+    d_team = [
+        _build_member(m, a_avg_def, d_uplift_pct, dps)
+        for m, dps in zip(defender.members, d_member_dps)
+    ]
 
     a_gauge = 0.0
     d_gauge = 0.0
@@ -312,6 +572,10 @@ def simulate_event_loop(
     d_chain_starts: list[float] = []
     a_total = 0.0
     d_total = 0.0
+    a_active_buffs: list[_ActiveBuff] = []
+    d_active_buffs: list[_ActiveBuff] = []
+    a_active_debuffs: list[_ActiveDebuff] = []  # debuffs ON enemy team
+    d_active_debuffs: list[_ActiveDebuff] = []
     end_reason = "timeout"
     notes: list[str] = []
 
@@ -326,28 +590,29 @@ def simulate_event_loop(
             end_reason = "defender_cleared"
             break
 
-        # DPS decay outside burst windows — matches match_sim's
-        # POST_BURST_DPS_RETENTION model. Pre-first-burst stays at
-        # 1.0 (peak) since baseline ATK already excludes burst-window-
-        # only buffs. Real fix: per-skill buff event scheduling so
-        # individual buff durations decay correctly.
-        a_in_burst = any(bt <= t < bt + FULL_BURST_WINDOW_SEC for bt in a_chain_starts)
-        d_in_burst = any(bt <= t < bt + FULL_BURST_WINDOW_SEC for bt in d_chain_starts)
-        a_dps_factor = 1.0 if (not a_chain_starts or a_in_burst) else 0.55
-        d_dps_factor = 1.0 if (not d_chain_starts or d_in_burst) else 0.55
+        # Damage multipliers from DSL-scheduled buffs/debuffs. Replaces
+        # the constant 0.55 decay heuristic — buffs decay individually
+        # as they expire, so e.g. a 10s ATK buff lasts exactly 10s.
+        a_buff_mult = _current_buff_multiplier(a_active_buffs, t)
+        d_buff_mult = _current_buff_multiplier(d_active_buffs, t)
+        a_def_debuff_mult = _current_debuff_multiplier(a_active_debuffs, t)
+        d_def_debuff_mult = _current_debuff_multiplier(d_active_debuffs, t)
 
         # Each living Nikke fires shots whose timer has elapsed.
+        # Damage = base_per_shot × team_buff_mult × enemy_def_debuff_mult.
         for m in a_living:
+            shot_dmg = m.base_atk * a_buff_mult * a_def_debuff_mult
             while m.next_shot_at <= t and m.alive:
-                applied = _apply_damage(d_team, m.atk * a_dps_factor)
+                applied = _apply_damage(d_team, shot_dmg)
                 a_total += applied
                 m.damage_dealt += applied
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
                 if not [x for x in d_team if x.alive]:
                     break
         for m in d_living:
+            shot_dmg = m.base_atk * d_buff_mult * d_def_debuff_mult
             while m.next_shot_at <= t and m.alive:
-                applied = _apply_damage(a_team, m.atk * d_dps_factor)
+                applied = _apply_damage(a_team, shot_dmg)
                 d_total += applied
                 m.damage_dealt += applied
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
@@ -364,6 +629,10 @@ def simulate_event_loop(
             if chain:
                 burst_total = sum(m.burst_payload for m in chain)
                 a_total += _apply_damage(d_team, burst_total)
+                _schedule_chain_buffs(
+                    chain, a_team, d_team, t,
+                    a_active_buffs, a_active_debuffs,
+                )
                 for m in chain:
                     m.burst_ready_at = t + m.burst_cooldown_sec
                     m.heal_window_until = t + 10.0  # heal during burst window
@@ -376,6 +645,10 @@ def simulate_event_loop(
             if chain:
                 burst_total = sum(m.burst_payload for m in chain)
                 d_total += _apply_damage(a_team, burst_total)
+                _schedule_chain_buffs(
+                    chain, d_team, a_team, t,
+                    d_active_buffs, d_active_debuffs,
+                )
                 for m in chain:
                     m.burst_ready_at = t + m.burst_cooldown_sec
                     m.heal_window_until = t + 10.0
