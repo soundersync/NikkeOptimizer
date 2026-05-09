@@ -559,6 +559,152 @@ class PromoExtractedField(SQLModel, table=True):
 
 
 # ---------------------------------------------------------------------------
+# Dolls (Collection Items) — fixed catalog of 12 items
+# ---------------------------------------------------------------------------
+# 6 weapon classes × {R, SR} = 12 unique dolls. Each is generic to its
+# weapon class (every AR-wielding Nikke equips the same "Cooking Commander
+# Doll Ltd."). Phase 1-15 unlocks progressively-stronger versions of one
+# (R) or two (SR) skills. Skill text follows the in-game format
+# "Activates at the start of the battle. <stat> ▲ <%> ...".
+#
+# Seed data lives in ``data/doll_data.py``; loaded into these tables via
+# ``nikkeoptimizer seed-dolls``. Only Phase 1 and Phase 15 are sourced
+# directly from public references (community guides + user verification);
+# intermediate phases are linearly interpolated and flagged via
+# ``DollSkillPhase.interpolated``.
+
+
+class Doll(SQLModel, table=True):
+    """One Collection Item (Doll). Keyed by (weapon_class, rarity)."""
+
+    __tablename__ = "doll"
+    __table_args__ = (
+        UniqueConstraint("weapon_class", "rarity", name="uq_doll_weapon_rarity"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True, description="e.g. 'Cooking Commander Doll Ltd.'")
+    weapon_class: WeaponClass
+    rarity: Rarity = Field(description="R (1 skill) or SR (2 skills). SSR isn't a doll — it's a Treasure.")
+    max_phase: int = Field(default=15, description="5 for R, 15 for SR")
+    notes: Optional[str] = None
+
+    skills: List["DollSkill"] = Relationship(
+        back_populates="doll",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+
+class DollSkill(SQLModel, table=True):
+    """One named skill on a Doll. R has 1 skill, SR has 2.
+
+    The skill name is constant across all phases (e.g. "Gaze of Courage");
+    the per-phase magnitude rows live in ``DollSkillPhase``.
+    """
+
+    __tablename__ = "doll_skill"
+    __table_args__ = (
+        UniqueConstraint("doll_id", "skill_index", name="uq_doll_skill_index"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    doll_id: int = Field(foreign_key="doll.id", index=True)
+    skill_index: int = Field(description="1 or 2")
+    name: str = Field(description="e.g. 'Gaze of Courage', 'Grounding Pillar'")
+    trigger_text: Optional[str] = Field(
+        default=None,
+        description="e.g. 'Activates at the start of the battle.'",
+    )
+
+    doll: "Doll" = Relationship(back_populates="skills")
+    phases: List["DollSkillPhase"] = Relationship(
+        back_populates="skill",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+
+class DollSkillPhase(SQLModel, table=True):
+    """Magnitude values for one (skill, phase) combination.
+
+    ``effects`` holds a list of ``{"stat": str, "magnitude": float}`` rows —
+    e.g. ``[{"stat": "Damage dealt when attacking core", "magnitude": 17.04},
+    {"stat": "DEF", "magnitude": 37.0}]`` for AR-SR skill 1 at phase 15.
+
+    All magnitudes are stored as percent values (the unit is always %
+    for doll buffs; we drop the unit field for brevity).
+    """
+
+    __tablename__ = "doll_skill_phase"
+    __table_args__ = (
+        UniqueConstraint("skill_id", "phase", name="uq_doll_skill_phase"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    skill_id: int = Field(foreign_key="doll_skill.id", index=True)
+    phase: int = Field(description="1-15")
+    effects: List[dict] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="[{stat, magnitude}, ...]",
+    )
+    interpolated: bool = Field(
+        default=False,
+        description="True when this phase's values were linearly derived between checkpoints rather than published verbatim",
+    )
+
+    skill: "DollSkill" = Relationship(back_populates="phases")
+
+
+# ---------------------------------------------------------------------------
+# Treasures (Favorite Items) — per-character SSR upgrade catalog
+# ---------------------------------------------------------------------------
+# 17 characters in the meta have Treasures (Helm, Bay, Centi, Drake, ...).
+# A Treasure has 3 phases — each phase upgrades exactly one of the
+# character's three skills (Skill 1 → Phase 1, Skill 2 → Phase 2,
+# Burst → Phase 3, by Prydwen's numbering). The upgraded skill text
+# replaces the base text for that skill.
+#
+# Populated from Prydwen via ``nikkeoptimizer seed-treasures``.
+
+
+class TreasureSkill(SQLModel, table=True):
+    """One skill of a Treasure-form character with its upgrade phase.
+
+    For a given (character_id, skill_index) we store:
+      - ``upgrade_phase``: which Treasure phase activates this skill's
+        upgraded version (1, 2, or 3 in Prydwen's numbering).
+      - ``description_treasured``: the augmented skill text (Phase ≥ upgrade_phase).
+      - ``description_base``: optional — the non-treasured version
+        (== ``Character.skillN_description`` of the base character).
+    """
+
+    __tablename__ = "treasure_skill"
+    __table_args__ = (
+        UniqueConstraint(
+            "character_id", "skill_index", name="uq_treasure_skill_natural"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    character_id: int = Field(foreign_key="character.id", index=True)
+    skill_index: int = Field(description="1=Skill1, 2=Skill2, 3=Burst")
+    skill_slot: str = Field(description="'Skill 1' | 'Skill 2' | 'Burst' (Prydwen label)")
+    name: Optional[str] = Field(default=None, description="In-game skill name e.g. 'Frontline Command'")
+    upgrade_phase: int = Field(
+        description="1, 2, or 3 — phase at which this skill gets the Treasure upgrade"
+    )
+    description_treasured: Optional[str] = Field(
+        default=None,
+        description="Skill text once the Treasure upgrade is active (Phase >= upgrade_phase)",
+    )
+    description_base: Optional[str] = Field(
+        default=None,
+        description="Skill text without the Treasure upgrade (Phase < upgrade_phase). May be NULL until the base character page is also scraped.",
+    )
+    last_updated: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
 # Account-wide research state (singleton row, id=1)
 # ---------------------------------------------------------------------------
 

@@ -2622,5 +2622,145 @@ def optimize(
     raise typer.Exit(2)
 
 
+@app.command("seed-dolls")
+def seed_dolls_cmd(
+    db: Optional[Path] = typer.Option(None, help="Override DB path"),
+    show: bool = typer.Option(False, "--show", help="List the seeded catalog after writing"),
+) -> None:
+    """Populate the Doll / DollSkill / DollSkillPhase tables from doll_data.py.
+
+    Idempotent — wipes and re-inserts each run. Linearly interpolates
+    phases between published checkpoints (Phase 1 / 5 / 15 depending on
+    rarity). Phase rows derived by interpolation are flagged via
+    ``DollSkillPhase.interpolated``.
+
+    Examples:
+
+      nikkeoptimizer seed-dolls
+      nikkeoptimizer seed-dolls --show
+    """
+    from ..data.doll_seed import seed_dolls
+    from ..data.models import Doll, DollSkill, DollSkillPhase
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        counts = seed_dolls(session)
+        console.print(
+            f"[bold green]Seeded[/] {counts['dolls']} dolls, "
+            f"{counts['skills']} skills, {counts['phases']} phase rows."
+        )
+
+        if show:
+            dolls = session.exec(select(Doll).order_by(Doll.weapon_class, Doll.rarity)).all()
+            for doll in dolls:
+                console.print(
+                    f"\n[bold cyan]{doll.name}[/] "
+                    f"({doll.weapon_class.value} / {doll.rarity.value}, "
+                    f"max phase {doll.max_phase})"
+                )
+                skills = session.exec(
+                    select(DollSkill).where(DollSkill.doll_id == doll.id)
+                    .order_by(DollSkill.skill_index)
+                ).all()
+                for skill in skills:
+                    console.print(f"  [yellow]Skill {skill.skill_index}[/]: {skill.name}")
+                    phases = session.exec(
+                        select(DollSkillPhase).where(DollSkillPhase.skill_id == skill.id)
+                        .order_by(DollSkillPhase.phase)
+                    ).all()
+                    # Show only checkpoint phases (non-interpolated) by default.
+                    for ph in phases:
+                        if ph.interpolated:
+                            continue
+                        effects = ", ".join(
+                            f"{e['stat']} {'▼' if e.get('direction') == 'down' else '▲'} {e['magnitude']}%"
+                            for e in ph.effects
+                        )
+                        console.print(f"    Phase {ph.phase}: {effects}")
+
+
+@app.command("seed-treasures")
+def seed_treasures_cmd(
+    db: Optional[Path] = typer.Option(None, help="Override DB path"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass on-disk fetch cache"),
+) -> None:
+    """Populate the TreasureSkill table from Prydwen's ``-treasure`` pages.
+
+    Walks every character with ``hasTreasure = True`` in the Prydwen
+    index, fetches the corresponding ``<slug>-treasure`` JSON, extracts
+    each skill's ``phase`` field + skill text, and upserts a row per
+    (character, skill_index). Idempotent.
+
+    Requires the base ``Character`` rows to already exist (run
+    ``nikkeoptimizer refresh`` first).
+    """
+    from ..data.models import Character, TreasureSkill
+    from ..data.scrapers.prydwen import PrydwenClient, extract_treasure_skills
+    from ..data.scrapers.refresh import default_cache_dir as scraper_cache_dir
+
+    engine = make_engine(db)
+    init_db(engine)
+
+    async def _run() -> tuple[int, int]:
+        cache = None if no_cache else scraper_cache_dir()
+        async with PrydwenClient(cache_dir=cache) as client:
+            slugs_all = await client.list_character_slugs()
+        treasure_slugs = [s for s in slugs_all if s.endswith("-treasure")]
+
+        n_chars = 0
+        n_skills = 0
+        async with PrydwenClient(cache_dir=cache) as client:
+            for slug in treasure_slugs:
+                data = await client._get_json(
+                    f"https://www.prydwen.gg/page-data/nikke/characters/{slug}/page-data.json",
+                    cache_key=f"char_{slug}",
+                )
+                try:
+                    node = data["result"]["data"]["currentUnit"]["nodes"][0]
+                except (KeyError, IndexError):
+                    continue
+                rows = extract_treasure_skills(node)
+                if not rows:
+                    continue
+
+                with get_session(engine) as session:
+                    char = session.exec(
+                        select(Character).where(Character.name == node.get("name"))
+                    ).first()
+                    if char is None:
+                        console.print(
+                            f"[yellow]skip {slug}: '{node.get('name')}' not in Character table — run refresh first[/]"
+                        )
+                        continue
+
+                    # Wipe old rows for this character so we start fresh.
+                    existing = session.exec(
+                        select(TreasureSkill).where(TreasureSkill.character_id == char.id)
+                    ).all()
+                    for r in existing:
+                        session.delete(r)
+                    for row in rows:
+                        session.add(
+                            TreasureSkill(
+                                character_id=char.id,
+                                skill_index=row["skill_index"],
+                                skill_slot=row["skill_slot"],
+                                name=row["name"],
+                                upgrade_phase=row["upgrade_phase"],
+                                description_treasured=row["description_treasured"],
+                            )
+                        )
+                    session.commit()
+                    n_chars += 1
+                    n_skills += len(rows)
+        return n_chars, n_skills
+
+    n_chars, n_skills = asyncio.run(_run())
+    console.print(
+        f"[bold green]Seeded[/] {n_skills} treasure-skill rows across {n_chars} characters."
+    )
+
+
 if __name__ == "__main__":
     app()

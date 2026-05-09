@@ -1,0 +1,46 @@
+{
+  "name": "Helm (Treasure)",
+  "slug": "helm-treasure",
+  "hasTreasure": true,
+  "skills": [
+    {
+      "unitId": "157",
+      "skillId": "157_1",
+      "name": "Frontline Command",
+      "slot": "Skill 1",
+      "type": "Passive",
+      "cooldown": null,
+      "descriptionLevel10": {
+        "raw": "{\"nodeType\":\"document\",\"data\":{},\"content\":[{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"■ Activates when the last bullet hits the target. Affects all allies.\",\"marks\":[],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Critical Rate of normal attacks ▲ 14.64% for 5 sec.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"■ Activates when attacking with Full Charge. Affects all allies.\",\"marks\":[],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Recovers 0.59% of caster's final Max HP.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Fills Burst Gauge by 14.31%.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]}]}"
+      },
+      "skillTreasure": null,
+      "phase": "Phase 1"
+    },
+    {
+      "unitId": "157",
+      "skillId": "157_2",
+      "name": "Fire Away",
+      "slot": "Skill 2",
+      "type": "Passive",
+      "cooldown": null,
+      "descriptionLevel10": {
+        "raw": "{\"nodeType\":\"document\",\"data\":{},\"content\":[{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"■ Affects all allies.\",\"marks\":[],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Damage to Interruption Parts ▲ 3.08% continuously.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"■ Activates when entering Full Burst. Affects all allies.\",\"marks\":[],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Attack Damage ▲ 27.87% for 10 sec.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"■ Activates when hitting a target with Full Charge. Affects the target.\",\"marks\":[],\"data\":{}}]},{\"nodeType\":\"paragraph\",\"data\":{},\"content\":[{\"nodeType\":\"text\",\"value\":\"Deals 178.98% of final ATK as additional damage.\",\"marks\":[{\"type\":\"bold\"}],\"data\":{}}]}]}"
+      },
+      "skillTreasure": null,
+      "phase": "Phase 2"
+    },
+    {
+      "unitId": "157",
+      "skillId": "157_3",
+      "name": "Aegis Cannon",
+      "slot": "Burst",
+      "type": "Active",
+      "cooldown": 40,
+      "descriptionLevel10": {
+        "raw": "{\"data\":{},\"content\":[{\"data\":{},\"content\":[{\"data\":{},\"marks\":[],\"value\":\"■ Affects the enemy with the highest ATK.\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"},{\"data\":{},\"content\":[{\"data\":{},\"marks\":[{\"type\":\"bold\"}],\"value\":\"Deals 8236.8% of final ATK as damage.\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"},{\"data\":{},\"content\":[{\"data\":{},\"marks\":[],\"value\":\"■ Affects all allies.\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"},{\"data\":{},\"content\":[{\"data\":{},\"marks\":[{\"type\":\"bold\"}],\"value\":\"Recovers 54.45% of attack damage as HP for 10 sec.\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"},{\"data\":{},\"content\":[{\"data\":{},\"marks\":[],\"value\":\"■ Affects self.\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"},{\"data\":{},\"content\":[{\"data\":{},\"marks\":[{\"type\":\"bold\"}],\"value\":\"Charge Damage Multiplier ▲ 158.4% for 10 round(s).\",\"nodeType\":\"text\"}],\"nodeType\":\"paragraph\"}],\"nodeType\":\"document\"}"
+      },
+      "skillTreasure": null,
+      "phase": "Phase 3"
+    }
+  ]
+}

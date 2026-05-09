@@ -186,6 +186,54 @@ def _flatten_skill_description(skill_obj: Optional[dict]) -> Optional[str]:
     return text or None
 
 
+def _phase_label_to_int(label: Optional[str]) -> Optional[int]:
+    """Map Prydwen's "Phase 1" / "Phase 2" / "Phase 3" string to an int."""
+    if not isinstance(label, str):
+        return None
+    label = label.strip().lower()
+    for n in (1, 2, 3):
+        if label == f"phase {n}":
+            return n
+    return None
+
+
+def extract_treasure_skills(node: dict) -> list[dict]:
+    """Return per-skill treasure data from a ``-treasure`` Prydwen page node.
+
+    Each returned dict has:
+      - ``skill_index``: 1, 2, or 3 (skill1 / skill2 / burst)
+      - ``skill_slot``: Prydwen's "Skill 1" / "Skill 2" / "Burst" label
+      - ``name``: in-game skill name (e.g. "Frontline Command")
+      - ``upgrade_phase``: 1, 2, or 3 — the phase at which this skill
+        gets the treasure-augmented version
+      - ``description_treasured``: flattened skill text (max-level)
+
+    Returns an empty list if the node doesn't look like a treasure page
+    (no ``skills`` list, or none of the skills carry a ``phase`` field).
+    """
+    skills = node.get("skills") or []
+    if not isinstance(skills, list):
+        return []
+
+    out: list[dict] = []
+    for i, sk in enumerate(skills):
+        if not isinstance(sk, dict):
+            continue
+        phase = _phase_label_to_int(sk.get("phase"))
+        if phase is None:
+            continue
+        out.append(
+            {
+                "skill_index": i + 1,
+                "skill_slot": sk.get("slot") or f"Skill {i + 1}",
+                "name": sk.get("name"),
+                "upgrade_phase": phase,
+                "description_treasured": _flatten_skill_description(sk),
+            }
+        )
+    return out
+
+
 def _portrait_url(node: dict) -> Optional[str]:
     img = node.get("smallImage") or node.get("cardImage") or node.get("fullImage")
     if not img:
