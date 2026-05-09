@@ -509,6 +509,20 @@ _GEAR_BONUS_TYPE_TO_SNAPSHOT_FIELD = {
     # apply_gear_buffs.
 }
 
+# Map Doll-effect stat names (from DollSkillPhase.effects[*].stat) to
+# NikkeSnapshot buff fields. Effects without a mapped field are dropped
+# (e.g. "Max HP of Cover" — we don't model cover mechanics; "Max
+# Ammunition Capacity" — PvP irrelevant).
+_DOLL_STAT_TO_SNAPSHOT_FIELD = {
+    "DEF":                              "def_buff_pct",
+    "Charge Damage Multiplier":         "charge_damage_buff_pct",
+    "Normal Attack Damage Multiplier":  "attack_damage_buff_pct",
+    "Damage dealt when attacking core": "core_damage_buff_pct",
+    # "Damage Taken" is a defensive multiplier (attacker side), modeled
+    # as an HP equivalent in apply_doll_buffs by dividing damage we
+    # absorb (i.e. effectively boosting our HP). Direction-aware.
+}
+
 
 def evaluate_team(
     team_skills: Iterable[CharacterSkillSet],
@@ -519,6 +533,7 @@ def evaluate_team(
     identities: Optional[dict[str, dict]] = None,
     per_name_stats: Optional[dict[str, dict]] = None,
     per_name_gear_buffs: Optional[dict[str, dict[str, float]]] = None,
+    per_name_doll_buffs: Optional[dict[str, dict[str, float]]] = None,
 ) -> TeamEvaluation:
     """Compute the post-burst-chain snapshot for a 5-Nikke team.
 
@@ -544,6 +559,7 @@ def evaluate_team(
     identities = identities or {}
     per_name_stats = per_name_stats or {}
     per_name_gear_buffs = per_name_gear_buffs or {}
+    per_name_doll_buffs = per_name_doll_buffs or {}
 
     def _stat(name: str, key: str, fallback: int) -> int:
         value = per_name_stats.get(name, {}).get(key)
@@ -584,6 +600,26 @@ def evaluate_team(
             # HIT_RATE / AMMUNITION_CAPACITY / MAX_AMMUNITION_CAPACITY
             # have no PvP-relevant impact (100% hit rate, mag-clip
             # mechanics ignored in our model).
+
+    # ----- Phase 0b: Apply Doll/Treasure phase effects -----
+    # Doll skill effects from DollSkillPhase rows (12 dolls × 15
+    # phases × 2 skills = up to 330 distinct phase-effects in DB).
+    # Auto-loaded by ``evaluate_by_names`` from each char's equipped
+    # doll + treasure_phase. "Damage Taken" effects boost effective
+    # HP by reducing incoming damage (1 / (1 - reduction%)).
+    for snap in team:
+        doll = per_name_doll_buffs.get(snap.name, {})
+        for stat, pct in doll.items():
+            field_name = _DOLL_STAT_TO_SNAPSHOT_FIELD.get(stat)
+            if field_name is not None:
+                setattr(snap, field_name, getattr(snap, field_name) + pct)
+            elif stat == "Damage Taken":
+                # Damage taken reduction → boost effective HP.
+                # damage_through = 1 - pct/100 → ehp_multiplier = 1/(1-pct/100)
+                if pct >= 100:
+                    continue  # invalid
+                ehp_mult = 1.0 / (1.0 - pct / 100.0)
+                snap.base_hp = int(snap.base_hp * ehp_mult)
 
     # ----- Phase 1: ALWAYS + ON_BATTLE_START (once per Nikke) -----
     # Persistent passives (Pierce, base buff stacks, on-battle-start
@@ -704,7 +740,76 @@ def evaluate_by_names(
             for base, routed in zip(name_list, routed_names)
             if base in base_gear
         }
+    if "per_name_doll_buffs" not in kwargs:
+        base_dolls = _load_owned_doll_buffs(name_list)
+        kwargs["per_name_doll_buffs"] = {
+            routed: base_dolls[base]
+            for base, routed in zip(name_list, routed_names)
+            if base in base_dolls
+        }
     return evaluate_team(sets, **kwargs)
+
+
+def _load_owned_doll_buffs(names: list[str]) -> dict[str, dict[str, float]]:
+    """Look up each character's equipped Doll + phase, sum effects.
+
+    Returns ``{character_name: {"DEF": 37.0, "Damage Taken": 12.0, ...}}``.
+    Looks up Doll by ``treasure_name`` (the user's equipped doll) and
+    pulls effects at ``treasure_phase`` from DollSkillPhase. Returns
+    empty for characters where no doll is equipped or rarity != "SR"
+    (SSR rarity = Treasure, handled separately when wired).
+    """
+    try:
+        from ..data.db import default_db_path, make_engine, get_session
+        from ..data.models import (
+            Character, OwnedCharacter, Doll, DollSkill, DollSkillPhase,
+        )
+        from sqlmodel import select
+        engine = make_engine(default_db_path())
+        out: dict[str, dict[str, float]] = {}
+        with get_session(engine) as session:
+            for name in names:
+                row = session.exec(
+                    select(OwnedCharacter, Character)
+                    .where(OwnedCharacter.character_id == Character.id)
+                    .where(Character.name == name)
+                ).one_or_none()
+                if row is None:
+                    continue
+                owned, _ = row
+                # Only SR Dolls handled here; SSR Treasures need their
+                # own loader (skill descriptions, not structured data).
+                if (owned.treasure_rarity or "").upper() != "SR":
+                    continue
+                if not owned.treasure_name or not owned.treasure_phase:
+                    continue
+                doll = session.exec(
+                    select(Doll).where(Doll.name == owned.treasure_name)
+                ).one_or_none()
+                if doll is None:
+                    continue
+                buffs: dict[str, float] = {}
+                skills = session.exec(
+                    select(DollSkill).where(DollSkill.doll_id == doll.id)
+                ).all()
+                for sk in skills:
+                    phase_row = session.exec(
+                        select(DollSkillPhase)
+                        .where(DollSkillPhase.skill_id == sk.id)
+                        .where(DollSkillPhase.phase == owned.treasure_phase)
+                    ).one_or_none()
+                    if phase_row is None:
+                        continue
+                    for eff in phase_row.effects or []:
+                        stat = eff.get("stat")
+                        mag = eff.get("magnitude")
+                        if stat and mag is not None:
+                            buffs[stat] = buffs.get(stat, 0.0) + float(mag)
+                if buffs:
+                    out[name] = buffs
+        return out
+    except Exception:
+        return {}
 
 
 def _load_owned_gear_buffs(names: list[str]) -> dict[str, dict[str, float]]:
