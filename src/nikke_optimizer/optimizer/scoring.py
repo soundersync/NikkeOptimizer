@@ -627,10 +627,27 @@ def _roles_of(view: CharacterView) -> frozenset[str]:
 # ---------------------------------------------------------------------------
 
 
+def _effective_power(view: CharacterView) -> int:
+    """Return ``view.power`` if captured (owned + arena-imported),
+    otherwise the BlablaLink-predicted power (``predicted_power``).
+
+    Unowned characters used to score 0 power, which made counter-pick
+    scoring against opponent compositions blind to stat investment.
+    With BlablaLink stat tables mirrored locally, we can predict their
+    power at a reasonable assumed investment level (LV600 / MLB / Core 7
+    / max skills, set in ``loader.py``).
+    """
+    if view.power > 0:
+        return view.power
+    if view.predicted_power is not None:
+        return view.predicted_power
+    return 0
+
+
 def _score_power(team: list[CharacterView]) -> float:
     """Log-scale the team's total power so the score doesn't get dominated
     by a single high-CP unit."""
-    total = sum(m.power for m in team)
+    total = sum(_effective_power(m) for m in team)
     if total <= 0:
         return 0.0
     return math.log10(total)

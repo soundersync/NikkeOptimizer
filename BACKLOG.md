@@ -109,7 +109,14 @@ User-observed cases where the optimizer recommends teams they wouldn't field. Ca
 
 ## Roster data gaps
 
-- **Doll vs Treasure CSV gap** — The CSV columns currently labeled `Treasure Name / Treasure Phase / Treasure Stats` actually hold **Doll (Collection Item)** data: 7 distinct values (Shopping/Cooking/Exercising/Battling/Napping/Coffee Commander Doll Ltd. + empty), 1–15 phase. The real **Treasure (Favorite Item)** unlock state — phases 0/1/2/3 per the in-game system — is **not captured anywhere**. Blocks accurate skill-set routing for the 17 Treasure-eligible chars (Bay/Centi/Diesel/Drake/Exia/Frima/Helm/Julia/Laplace/Milk/Miranda/Moran/Poli/Privaty/Tove/Viper/Zwei): we currently can't tell `Helm with Treasure Phase 3 unlocked` from `Helm no Treasure` — both look identical in the CSV (empty Doll columns for those 17 specifically). User has Treasures unlocked for most of them, so this matters. Plan:
+- **`OwnedCharacter.star_count` is redundant + wrong range** — Field
+  description says `"1-3 yellow stars"` but actual range is 0–3
+  (LB 0 = no yellow stars; see memory note `limit_break_and_core_mechanics.md`).
+  Also fully redundant with `OwnedCharacter.limit_break` (0–3, same
+  meaning). Pick one and drop the other when doing a schema cleanup
+  pass. No DB rebuild needed if just fixing the docstring; column
+  removal needs the no-migrations rebuild.
+- **Doll vs Treasure CSV gap** — *(largely resolved 2026-05-09 by v2 CSV format)* The new CSV format (2026-05-08+) writes `Doll/Treasure Name`, `Doll/Treasure Rarity` (SSR=Treasure, SR=Doll), `Doll/Treasure Phase`, `Doll/Treasure Stats`, `Doll/Treasure Skill Levels` — distinguishing the two correctly. Importer handles both formats. ~14% of CSV rows occasionally still ship with empty cube/treasure cells (CSV scraper edge cases on certain characters); workaround is re-export until clean. Pre-v2 context preserved below for archaeology:
   1. Investigate why all 17 Treasure-eligible chars show empty Doll columns — does the in-game export show the Favorite Item in place of the Doll, and does our scraper drop it?
   2. Extend the CSV exporter (user-side) with a `Favorite Item Phase` column: 0 = not unlocked, 1/2/3 = phase.
   3. Rename model fields `treasure_*` → `doll_*` (cosmetic, but otherwise misleading); add `favorite_item_phase: int = 0` to `OwnedCharacter`. Touches the schema → DB rebuild required (no-migrations note still applies).
@@ -130,6 +137,14 @@ User-observed cases where the optimizer recommends teams they wouldn't field. Ca
 - **DSL slice complete — all 39 library files re-encoded under DSL primitives** — Task #55 (2026-04-27) added 8 damage-type buff kinds (BUFF_ATTACK_DAMAGE / BUFF_TRUE_DAMAGE / BUFF_PIERCE_DAMAGE / BUFF_SHIELD_DAMAGE / BUFF_CORE_DAMAGE / BUFF_DAMAGE_TO_PARTS / BUFF_SUSTAINED_DAMAGE / BUFF_BURST_SKILL_DAMAGE), `ScalingSource` (CASTER_ATK/MAX_HP/DEF) on Effect, and `filter_element` / `filter_weapon` / `filter_role` on Target. Task #57 finished re-encoding all 39 library files using these primitives. **Filter enforcement** in evaluator + timeline still requires threading Character data (element/weapon/role) into the simulator layer — currently filters are stored on Target but not narrowed by the resolver. That's a separate slice.
 - **Translation methodology for Prydwen prose → DSL** — The DB has fully-scraped descriptions like "Activates when entering Full Burst. Affects all allies. Effect changes according to the activation time(s)." These need careful structural translation. Some skills have multi-stage state (Crown S2: Relax stacks → Attract → recovery → ATK buff) that the current DSL doesn't fully model. Open question: extend DSL with state machines, or accept that complex skills will be lossy?
 - **Magnitude verification per encoding** — Every encoded number must come from the DB description (or in-game UI), not memory. Liter / Crown were encoded directly from `skill1_description` etc.; future entries follow the same rule.
+- ~~**Per-LB stat percentages are unknown**~~ (resolved 2026-05-09) —
+  Reverse-engineered from BlablaLink's bundle and verified against in-game
+  displayed stats. LB applies *both* a multiplicative `grade_ratio` (basis
+  points, per-character) and a flat `grade_<stat>` per LB star, all inside
+  the core multiplier. Per-character data is now mirrored locally
+  (`<user_data_dir>/blablalink/<lang>/roledata/<rid>-v2-<lang>.json`).
+  See `simulator/base_stats.py` (`BaseStats.compute_full`) and the
+  "BlablaLink stat formula" section in CLAUDE.md.
 - **Two skill description sources now plumbed in** (added 2026-04-26):
    - `Character.skill_*_description` — canonical max-skill text from the Prydwen scrape; used for DSL encoding.
    - `OwnedCharacter.skill_*_description` + `skill_*_name` + `burst_cooldown_seconds` — user's level-specific text imported from the updated CSV. Use this for per-user UI display ("your Liter S2 currently restores 42% Cover HP at level 6") and for the eventual simulator's per-user level scaling.

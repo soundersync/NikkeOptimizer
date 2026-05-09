@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 _SKIP_SLUGS = frozenset(
     {f"char{i}.{kind}" for i in range(1, 6) for kind in ("portrait", "doll")}
 )
+# LB stars + Core badge — color-based star count + targeted badge OCR
+# handled by promo_tournament_lb_core.detect_lb_core.
+_LB_CORE_SLUG_RE = re.compile(r"^char\d\.lb_core$")
 # CP / damage / heal — store digits-only canonical form.
 _NUMBER_SLUG_RE = re.compile(
     r"^(team_cp|char\d\.cp|(left|right)\.char\d\.(atk|def|heal))$"
@@ -54,6 +57,7 @@ def classify_slug(slug: str) -> str:
     """Return one of:
 
     * ``"skip"`` — image-only, no OCR
+    * ``"lb_core"`` — color star count + targeted badge OCR
     * ``"number"`` — digits-only canonical form
     * ``"percent"`` — percentage canonical form
     * ``"char_name"`` — fuzzy-match against Character DB
@@ -62,6 +66,8 @@ def classify_slug(slug: str) -> str:
     """
     if slug in _SKIP_SLUGS:
         return "skip"
+    if _LB_CORE_SLUG_RE.match(slug):
+        return "lb_core"
     if _NUMBER_SLUG_RE.match(slug):
         return "number"
     if _PERCENT_SLUG_RE.match(slug):
@@ -348,6 +354,23 @@ def extract_region(image, region: Region, *, char_index: CharIndex) -> list[Fiel
         return []
     x1, y1, x2, y2 = region.bbox
     crop = image.crop((x1, y1, x2, y2))
+
+    # lb_core is color-driven (stars) + targeted OCR on a sub-crop (badge),
+    # so it doesn't run the full-region ocr_crop pass that other slugs use.
+    if classification == "lb_core":
+        from .promo_tournament_lb_core import detect_lb_core
+        result = detect_lb_core(crop, ocr_crop)
+        return [
+            FieldExtraction(
+                slug=region.slug,
+                text=result.text,
+                normalized=result.normalized,
+                character_id=None,
+                character_match_score=None,
+                confidence=result.confidence,
+            )
+        ]
+
     items = ocr_crop(crop)
     raw_text, conf = _flatten_text(items)
     text = raw_text or None
@@ -430,11 +453,20 @@ def extract_region(image, region: Region, *, char_index: CharIndex) -> list[Fiel
 
 
 def extract_screenshot(
-    image, kind: str, *, char_index: CharIndex
+    image, kind: str, *, char_index: CharIndex,
+    only_slugs: Optional[frozenset[str]] = None,
 ) -> list[FieldExtraction]:
-    """Extract every region for a screenshot of the given kind."""
+    """Extract every region for a screenshot of the given kind.
+
+    When ``only_slugs`` is provided, skip regions whose slug isn't in
+    the set. Used by the ``backfill-extractions`` CLI command to run
+    extraction only for region types added in a later Phase, without
+    re-OCR'ing fields that already exist.
+    """
     out: list[FieldExtraction] = []
     for region in regions_for_kind(kind):
+        if only_slugs is not None and region.slug not in only_slugs:
+            continue
         out.extend(extract_region(image, region, char_index=char_index))
     return out
 
@@ -492,6 +524,28 @@ def has_extractions(session: Session, screenshot_id: int) -> bool:
         ).first()
         is not None
     )
+
+
+def missing_slugs(
+    session: Session, screenshot_id: int, kind: str
+) -> frozenset[str]:
+    """Region slugs from the schema with no PromoExtractedField row yet.
+
+    Used by ``backfill-extractions`` to run extraction only for region
+    types added after the screenshot was originally ingested. Derived
+    slugs (e.g. ``round{N}_winner``) are not considered — they're
+    emitted alongside their parent slug, so missing the parent implies
+    missing the derived.
+    """
+    canonical = {r.slug for r in regions_for_kind(kind)}
+    existing = set(
+        session.exec(
+            select(PromoExtractedField.region_slug).where(
+                PromoExtractedField.screenshot_id == screenshot_id
+            )
+        ).all()
+    )
+    return frozenset(canonical - existing)
 
 
 def _resolve_side(

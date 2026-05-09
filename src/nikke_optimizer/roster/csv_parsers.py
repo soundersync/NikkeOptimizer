@@ -164,7 +164,12 @@ def parse_effect_summary(value: Optional[str]) -> list[tuple[Optional[OLBonusTyp
     return out
 
 
-_STATS_SPLITTER_RE = re.compile(r"\s*[/;]\s*")
+# Stats blocks come in three flavors across CSV exports:
+#   Legacy:   "HP 73772 / ATK 9021"
+#   2026-04:  "HP 73772; ATK 9021"
+#   2026-05+: "HP 73772, ATK 9021"
+# Treat all three separators as equivalent.
+_STATS_SPLITTER_RE = re.compile(r"\s*[/;,]\s*")
 
 
 def parse_stats_block(value: Optional[str]) -> dict[str, int]:

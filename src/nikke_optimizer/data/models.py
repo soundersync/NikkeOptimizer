@@ -117,7 +117,7 @@ class OwnedCharacter(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     character_id: int = Field(foreign_key="character.id", index=True)
     sync_level: Optional[int] = Field(default=None, description="Synchro Device level (1-700+)")
-    core: Optional[int] = Field(default=None, description="Core enhancement 0-10")
+    core: Optional[int] = Field(default=None, description="Core enhancement 0-7 (each level = +2% all stats; SSR-only, post-MLB only)")
     limit_break: Optional[int] = Field(default=None, description="0-3, MAX = 3")
     star_count: Optional[int] = Field(default=None, description="1-3 yellow stars")
     phase: Optional[int] = Field(default=None, description="MLB phase 1-15+")
@@ -160,6 +160,22 @@ class OwnedCharacter(SQLModel, table=True):
     # Treasure (Favorite Item, SSR rarity, phase 0-3) data per row.
     # ``treasure_rarity`` disambiguates: "SSR" → Treasure, "SR"/"R" → Doll.
     # ``is_treasure_unlocked`` (helper) checks rarity == "SSR" + phase >= 1.
+    # 2026-05-08+ CSV format adds explicit per-character rank flat
+    # buff stats. These come straight from the in-game Attribute popup
+    # and let us reproduce displayed totals via compute_full() exactly.
+    bond_rank: Optional[int] = Field(default=None, description="Bond Level (Affinity) rank")
+    bond_hp: Optional[int] = Field(default=None)
+    bond_def: Optional[int] = Field(default=None)
+    bond_atk: Optional[int] = Field(default=None)
+    class_rank_level: Optional[int] = Field(default=None, description="Account-wide class research level captured at import time")
+    class_rank_hp: Optional[int] = Field(default=None)
+    class_rank_def: Optional[int] = Field(default=None)
+    class_rank_atk: Optional[int] = Field(default=None)
+    mfr_rank_level: Optional[int] = Field(default=None, description="Account-wide manufacturer research level captured at import time")
+    mfr_rank_hp: Optional[int] = Field(default=None)
+    mfr_rank_def: Optional[int] = Field(default=None)
+    mfr_rank_atk: Optional[int] = Field(default=None)
+
     treasure_name: Optional[str] = Field(default=None, description="e.g. 'Antique Compass' (Treasure) or 'Shopping Commander Doll Ltd.' (Doll)")
     treasure_phase: Optional[int] = Field(default=None, description="0-3 for Treasure, 1-15 for Doll")
     treasure_atk: Optional[int] = Field(default=None)
@@ -540,3 +556,36 @@ class PromoExtractedField(SQLModel, table=True):
         ),
     )
     extracted_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Account-wide research state (singleton row, id=1)
+# ---------------------------------------------------------------------------
+
+
+class AccountState(SQLModel, table=True):
+    """The user's account-wide Outpost research levels.
+
+    Mirrors the "Outpost Info" panel in NIKKE. Persistent across runs;
+    set via ``nikkeoptimizer set-research``. Used by the optimizer to
+    compute account-buff additions for owned and predicted characters.
+
+    Per-level rates derived from observed in-game values (May 2026):
+
+      - General Research:    +450 HP per level
+      - Class research:      +750 HP per level + 5 DEF per level
+      - Manufacturer research: +25 ATK per level + 5 DEF per level
+    """
+
+    id: int = Field(default=1, primary_key=True)  # singleton
+    synchro_level: int = Field(default=1, description="Account LV cap")
+    general_research_level: int = Field(default=0)
+    class_attacker_level: int = Field(default=0)
+    class_defender_level: int = Field(default=0)
+    class_supporter_level: int = Field(default=0)
+    mfr_pilgrim_level: int = Field(default=0)
+    mfr_elysion_level: int = Field(default=0)
+    mfr_tetra_level: int = Field(default=0)
+    mfr_missilis_level: int = Field(default=0)
+    mfr_abnormal_level: int = Field(default=0)
+    updated_at: datetime = Field(default_factory=_utcnow)

@@ -67,10 +67,13 @@ NikkeOptimizer/
     cli/main.py                       # typer CLI; `nikkeoptimizer <cmd>`
     data/
       db.py                           # SQLite engine + path resolution
-      models.py                       # SQLModel schema (Character, OwnedCharacter, ArenaMatch, ...)
+      models.py                       # SQLModel schema (Character, OwnedCharacter, AccountState, ...)
       enums.py                        # Element / WeaponClass / BurstType / Manufacturer / Rarity
+      scrapers/
+        prydwen.py                    # Prydwen.gg character data scraper
+        blablalink.py                 # BlablaLink CDN per-character stat tables (Playwright)
     roster/
-      csv_importer.py                 # CSV → OwnedCharacter rows (+ smart name matcher)
+      csv_importer.py                 # CSV → OwnedCharacter rows (v1 + v2 format, dry-run diff)
       arena.py                        # arena screenshot extractors
       arena_importer.py               # arena import pipeline + CP cross-validation auto-confirm
       portrait_matcher.py             # Apple Vision feature-print matching
@@ -79,10 +82,12 @@ NikkeOptimizer/
     simulator/
       dsl.py                          # Effect / Trigger / Target / EffectKind / ScalingSource
       registry.py                     # auto-loaded character library
-      library/                        # 80 hand-encoded characters (one .py per)
+      library/                        # hand-encoded characters (one .py per)
       evaluator.py                    # static team evaluator (post-burst-chain snapshot)
       timeline.py                     # time-windowed evaluator with buff lifecycles
       damage.py                       # Team A vs Team B damage-formula resolution
+      base_stats.py                   # BlablaLink-driven stat formula (level/grade/core → ATK/HP/DEF/Power)
+      account_buffs.py                # Outpost research → buff dict helper
     optimizer/
       models.py                       # CharacterView, ScoreBreakdown, TeamCandidate
       scoring.py                      # heuristic scorer + ScoringWeights + rescore_with_evaluator
@@ -113,11 +118,12 @@ on macOS (via `platformdirs.user_data_dir`). Three things live there:
 
 | Path | What | Notes |
 |---|---|---|
-| `nikke_optimizer.sqlite3` | DB (Character, OwnedCharacter, Cube, ArenaMatch, ...) | 184 owned chars, 206 static, 17 cubes, 15+ captures |
+| `nikke_optimizer.sqlite3` | DB (Character, OwnedCharacter, AccountState, Cube, ArenaMatch, ...) | 183 owned chars, 206 static, 17 cubes, 15+ captures |
 | `portraits/` | 335 labeled `.webp` images | Used by Vision matcher; auto-discovered at startup |
 | `screenshots/` | User's gameplay screenshots organized by mode | Champion_Arena/ Special_Arena/ Rookie_Arena/ Cubes/ loose/ |
 | `uploads/` | Files uploaded via the web drop-zone | Auto-routed to the right importer |
 | `config.json` | Persistent user settings | Currently just `{"username": "Nika"}` |
+| `blablalink/` | Mirrored BlablaLink character JSONs | `nikke_list_<lang>_v2.json` + `<lang>/roledata/<rid>-v2-<lang>.json` (~189 files, ~25MB) |
 
 Resolution order for the user's in-game name (used by CP cross-validation
 auto-confirm to identify which team in a capture is the user's own):
@@ -154,12 +160,17 @@ For simulator-only work: `pip install pytest` and run with
 ```sh
 nikkeoptimizer web                          # web UI (auto-discovers portrait library)
 nikkeoptimizer roster                       # list owned characters in CLI
-nikkeoptimizer import-csv <path>            # import roster from CSV
+nikkeoptimizer diff-csv <path>              # dry-run: show diff vs DB before importing
+nikkeoptimizer import-csv <path>            # import roster from CSV (v1 + v2 format)
 nikkeoptimizer optimize rookie --top-k 5    # CLI optimizer
 nikkeoptimizer counter <capture_id>         # counter-pick a captured opponent
 nikkeoptimizer simulate <name1> ... <name5> # static evaluator on a team
 nikkeoptimizer skill <name>                 # inspect encoded skill DSL
 nikkeoptimizer skill-coverage               # DSL-encoded vs DB total
+nikkeoptimizer fetch-roledata <id|name>     # mirror BlablaLink character stat tables
+nikkeoptimizer fetch-roledata --all         # mirror every character (~30 min @ rate 9.5)
+nikkeoptimizer roledata-coverage            # cross-reference simulator library vs cache
+nikkeoptimizer set-research --general 300   # set Outpost research levels (singleton)
 ```
 
 The `web` command auto-launches the default browser; pass `--no-open`
@@ -192,6 +203,68 @@ kinds added in slice #55: `BUFF_TRUE_DAMAGE`, `BUFF_ATTACK_DAMAGE`,
 
 **80 characters encoded** as of 2026-04-28. Coverage is the meta + most
 collab carries; the long tail (~120 chars) is unencoded.
+
+---
+
+## BlablaLink stat formula (slice 2026-05-08)
+
+Reverse-engineered from BlablaLink's character page JS bundle and verified
+against in-game displayed numbers to the digit. Implementation lives in
+`simulator/base_stats.py` (`BaseStats.compute_full(...)`).
+
+**Formula** for each stat ∈ {ATK, HP, DEF}:
+```
+F = floor(level_<stat>[lv-1] * (1 + grade*grade_ratio*1e-4)
+          + grade*grade_<stat>)
+basic = round(
+    (F + floor(class_buff + manufacturer_buff + recycle_buff) + round(bond_buff))
+    * (1 + core*core_<stat>*1e-4)
+)
+total = basic + equip + cube + treasure
+```
+
+**Per-character data** (level table, grade/core multipliers, crit) is
+mirrored from the BlablaLink CDN via `nikkeoptimizer fetch-roledata`.
+The CDN URLs are content-hashed at runtime by their JS, so we use a
+headless Chromium (Playwright) to load their character page and capture
+JSON responses. Cache lands at `<user_data_dir>/blablalink/`.
+
+**Account-wide buff rates** (from `simulator/account_buffs.py`, derived
+from observed in-game values):
+
+  - General Research: +450 HP / level
+  - Class research:   +750 HP, +5 DEF / level
+  - Manufacturer research: +25 ATK, +5 DEF / level
+
+Set via `nikkeoptimizer set-research --general 300 --attacker 179 ...`.
+Singleton row in `AccountState` table.
+
+**Per-character buffs** (bond, class rank, manufacturer rank flat stats)
+land in `OwnedCharacter` from the v2 CSV format (2026-05-08+). Optimizer
+uses these directly when present; falls back to AccountState-derived
+buffs for unowned characters (counter-pick scoring).
+
+After v2 CSV import, `predicted_base_atk/hp/def` on `CharacterView`
+reproduce displayed in-game stats **to the digit** for owned characters
+(172/172 exact match in May 2026 validation).
+
+---
+
+## CSV format versions
+
+The importer handles both:
+- **v1** (pre-2026-05-08): basic columns, treasure data partial.
+- **v2** (2026-05-08+): adds `Limit Break` ("3/3" current/max format),
+  `Core Level` ("max" or 0-7), bond/class/mfr rank levels +
+  per-character flat stats, full gear stats per slot. Detected
+  automatically by presence of the `Limit Break` column.
+
+`csv_parsers.parse_stats_block` accepts `,`, `;`, or `/` as separators
+across the three CSV format generations.
+
+`nikkeoptimizer diff-csv <path>` runs a dry-run: shows per-character
+field diffs, classifies "stripped" vs "uninvested baseline", and
+flags Power drops worth investigating before any writes happen.
 
 ---
 

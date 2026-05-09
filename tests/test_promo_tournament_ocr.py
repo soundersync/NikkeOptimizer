@@ -32,6 +32,9 @@ from nikke_optimizer.roster.promo_tournament_ocr import (
         ("char1.portrait", "skip"),
         ("char3.doll", "skip"),
         ("char5.portrait", "skip"),
+        # LB stars + Core badge — color + targeted OCR.
+        ("char1.lb_core", "lb_core"),
+        ("char5.lb_core", "lb_core"),
         # Number fields (CP, atk, def, heal).
         ("team_cp", "number"),
         ("char1.cp", "number"),

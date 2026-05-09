@@ -305,6 +305,82 @@ def audit_vision_disagreements(
         )
 
 
+@app.command(name="migrate-lb-core-format")
+def migrate_lb_core_format(
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Rewrite legacy ``%.lb_core`` ``normalized`` values to canonical class keys.
+
+    Phase-2 emitted structured strings like ``"3,7"`` / ``"3,0"`` / ``"1"``.
+    The audit page expects ``normalized`` to double as the class key
+    (``"mlb_max"`` / ``"mlb_c0"`` / ``"lb1"``). This is a one-shot
+    migration — pure ORM updates, no image re-OCR. Idempotent: rows
+    already in the new format are detected and skipped.
+    """
+    from sqlmodel import Session, select
+
+    from ..data.db import init_db, make_engine
+    from ..data.models import PromoExtractedField
+    from ..roster.promo_tournament_lb_core_audit import (
+        AUDIT_KEYS,
+        OLD_TO_NEW_NORMALIZED,
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+    audit_keys = set(AUDIT_KEYS)
+    examined = 0
+    updated = 0
+    skipped_unknown = 0
+    with Session(engine) as session:
+        rows = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.region_slug.like("%.lb_core")
+            )
+        ).all()
+        for row in rows:
+            examined += 1
+            cur = row.normalized
+            if cur in audit_keys:
+                continue  # already migrated
+            new = OLD_TO_NEW_NORMALIZED.get(cur)
+            if new is None:
+                skipped_unknown += 1
+                continue
+            row.normalized = new
+            session.add(row)
+            updated += 1
+        session.commit()
+    console.print(
+        f"[bold green]Migration complete[/]: examined={examined} "
+        f"updated={updated} skipped_unknown={skipped_unknown}"
+    )
+
+
+@app.command(name="backfill-extractions")
+def backfill_extractions(
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
+) -> None:
+    """Run extraction for region slugs missing on already-ingested screenshots.
+
+    Idempotent. Use after adding new region types (e.g. Phase 2.x
+    slices like ``char{N}.lb_core``) to populate them on existing data
+    without paying the cost of a full ``ingest-tournaments --force-ocr``.
+    Non-destructive: never rewrites rows that already exist.
+    """
+    from ..data.db import init_db, make_engine
+    from ..roster.promo_tournament_ingest import run_backfill_pass
+
+    engine = make_engine(db)
+    init_db(engine)
+    stats = run_backfill_pass(engine)
+    console.print(f"[bold green]Backfill complete[/]: {stats}")
+    if stats.errors:
+        console.print("[red]Errors:[/]")
+        for err in stats.errors:
+            console.print(f"  · {err}")
+
+
 @app.command(name="rematch-tournament-characters")
 def rematch_tournament_characters(
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
@@ -665,6 +741,294 @@ def fetch_portraits(
     console.print(f"[bold green]Portraits fetched[/]: {counts}")
 
 
+@app.command("fetch-roledata")
+def fetch_roledata_cmd(
+    target: Optional[str] = typer.Argument(
+        None,
+        help="resource_id (e.g. 'c500') or name_code to fetch a single character. "
+             "Omit with --all to fetch every character in the id_map.",
+    ),
+    fetch_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Fetch every character listed in character_id_map.json.",
+    ),
+    lang: str = typer.Option("en", "--lang", help="Language code: en / ja / ko / zh-tw / etc."),
+    rate: float = typer.Option(
+        1.0,
+        "--rate",
+        help="Minimum seconds between page navigations (politeness throttle).",
+    ),
+    headed: bool = typer.Option(
+        False,
+        "--headed",
+        help="Show the Chromium window (default: headless). Useful for debugging.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass the on-disk cache and re-fetch.",
+    ),
+    out_dir: Optional[Path] = typer.Option(
+        None,
+        "--out-dir",
+        help="Override cache directory (default: <user_data_dir>/blablalink/).",
+    ),
+) -> None:
+    """Mirror BlablaLink character stat tables via a headless browser.
+
+    BlablaLink's CDN URLs are content-hashed at runtime by their JS,
+    so we run their page in headless Chromium and capture the JSON
+    responses as they fly past. Cache lands at
+    ``<user_data_dir>/blablalink/<lang>/roledata/``.
+
+    Requires Playwright:
+
+      pip install -e '.[scrape]' && playwright install chromium
+
+    Examples:
+
+      nikkeoptimizer fetch-roledata --all                     # full mirror
+      nikkeoptimizer fetch-roledata c500                      # one character by id
+      nikkeoptimizer fetch-roledata --all --lang ja --rate 2  # slower, in Japanese
+    """
+    from ..data.scrapers import blablalink
+
+    if not fetch_all and target is None:
+        console.print(
+            "[red]Specify a target (e.g. 'c500') or pass [bold]--all[/].[/]"
+        )
+        raise typer.Exit(code=2)
+    if fetch_all and target is not None:
+        console.print("[red]Pass either a target or [bold]--all[/], not both.[/]")
+        raise typer.Exit(code=2)
+
+    cache = out_dir or blablalink.default_cache_dir()
+    console.print(f"Cache: [dim]{cache}[/]")
+
+    if fetch_all:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TextColumn,
+            TimeRemainingColumn,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeRemainingColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task_id = progress.add_task("fetching", total=None)
+
+            def _on_progress(idx: int, total: int, rid: str) -> None:
+                progress.update(
+                    task_id, total=total, completed=idx, description=f"fetching {rid}"
+                )
+
+            stats = blablalink.fetch_all(
+                lang=lang,
+                rate_seconds=rate,
+                headless=not headed,
+                cache_dir=cache,
+                force=force,
+                progress=_on_progress,
+            )
+        console.print(
+            f"[bold green]Done[/] — fetched: {stats.fetched}, "
+            f"cached: {stats.cached}, errors: {stats.errors}"
+        )
+        if stats.error_ids:
+            console.print(f"[yellow]missing/errored ids:[/] {', '.join(stats.error_ids)}")
+        return
+
+    assert target is not None
+    data = blablalink.fetch_one(
+        target,
+        lang=lang,
+        rate_seconds=rate,
+        headless=not headed,
+        cache_dir=cache,
+        force=force,
+    )
+    if data is None:
+        console.print(f"[red]No roledata for {target!r} (lang={lang}).[/]")
+        raise typer.Exit(code=1)
+    name = data.get("name_localkey") or data.get("name_code") or target
+    console.print(f"[bold green]Saved[/] roledata for {name} ({target})")
+
+
+@app.command("roledata-coverage")
+def roledata_coverage_cmd(
+    lang: str = typer.Option("en", "--lang", help="Language code of the cache."),
+) -> None:
+    """Compare cached BlablaLink stat tables against our simulator library.
+
+    Shows three buckets:
+      ✓ encoded + cached      (full coverage — simulator can use real stats)
+      ⚠ encoded but NOT cached (need to run fetch-roledata for these)
+      ⓘ cached but NOT encoded (BlablaLink has them; we haven't written DSL yet)
+    """
+    import json as _json
+
+    from ..data.scrapers.blablalink import (
+        cache_path_for_nikke_list,
+        cache_path_for_roledata,
+    )
+    from ..simulator import registry
+
+    nl_path = cache_path_for_nikke_list(lang)
+    if not nl_path.is_file():
+        console.print(
+            f"[red]No nikke_list cached at[/] {nl_path}\n"
+            "Run [bold]nikkeoptimizer fetch-roledata <anything>[/] first to populate it."
+        )
+        raise typer.Exit(code=1)
+    nikke_list = _json.loads(nl_path.read_text())
+    name_to_rid: dict[str, int] = {}
+    for rec in nikke_list:
+        nm = (rec.get("name_localkey") or {}).get("name")
+        rid = rec.get("resource_id")
+        if isinstance(nm, str) and rid is not None:
+            name_to_rid[nm.lower()] = int(rid)
+
+    encoded = registry.all_encoded_names()
+    encoded_lower = {n.lower(): n for n in encoded}
+
+    encoded_and_cached: list[tuple[str, int]] = []
+    encoded_no_cache: list[tuple[str, int]] = []
+    for lc, original in encoded_lower.items():
+        rid = name_to_rid.get(lc)
+        if rid is None:
+            continue  # encoded but not in BlablaLink (mismatched name or unmapped)
+        cached = cache_path_for_roledata(str(rid), lang).is_file()
+        (encoded_and_cached if cached else encoded_no_cache).append((original, rid))
+
+    encoded_no_match = [n for lc, n in encoded_lower.items() if lc not in name_to_rid]
+    cached_not_encoded = []
+    for lc, rid in name_to_rid.items():
+        if lc in encoded_lower:
+            continue
+        if cache_path_for_roledata(str(rid), lang).is_file():
+            cached_not_encoded.append((lc, rid))
+
+    total_cached_files = sum(
+        1 for rid in name_to_rid.values()
+        if cache_path_for_roledata(str(rid), lang).is_file()
+    )
+
+    console.print(f"[bold]BlablaLink coverage[/] (lang={lang})")
+    console.print(f"  nikke_list size:     {len(nikke_list)}")
+    console.print(f"  roledata cached:     {total_cached_files}")
+    console.print(f"  simulator encoded:   {len(encoded)}")
+    console.print()
+    console.print(
+        f"  [green]✓ encoded + cached:[/]      {len(encoded_and_cached)}"
+    )
+    console.print(
+        f"  [yellow]⚠ encoded, no cache:[/]    {len(encoded_no_cache)}"
+    )
+    console.print(
+        f"  [dim]ⓘ cached, not encoded:[/]   {len(cached_not_encoded)}"
+    )
+    console.print(
+        f"  [dim]· encoded, no name match:[/] {len(encoded_no_match)}"
+    )
+    if encoded_no_cache:
+        console.print(
+            "\n[yellow]Encoded but missing from cache:[/] "
+            + ", ".join(f"{n}({r})" for n, r in encoded_no_cache[:20])
+            + (f", … (+{len(encoded_no_cache)-20} more)" if len(encoded_no_cache) > 20 else "")
+        )
+    if encoded_no_match:
+        console.print(
+            "\n[dim]Encoded but no BlablaLink name match (likely a Treasure or "
+            "non-canonical name):[/] " + ", ".join(encoded_no_match[:15])
+            + (f", … (+{len(encoded_no_match)-15} more)" if len(encoded_no_match) > 15 else "")
+        )
+
+
+@app.command("set-research")
+def set_research_cmd(
+    synchro: Optional[int] = typer.Option(None, "--synchro", help="Synchro Level (account LV cap)"),
+    general: Optional[int] = typer.Option(None, "--general", help="Recycle Room → General Research level"),
+    attacker: Optional[int] = typer.Option(None, "--attacker", help="Attacker class research level"),
+    defender: Optional[int] = typer.Option(None, "--defender", help="Defender class research level"),
+    supporter: Optional[int] = typer.Option(None, "--supporter", help="Supporter class research level"),
+    pilgrim: Optional[int] = typer.Option(None, "--pilgrim", help="Pilgrim manufacturer research level"),
+    elysion: Optional[int] = typer.Option(None, "--elysion", help="Elysion manufacturer research level"),
+    tetra: Optional[int] = typer.Option(None, "--tetra", help="Tetra manufacturer research level"),
+    missilis: Optional[int] = typer.Option(None, "--missilis", help="Missilis manufacturer research level"),
+    abnormal: Optional[int] = typer.Option(None, "--abnormal", help="Abnormal manufacturer research level"),
+    show: bool = typer.Option(False, "--show", help="Just show current values without changes"),
+    db: Optional[Path] = typer.Option(None, help="Override DB path"),
+) -> None:
+    """Set or view your account-wide Outpost research levels.
+
+    These come from the in-game [Outpost Info] panel. Used by the
+    optimizer to compute account-buff additions for stat predictions
+    via the BlablaLink formula.
+
+    Per-level rates (May 2026 observation):
+      - General Research:    +450 HP / level
+      - Class research:      +750 HP, +5 DEF / level
+      - Manufacturer research: +25 ATK, +5 DEF / level
+
+    Examples:
+
+      nikkeoptimizer set-research --show
+      nikkeoptimizer set-research --general 300 --attacker 179 --defender 172
+      nikkeoptimizer set-research --synchro 654 --pilgrim 167 --elysion 169
+    """
+    from ..data.models import AccountState
+    from ..simulator import account_buffs
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        state = account_buffs.get_or_default_state(session)
+        if not show:
+            for field, value in (
+                ("synchro_level", synchro),
+                ("general_research_level", general),
+                ("class_attacker_level", attacker),
+                ("class_defender_level", defender),
+                ("class_supporter_level", supporter),
+                ("mfr_pilgrim_level", pilgrim),
+                ("mfr_elysion_level", elysion),
+                ("mfr_tetra_level", tetra),
+                ("mfr_missilis_level", missilis),
+                ("mfr_abnormal_level", abnormal),
+            ):
+                if value is not None:
+                    setattr(state, field, value)
+            from datetime import datetime, timezone
+            state.updated_at = datetime.now(timezone.utc)
+            session.add(state)
+            session.commit()
+            session.refresh(state)
+
+        table = Table(title="Outpost Research Levels", show_header=True)
+        table.add_column("Field", style="dim")
+        table.add_column("Level", justify="right")
+        table.add_row("Synchro Level", str(state.synchro_level))
+        table.add_row("General Research", str(state.general_research_level))
+        table.add_row("Attacker", str(state.class_attacker_level))
+        table.add_row("Defender", str(state.class_defender_level))
+        table.add_row("Supporter", str(state.class_supporter_level))
+        table.add_row("Pilgrim", str(state.mfr_pilgrim_level))
+        table.add_row("Elysion", str(state.mfr_elysion_level))
+        table.add_row("Tetra", str(state.mfr_tetra_level))
+        table.add_row("Missilis", str(state.mfr_missilis_level))
+        table.add_row("Abnormal", str(state.mfr_abnormal_level))
+        console.print(table)
+
+
 @app.command("set-username")
 def set_username_cmd(
     name: str = typer.Argument(..., help="Your in-game NIKKE username"),
@@ -958,6 +1322,117 @@ def characters(
     console.print(table)
     if len(rows) > limit:
         console.print(f"... showing first {limit} of {len(rows)}")
+
+
+@app.command("diff-csv")
+def diff_csv_cmd(
+    csv_path: Path = typer.Argument(..., help="Path to the CSV to diff against the DB"),
+    db: Optional[Path] = typer.Option(None, help="Override DB path"),
+    show_unchanged: bool = typer.Option(
+        False, "--show-unchanged", help="Also list characters with no field changes"
+    ),
+    power_drop_threshold: int = typer.Option(
+        50_000,
+        "--power-drop-threshold",
+        help="Flag characters whose Power dropped by ≥ this amount (likely ungeared)",
+    ),
+) -> None:
+    """Show the diff between a CSV file and the current DB without writing.
+
+    Useful before re-importing — surfaces:
+      - Characters whose stats changed (especially significant Power drops
+        that may indicate gear loss or unequipped Nikkes)
+      - Characters present in the CSV but missing from the DB (new pulls)
+      - Characters present in the DB but missing from the CSV
+      - The detected CSV format version (v1 vs v2)
+    """
+    from ..roster.csv_importer import dry_run_diff
+
+    report = dry_run_diff(csv_path, db_path=db)
+
+    console.print(f"[bold]CSV format detected:[/] {report.format_version}")
+    console.print(f"  rows in CSV:   {report.rows}")
+    console.print(f"  matched:       {report.matched}")
+    console.print(f"  unmatched:     {len(report.unmatched)}")
+    console.print(f"  in DB only:    {len(report.db_only)}")
+    if report.unmatched:
+        console.print(f"\n[yellow]Unmatched names (no DB Character row):[/]")
+        for n in report.unmatched[:30]:
+            console.print(f"  - {n}")
+    if report.db_only:
+        console.print(f"\n[dim]In DB but not CSV (will be untouched on import):[/]")
+        for n in report.db_only[:30]:
+            console.print(f"  - {n}")
+    if report.fuzzy_warnings:
+        console.print(f"\n[dim]Fuzzy/alias name matches:[/]")
+        for w in report.fuzzy_warnings[:15]:
+            console.print(f"  {w}")
+
+    drops = report.with_significant_power_drop(threshold=power_drop_threshold)
+    stripped = [d for d in drops if d.looks_stripped]
+    uninvested = [d for d in drops if d.looks_uninvested and not d.looks_stripped]
+    other_drops = [d for d in drops if not d.looks_stripped and not d.looks_uninvested]
+
+    if stripped:
+        stripped.sort(key=lambda d: d.power_delta or 0)
+        t = Table(
+            title="⚠ STRIPPED — was MLB+invested, now low Power (verify gear loss!)",
+            show_header=True,
+            header_style="red",
+        )
+        t.add_column("Character"); t.add_column("Power Δ", justify="right")
+        t.add_column("From → To", justify="right")
+        for d in stripped:
+            curp = d.changes.get("power", (None, None))[0] or 0
+            newp = d.changes.get("power", (None, None))[1] or 0
+            t.add_row(d.name, f"{d.power_delta:+,}", f"{curp:,} → {newp:,}")
+        console.print(); console.print(t)
+
+    if other_drops:
+        other_drops.sort(key=lambda d: d.power_delta or 0)
+        t = Table(title=f"⚠ Power drops worth a second look", show_header=True)
+        t.add_column("Character"); t.add_column("Power Δ", justify="right")
+        t.add_column("From → To", justify="right"); t.add_column("New LB")
+        for d in other_drops:
+            curp = d.changes.get("power", (None, None))[0] or 0
+            newp = d.changes.get("power", (None, None))[1] or 0
+            new_lb = d.changes.get("limit_break", (None, None))[1]
+            t.add_row(d.name, f"{d.power_delta:+,}", f"{curp:,} → {newp:,}", str(new_lb))
+        console.print(); console.print(t)
+
+    if uninvested:
+        console.print(
+            f"\n[dim]ℹ {len(uninvested)} characters dropped to baseline Power "
+            f"(uninvested in your roster — old DB had stale values, this is just a "
+            f"correction):[/]"
+        )
+        names = [d.name for d in uninvested[:8]]
+        console.print(f"  {', '.join(names)}" + (
+            f", … (+{len(uninvested) - 8} more)" if len(uninvested) > 8 else ""
+        ))
+
+    new_chars = [d for d in report.diffs if d.is_new]
+    if new_chars:
+        console.print(f"\n[bold green]New characters in CSV:[/] {len(new_chars)}")
+        for d in new_chars[:30]:
+            console.print(f"  + {d.name}")
+
+    changed = [d for d in report.diffs if d.changes and not d.is_new]
+    if changed or show_unchanged:
+        console.print(f"\n[bold]Per-character field changes:[/] {len(changed)}")
+        for d in (report.diffs if show_unchanged else changed):
+            if not d.changes and not show_unchanged:
+                continue
+            line = f"  {d.name}"
+            if d.changes:
+                items = ", ".join(
+                    f"{k}: {v[0]!r}→{v[1]!r}"
+                    for k, v in list(d.changes.items())[:5]
+                )
+                if len(d.changes) > 5:
+                    items += f", … (+{len(d.changes) - 5} more)"
+                line += f"  [{items}]"
+            console.print(line)
 
 
 @app.command("import-csv")

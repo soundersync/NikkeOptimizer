@@ -56,8 +56,8 @@ def test_slugs_unique_within_kind(kind: str):
 
 
 def test_player_loadout_count():
-    # 2 header (name + team CP) + 5 chars × 3 fields = 17
-    assert len(PLAYER_LOADOUT) == 17
+    # 2 header (name + team CP) + 5 chars × 4 fields = 22
+    assert len(PLAYER_LOADOUT) == 22
 
 
 def test_overview_count():

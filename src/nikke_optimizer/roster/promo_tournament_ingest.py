@@ -299,6 +299,97 @@ def _run_ocr_pass(engine, *, stats: IngestStats, force: bool) -> None:
             progress.advance(task)
 
 
+def run_backfill_pass(engine) -> IngestStats:
+    """Extract only the region slugs missing from already-ingested screenshots.
+
+    Walks every ``PromoMatchScreenshot``, computes the set of canonical
+    region slugs not yet present in ``PromoExtractedField``, and runs
+    extraction filtered to that set only. Cheap when the schema delta
+    is small (e.g. a Phase 2.x addition like ``char{N}.lb_core``) —
+    skips screenshots that already have full coverage and skips
+    PaddleOCR entirely when no slugs are missing for a screenshot.
+    """
+    from PIL import Image
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeRemainingColumn,
+    )
+
+    from ..data.models import PromoMatchScreenshot
+    from .promo_tournament_ocr import (
+        CharIndex,
+        extract_screenshot,
+        missing_slugs,
+        persist_extractions,
+    )
+
+    stats = IngestStats()
+    with Session(engine) as session:
+        all_shots = session.exec(select(PromoMatchScreenshot)).all()
+
+    # Pre-compute the missing-slug set per screenshot so the progress
+    # bar reflects only screenshots with real work + so we never open
+    # an image we won't actually extract from.
+    pending: list[tuple[int, frozenset[str]]] = []
+    cached: int = 0
+    with Session(engine) as session:
+        for shot in all_shots:
+            missing = missing_slugs(session, shot.id, shot.kind)
+            if missing:
+                pending.append((shot.id, missing))
+            else:
+                cached += 1
+    stats.ocr_skipped = cached
+    if not pending:
+        return stats
+
+    with Session(engine) as session:
+        char_index = CharIndex.from_session(session)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        TimeRemainingColumn(),
+        transient=False,
+    ) as progress:
+        task = progress.add_task("Backfilling extractions", total=len(pending))
+        for shot_id, only in pending:
+            with Session(engine) as session:
+                shot = session.get(PromoMatchScreenshot, shot_id)
+                if shot is None:
+                    progress.advance(task)
+                    continue
+                try:
+                    image = Image.open(shot.file_path).convert("RGB")
+                except OSError as exc:
+                    stats.errors.append(
+                        f"Backfill open failed for screenshot {shot_id}: {exc}"
+                    )
+                    progress.advance(task)
+                    continue
+                try:
+                    extractions = extract_screenshot(
+                        image, shot.kind, char_index=char_index, only_slugs=only
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    stats.errors.append(
+                        f"Backfill extract failed for screenshot {shot_id}: {exc}"
+                    )
+                    progress.advance(task)
+                    continue
+                stats.ocr_fields += persist_extractions(
+                    session, shot_id, extractions
+                )
+                stats.ocr_screenshots += 1
+            progress.advance(task)
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------

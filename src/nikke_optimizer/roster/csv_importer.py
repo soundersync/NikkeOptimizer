@@ -77,9 +77,59 @@ KNOWN_COLUMNS = {
     "Doll/Treasure Stats", "Doll/Treasure Skill Levels",
     "Battle Cube", "Battle Cube Stats", "Arena Cube", "Arena Cube Stats",
     "Costumes",
+    # 2026-05-08+ CSV format (v2): adds Limit Break separately from
+    # Core Level, plus explicit per-character rank-buff stats from
+    # the Attribute popup (Bond / Class / Manufacturer Rank).
+    "Limit Break",
+    "Class Rank Level", "Manufacturer Rank Level",
+    "Bond Rank", "Bond HP", "Bond DEF", "Bond ATK",
+    "Class Rank HP", "Class Rank DEF", "Class Rank ATK",
+    "Mfr Rank HP", "Mfr Rank DEF", "Mfr Rank ATK",
     # Skill descriptions are now in the canonical CSV; recognized so the
     # importer doesn't warn about them.
 }
+
+
+def _is_v2_format(fieldnames: list[str]) -> bool:
+    """v2 CSV (2026-05-08+) ships explicit Limit Break + bond/class/mfr
+    rank stats. Detected by presence of the ``Limit Break`` column.
+    """
+    return "Limit Break" in fieldnames
+
+
+def _parse_core_level(raw: Optional[str]) -> Optional[int]:
+    """Parse the ``Core Level`` column from a v2 CSV.
+
+    Values: ``"max"`` → 7, ``"0"`` → 0, ``"1"`` ... ``"7"``, ``""``→None.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if not s:
+        return None
+    if s == "max":
+        return 7
+    try:
+        v = int(s)
+    except ValueError:
+        return None
+    return max(0, min(7, v))
+
+
+def _parse_limit_break(raw: Optional[str]) -> Optional[int]:
+    """Parse the ``Limit Break`` column. Format is ``"<current>/<max>"``
+    (e.g. ``"3/3"``, ``"0/3"``, ``"2/3"``). Returns the current grade.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    head = s.split("/", 1)[0].strip()
+    try:
+        return max(0, int(head))
+    except ValueError:
+        return None
 
 # Kept for backward compatibility with existing test code that imports it.
 EXPECTED_COLUMNS = sorted(KNOWN_COLUMNS)
@@ -94,6 +144,7 @@ class ImportReport:
     fuzzy_matched: int = 0
     unmatched: int = 0
     cubes_upserted: int = 0
+    format_version: str = "v1"  # "v1" or "v2" — set during header inspection
     warnings: list[str] = field(default_factory=list)
 
     def warn(self, msg: str) -> None:
@@ -107,8 +158,65 @@ class ImportReport:
             "fuzzy_matched": self.fuzzy_matched,
             "unmatched": self.unmatched,
             "cubes_upserted": self.cubes_upserted,
+            "format_version": self.format_version,
             "warnings": self.warnings,
         }
+
+
+# Fields tracked by the dry-run differ. Keep keys in sync with what
+# ``_build_owned_kwargs`` puts on the ``OwnedCharacter`` row — anything
+# absent from this list won't show up in the diff.
+DIFFED_FIELDS = (
+    "sync_level", "core", "limit_break", "manufacturer_level",
+    "skill1_level", "skill2_level", "burst_skill_level",
+    "power", "total_hp", "total_atk", "total_def",
+    "treasure_name", "treasure_phase", "treasure_atk", "treasure_def", "treasure_hp",
+    "bond_rank", "bond_hp", "bond_def", "bond_atk",
+    "class_rank_level", "class_rank_hp", "class_rank_def", "class_rank_atk",
+    "mfr_rank_level", "mfr_rank_hp", "mfr_rank_def", "mfr_rank_atk",
+)
+
+
+@dataclass
+class CharacterDiff:
+    """One row's worth of (current → proposed) field changes."""
+
+    name: str
+    matched: bool
+    is_new: bool = False  # not in DB
+    changes: dict[str, tuple[object, object]] = field(default_factory=dict)
+    # Significant power deltas — flagged for the user's attention even
+    # when small in absolute terms (might indicate ungeared characters).
+    power_delta: Optional[int] = None
+    # When the new state has Limit Break 0 and very low Power, the
+    # character is just baseline-uninvested — old DB Power was likely
+    # stale/inflated rather than the user actually losing gear.
+    looks_uninvested: bool = False
+    # When the new state has high LB but low Power, that's a real
+    # "lost gear" signal — the user MLB'd them but they're now stripped.
+    looks_stripped: bool = False
+
+
+@dataclass
+class DryRunReport:
+    rows: int = 0
+    format_version: str = "v1"
+    matched: int = 0
+    unmatched: list[str] = field(default_factory=list)
+    fuzzy_warnings: list[str] = field(default_factory=list)
+    diffs: list[CharacterDiff] = field(default_factory=list)
+    db_only: list[str] = field(default_factory=list)  # in DB but not CSV
+    warnings: list[str] = field(default_factory=list)
+
+    def changed(self) -> list[CharacterDiff]:
+        return [d for d in self.diffs if d.changes or d.is_new]
+
+    def with_significant_power_drop(self, threshold: int = 50_000) -> list[CharacterDiff]:
+        """Return diffs where Power dropped by at least ``threshold``."""
+        return [
+            d for d in self.diffs
+            if d.power_delta is not None and d.power_delta <= -threshold
+        ]
 
 
 def _find_character(
@@ -288,6 +396,195 @@ def _normalize_row(row: dict) -> dict:
     return out
 
 
+def _build_owned_kwargs(row: dict, *, char_id: int, v2: bool) -> dict:
+    """Translate one CSV row into kwargs for OwnedCharacter(...).
+
+    v1 vs v2 selection:
+      - v2 (Limit Break column present): parse Core Level as ``max``/0-7,
+        parse Limit Break as ``current/max``, capture bond/class/mfr rank stats.
+      - v1: parse Core Level numerically (legacy behavior, may carry the
+        bug where the column actually held class-rank-level values).
+    """
+    treasure_name_raw = (
+        (row.get("Doll/Treasure Name") or row.get("Treasure Name") or "").strip() or None
+    )
+    treasure_phase_raw = row.get("Doll/Treasure Phase") or row.get("Treasure Phase")
+    treasure_stats_raw = row.get("Doll/Treasure Stats") or row.get("Treasure Stats")
+    treasure_rarity_raw = (row.get("Doll/Treasure Rarity") or "").strip() or None
+    treasure_skill_raw = row.get("Doll/Treasure Skill Levels") or ""
+    treasure_stats = parse_stats_block(treasure_stats_raw)
+    # v2 CSV writes skill levels as "current/max" (e.g. "4/4"); v1
+    # used bare integers. Accept both — strip any "/max" suffix and
+    # parse the leading number.
+    treasure_skill_levels: list[int] = []
+    for tok in treasure_skill_raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        head = tok.split("/", 1)[0].strip()
+        try:
+            treasure_skill_levels.append(int(head))
+        except ValueError:
+            pass
+
+    burst_desc_raw = row.get("Burst Description")
+    burst_cd = parse_cooldown(row.get("Burst Cooldown"))
+    if burst_cd is None:
+        burst_cd = parse_burst_cooldown_from_description(burst_desc_raw)
+
+    if v2:
+        core_value = _parse_core_level(row.get("Core Level"))
+        limit_break_value = _parse_limit_break(row.get("Limit Break"))
+        # v2 dropped "Manufacturer Level" in favor of the more explicit
+        # "Manufacturer Rank Level". Populate the legacy column from
+        # the new one to keep historical readers working.
+        manufacturer_level_value = parse_int(
+            row.get("Manufacturer Level") or row.get("Manufacturer Rank Level")
+        )
+    else:
+        core_value = parse_int(row.get("Core Level"))
+        limit_break_value = None
+        manufacturer_level_value = parse_int(row.get("Manufacturer Level"))
+
+    return dict(
+        character_id=char_id,
+        sync_level=parse_int(row.get("Synchro Level")),
+        rank=parse_int(row.get("Rank")),
+        squad=(row.get("Squad") or "").strip() or None,
+        core=core_value,
+        limit_break=limit_break_value,
+        manufacturer_level=manufacturer_level_value,
+        skill1_level=parse_int(row.get("Skill 1 Level")),
+        skill2_level=parse_int(row.get("Skill 2 Level")),
+        burst_skill_level=parse_int(row.get("Burst Level")),
+        burst_cooldown_seconds=burst_cd,
+        skill1_name=(row.get("Skill 1 Name") or "").strip() or None,
+        skill2_name=(row.get("Skill 2 Name") or "").strip() or None,
+        burst_name=(row.get("Burst Name") or "").strip() or None,
+        skill1_description=(row.get("Skill 1 Description") or "").strip() or None,
+        skill2_description=(row.get("Skill 2 Description") or "").strip() or None,
+        burst_description=strip_burst_cooldown_prefix(burst_desc_raw) or None,
+        power=parse_int(row.get("Power")),
+        total_hp=parse_int(row.get("HP")),
+        total_atk=parse_int(row.get("ATK")),
+        total_def=parse_int(row.get("DEF")),
+        treasure_name=treasure_name_raw,
+        treasure_phase=parse_phase(treasure_phase_raw),
+        treasure_atk=treasure_stats.get("atk"),
+        treasure_def=treasure_stats.get("def"),
+        treasure_hp=treasure_stats.get("hp"),
+        treasure_rarity=treasure_rarity_raw,
+        treasure_skill_levels=treasure_skill_levels,
+        # v2 per-character rank flat stats (from the Attribute popup).
+        # All None for v1 CSVs.
+        bond_rank=parse_int(row.get("Bond Rank")) if v2 else None,
+        bond_hp=parse_int(row.get("Bond HP")) if v2 else None,
+        bond_def=parse_int(row.get("Bond DEF")) if v2 else None,
+        bond_atk=parse_int(row.get("Bond ATK")) if v2 else None,
+        class_rank_level=parse_int(row.get("Class Rank Level")) if v2 else None,
+        class_rank_hp=parse_int(row.get("Class Rank HP")) if v2 else None,
+        class_rank_def=parse_int(row.get("Class Rank DEF")) if v2 else None,
+        class_rank_atk=parse_int(row.get("Class Rank ATK")) if v2 else None,
+        mfr_rank_level=parse_int(row.get("Manufacturer Rank Level")) if v2 else None,
+        mfr_rank_hp=parse_int(row.get("Mfr Rank HP")) if v2 else None,
+        mfr_rank_def=parse_int(row.get("Mfr Rank DEF")) if v2 else None,
+        mfr_rank_atk=parse_int(row.get("Mfr Rank ATK")) if v2 else None,
+    )
+
+
+def dry_run_diff(
+    csv_path: Path,
+    *,
+    db_path: Optional[Path] = None,
+) -> DryRunReport:
+    """Read the CSV and compare to the current DB without writing.
+
+    Returns a :class:`DryRunReport` with per-character before→after
+    diffs, characters that don't match a Character row, characters
+    present in the DB but absent from the CSV, and a list of
+    significant power drops the user may want to verify (e.g.
+    accidental gear loss, unequipped Nikkes).
+    """
+    engine = make_engine(db_path)
+    init_db(engine)
+    report = DryRunReport()
+
+    with get_session(engine) as session:
+        all_chars = session.exec(select(Character)).all()
+        all_names = [c.name for c in all_chars]
+        # Existing OwnedCharacter rows by character_id, for diffing.
+        existing_owned: dict[int, OwnedCharacter] = {
+            o.character_id: o for o in session.exec(select(OwnedCharacter)).all()
+        }
+        seen_char_ids: set[int] = set()
+
+        with csv_path.open(newline="", encoding="utf-8") as fh:
+            reader = csv.DictReader(fh)
+            fields = list(reader.fieldnames or [])
+            v2 = _is_v2_format(fields)
+            report.format_version = "v2" if v2 else "v1"
+            unknown = [f for f in fields if f not in KNOWN_COLUMNS and f not in COLUMN_ALIASES]
+            if unknown:
+                report.warnings.append(f"unknown columns ignored: {unknown}")
+
+            class _SilentReport:
+                fuzzy_matched = 0
+                def warn(self, msg: str) -> None:
+                    report.fuzzy_warnings.append(msg)
+            silent = _SilentReport()
+
+            for raw_row in reader:
+                row = _normalize_row(raw_row)
+                report.rows += 1
+                name = (row.get("Name") or "").strip()
+                if not name:
+                    report.warnings.append(f"row {report.rows}: empty Name")
+                    continue
+                char = _find_character(session, name, all_names=all_names, report=silent)
+                if char is None:
+                    report.unmatched.append(name)
+                    continue
+                report.matched += 1
+                seen_char_ids.add(char.id)
+
+                proposed = _build_owned_kwargs(row, char_id=char.id, v2=v2)
+                current = existing_owned.get(char.id)
+                diff = CharacterDiff(name=char.name, matched=True, is_new=current is None)
+                new_lb = proposed.get("limit_break") or 0
+                new_pow = proposed.get("power") or 0
+                # Heuristic: low Power + uninvested LB ≡ baseline character,
+                # not a real "lost gear" signal. Threshold tuned to ~LV1
+                # base Power for SSRs (typically 4-7k).
+                if new_lb == 0 and new_pow < 10_000:
+                    diff.looks_uninvested = True
+                if current is None:
+                    diff.power_delta = new_pow  # full credit as positive
+                else:
+                    cp = current.power or 0
+                    diff.power_delta = new_pow - cp
+                    for key in DIFFED_FIELDS:
+                        cur_v = getattr(current, key, None)
+                        new_v = proposed.get(key)
+                        if cur_v != new_v:
+                            diff.changes[key] = (cur_v, new_v)
+                    # "Stripped" = was MLB-tier invested, now low Power.
+                    # Real signal — the user upgraded them but lost their
+                    # gear, or the CSV scraper failed for this character.
+                    if cp >= 50_000 and new_pow < 10_000 and new_lb >= 3:
+                        diff.looks_stripped = True
+                report.diffs.append(diff)
+
+        # Characters in DB but absent from CSV
+        for cid, owned in existing_owned.items():
+            if cid in seen_char_ids:
+                continue
+            char = next((c for c in all_chars if c.id == cid), None)
+            if char is not None:
+                report.db_only.append(char.name)
+
+    return report
+
+
 def import_csv(
     csv_path: Path,
     *,
@@ -317,6 +614,8 @@ def import_csv(
             ]
             if unknown:
                 report.warn(f"CSV has unknown columns (ignored): {unknown}")
+            v2 = _is_v2_format(fields)
+            report.format_version = "v2" if v2 else "v1"
 
             for raw_row in reader:
                 row = _normalize_row(raw_row)
@@ -373,46 +672,12 @@ def import_csv(
                         treasure_skill_levels.append(int(tok))
                     except ValueError:
                         report.warn(f"unparseable Doll/Treasure skill level: {tok!r}")
-                # Burst cooldown can come either from a dedicated column
-                # (legacy CSV format) or as a "20.0 s" prefix on the
-                # Burst Description (current CSV format).
-                burst_desc_raw = row.get("Burst Description")
-                burst_cd = parse_cooldown(row.get("Burst Cooldown"))
-                if burst_cd is None:
-                    burst_cd = parse_burst_cooldown_from_description(burst_desc_raw)
-                owned = OwnedCharacter(
-                    character_id=char.id,
-                    sync_level=parse_int(row.get("Synchro Level")),
-                    rank=parse_int(row.get("Rank")),
-                    squad=(row.get("Squad") or "").strip() or None,
-                    core=parse_int(row.get("Core Level")),
-                    manufacturer_level=parse_int(row.get("Manufacturer Level")),
-                    skill1_level=parse_int(row.get("Skill 1 Level")),
-                    skill2_level=parse_int(row.get("Skill 2 Level")),
-                    burst_skill_level=parse_int(row.get("Burst Level")),
-                    burst_cooldown_seconds=burst_cd,
-                    skill1_name=(row.get("Skill 1 Name") or "").strip() or None,
-                    skill2_name=(row.get("Skill 2 Name") or "").strip() or None,
-                    burst_name=(row.get("Burst Name") or "").strip() or None,
-                    skill1_description=(row.get("Skill 1 Description") or "").strip() or None,
-                    skill2_description=(row.get("Skill 2 Description") or "").strip() or None,
-                    burst_description=strip_burst_cooldown_prefix(burst_desc_raw) or None,
-                    power=parse_int(row.get("Power")),
-                    total_hp=parse_int(row.get("HP")),
-                    total_atk=parse_int(row.get("ATK")),
-                    total_def=parse_int(row.get("DEF")),
-                    treasure_name=treasure_name_raw,
-                    treasure_phase=parse_phase(treasure_phase_raw),
-                    treasure_atk=treasure_stats.get("atk"),
-                    treasure_def=treasure_stats.get("def"),
-                    treasure_hp=treasure_stats.get("hp"),
-                    treasure_rarity=treasure_rarity_raw,
-                    treasure_skill_levels=treasure_skill_levels,
-                    battle_cube_id=battle_cube.id if battle_cube else None,
-                    arena_cube_id=arena_cube.id if arena_cube else None,
-                    costumes=parse_costumes(row.get("Costumes")),
-                    raw_ocr={"csv_row": row},
-                )
+                kwargs = _build_owned_kwargs(row, char_id=char.id, v2=v2)
+                kwargs["battle_cube_id"] = battle_cube.id if battle_cube else None
+                kwargs["arena_cube_id"] = arena_cube.id if arena_cube else None
+                kwargs["costumes"] = parse_costumes(row.get("Costumes"))
+                kwargs["raw_ocr"] = {"csv_row": row}
+                owned = OwnedCharacter(**kwargs)
                 owned.ol_gear = [_build_gear(row, i, report=report) for i in range(1, 5)]
                 owned.buff_summary = _build_buff_summary(row.get("Equipment Effects Summary"))
                 session.add(owned)

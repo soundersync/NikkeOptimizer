@@ -1,0 +1,451 @@
+{% extends "_base.html" %}
+{% block title %}Limit Break &amp; Max Core Audit — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.audit-grid-page { max-width: 1280px; margin: 0 auto; }
+.audit-grid-page .crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.audit-grid-page .crumb a { color: #9ca3af; text-decoration: none; }
+.audit-grid-page .header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    margin: 0 0 14px;
+}
+.audit-grid-page h1 { margin: 0; }
+.audit-grid-page .class-select {
+    margin-left: auto;
+    background: #14161b;
+    color: #e5e7eb;
+    border: 1px solid #1f2228;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.reference-stage {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 8px;
+    margin: 16px 0 24px;
+}
+.reference-frame {
+    /* LB/Core crops are 85×30 — wide letterbox, not square. */
+    width: 170px;
+    height: 60px;
+    background: #0a0b0e;
+    border: 1px solid #1f2228;
+    border-radius: 4px;
+    background-repeat: no-repeat;
+    background-size: contain;
+    background-position: center;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+.reference-frame.placeholder {
+    display: flex; align-items: center; justify-content: center;
+    color: #4b5158;
+    font-size: 28px;
+}
+.reference-label {
+    font-size: 13px;
+    color: #d1d5db;
+    text-align: center;
+}
+.reference-label .meta {
+    color: #6b7280; font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+    margin-top: 2px;
+}
+
+.icon-grid {
+    display: grid;
+    /* Each tile is 102×36 = source 85×30 scaled 1.2× — keeps crops legible. */
+    grid-template-columns: repeat(auto-fill, 102px);
+    gap: 6px;
+    margin-bottom: 18px;
+}
+.grid-icon {
+    width: 102px;
+    height: 36px;
+    background-color: #0a0b0e;
+    background-repeat: no-repeat;
+    border: 2px solid #1f2228;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+    transition: border-color 0.08s ease, transform 0.06s ease;
+}
+.grid-icon:hover {
+    border-color: #f87171;
+    transform: scale(1.06);
+}
+.grid-icon.manually-corrected {
+    box-shadow: 0 0 0 1px #fde68a, 0 0 0 2px rgba(253, 230, 138, 0.20);
+    border-color: #2a2f38;
+}
+.grid-icon.selected {
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+.grid-icon.selected.manually-corrected {
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35),
+                0 0 0 3px #fde68a,
+                0 0 0 4px rgba(253, 230, 138, 0.20);
+}
+
+.bulk-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: flex; align-items: center; gap: 12px;
+    background: #14161b;
+    border: 1px solid #1e3a5f;
+    border-radius: 6px;
+    padding: 8px 14px;
+    margin-bottom: 12px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.bulk-toolbar[hidden] { display: none; }
+.bulk-toolbar .count {
+    color: #93c5fd;
+    font-weight: 600;
+    font-size: 13px;
+}
+.bulk-toolbar button {
+    background: #0f1116;
+    border: 1px solid #1f2228;
+    color: #e5e7eb;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+.bulk-toolbar button.primary {
+    background: #1b1f29;
+    color: #93c5fd;
+    border-color: #1e3a5f;
+}
+.bulk-toolbar button:hover { border-color: #3a4250; }
+.bulk-toolbar button.primary:hover { border-color: #60a5fa; }
+
+.confirm-all-form { margin-left: 8px; }
+.confirm-all-button {
+    background: #14271b;
+    color: #6fdf80;
+    border: 1px solid #1f3d2a;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+.confirm-all-button:hover { border-color: #6fdf80; }
+.confirm-all-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.reclassify-form { margin-left: 8px; }
+.reclassify-button {
+    background: #1b1f29;
+    color: #93c5fd;
+    border: 1px solid #1e3a5f;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+}
+.reclassify-button:hover { border-color: #60a5fa; }
+
+.grid-empty {
+    color: #6b7280; font-style: italic;
+    border: 1px dashed #1f2228;
+    border-radius: 6px;
+    padding: 30px;
+    text-align: center;
+}
+
+/* Reassign popover — wider than the doll one to fit 12 letterbox options
+   in 4 columns. */
+.reassign-popover {
+    position: absolute;
+    z-index: 100;
+    background: #14161b;
+    border: 1px solid #3a4250;
+    border-radius: 8px;
+    padding: 10px 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    min-width: 460px;
+}
+.reassign-popover[hidden] { display: none; }
+.reassign-popover .label {
+    color: #9ca3af; font-size: 11px;
+    margin-bottom: 8px;
+}
+.reassign-popover .options {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+}
+.reassign-popover .opt-form { display: contents; }
+.reassign-popover .opt-button {
+    display: flex; flex-direction: column; align-items: center;
+    gap: 4px;
+    background: #0f1116;
+    border: 1px solid #1f2228;
+    border-radius: 5px;
+    padding: 6px 4px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.08s ease, background 0.08s ease;
+}
+.reassign-popover .opt-button:hover {
+    border-color: #f87171;
+    background: #14181f;
+}
+.reassign-popover .opt-button.current {
+    border-color: #f87171;
+    background: #1a1217;
+}
+.reassign-popover .opt-button img {
+    width: 96px; height: 34px;
+    object-fit: contain;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+.reassign-popover .opt-button .opt-placeholder {
+    width: 96px; height: 34px;
+    background: #1f2228;
+    border-radius: 4px;
+    color: #4b5158;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+}
+.reassign-popover .opt-button .opt-label {
+    font-size: 10px; color: #d1d5db; text-align: center;
+    line-height: 1.1; min-height: 22px;
+}
+</style>
+
+<div class="audit-grid-page">
+
+<div class="crumb"><a href="/audit">Audit</a> /</div>
+
+<div class="header">
+    <h1>Limit Break &amp; Max Core Audit</h1>
+    <select class="class-select" onchange="location.href = `/audit/lb-core/${this.value}`">
+        {% for opt in class_options %}
+        <option value="{{ opt.key }}" {% if opt.is_current %}selected{% endif %}>
+            {{ opt.label }} ({{ opt.count }})
+        </option>
+        {% endfor %}
+    </select>
+    {% if n_auto and n_auto > 0 %}
+    <form method="post"
+          action="/audit/lb-core/{{ class_key }}/reclassify-auto"
+          class="reclassify-form">
+        <button type="submit" class="reclassify-button"
+                title="Re-run the LB/Core detector on every auto-labeled row in this class. Manually-corrected rows are unaffected.">
+            Re-classify {{ n_auto }} auto row{{ "s" if n_auto != 1 else "" }}
+        </button>
+    </form>
+    {% endif %}
+    {% if entries %}
+    <form method="post"
+          action="/audit/lb-core/{{ class_key }}/confirm-all"
+          class="confirm-all-form"
+          id="confirm-all-form"
+          data-count="{{ entries|length }}"
+          data-label="{{ class_label }}">
+        <button type="submit" class="confirm-all-button" id="confirm-all-button">
+            Confirm all {{ entries|length }} as correct
+        </button>
+    </form>
+    {% endif %}
+</div>
+
+<div class="reference-stage">
+    {% if reference_url %}
+    <div class="reference-frame" style="background-image: url('{{ reference_url }}');"></div>
+    {% else %}
+    <div class="reference-frame placeholder">?</div>
+    {% endif %}
+    <div class="reference-label">
+        Reference: <strong style="color: #e5e7eb;">{{ class_label }}</strong>
+        <div class="meta">
+            {{ entries|length }} crops currently classified as this
+            {% if n_corrected %}· {{ n_corrected }} manually corrected{% endif %}
+        </div>
+    </div>
+</div>
+
+{% if entries %}
+<div class="bulk-toolbar" id="bulk-toolbar" hidden>
+    <span class="count"><span id="bulk-count">0</span> selected</span>
+    <button type="button" class="primary" id="bulk-reassign">Reassign…</button>
+    <button type="button" id="bulk-clear">Clear</button>
+    <span style="margin-left: auto; font-size: 11px; color: #6b7280;">Shift-click to add or remove · Esc clears</span>
+</div>
+
+<div class="icon-grid" id="icon-grid">
+    {% for e in entries %}
+    {% set field = e.field %}
+    {% set bbox = e.bbox %}
+    {% if bbox and e.image_url %}
+        {% set bx1, by1, bx2, by2 = bbox %}
+        {% set bw = bx2 - bx1 %}
+        {% set bh = by2 - by1 %}
+        {% set bg_size_x = ref_w / bw * 100 %}
+        {% set bg_size_y = ref_h / bh * 100 %}
+        {% set bg_pos_x = bx1 / (ref_w - bw) * 100 %}
+        {% set bg_pos_y = by1 / (ref_h - bh) * 100 %}
+    {% endif %}
+    <button type="button"
+            class="grid-icon{% if field.manually_corrected %} manually-corrected{% endif %}"
+            data-field-id="{{ field.id }}"
+            title="{{ e.tooltip }}"
+            {% if bbox and e.image_url %}
+            style="background-image: url('{{ e.image_url }}');
+                   background-size: {{ '%.4f'|format(bg_size_x) }}% {{ '%.4f'|format(bg_size_y) }}%;
+                   background-position: {{ '%.4f'|format(bg_pos_x) }}% {{ '%.4f'|format(bg_pos_y) }}%;"
+            {% endif %}></button>
+    {% endfor %}
+</div>
+{% else %}
+<div class="grid-empty">No crops currently classified as <strong>{{ class_label }}</strong>.</div>
+{% endif %}
+
+<div class="reassign-popover" id="reassign-popover" hidden>
+    <div class="label">Reassign to:</div>
+    <form method="post" id="reassign-form">
+        <input type="hidden" name="normalized" id="reassign-normalized">
+        <input type="hidden" name="return_class" value="{{ class_key }}">
+        <div class="options">
+            {% for c in reassign_choices %}
+            <button type="submit"
+                    class="opt-button{% if c.is_current %} current{% endif %}"
+                    onclick="document.getElementById('reassign-normalized').value='{{ c.key }}'">
+                {% if c.exemplar_url %}
+                <img src="{{ c.exemplar_url }}" alt="{{ c.label }}">
+                {% else %}
+                <div class="opt-placeholder">?</div>
+                {% endif %}
+                <span class="opt-label">{{ c.label }}</span>
+            </button>
+            {% endfor %}
+        </div>
+    </form>
+</div>
+
+</div>
+
+<script>
+(function () {
+    const grid = document.getElementById("icon-grid");
+    const popover = document.getElementById("reassign-popover");
+    const form = document.getElementById("reassign-form");
+    const toolbar = document.getElementById("bulk-toolbar");
+    const countEl = document.getElementById("bulk-count");
+    const reassignBtn = document.getElementById("bulk-reassign");
+    const clearBtn = document.getElementById("bulk-clear");
+    const confirmForm = document.getElementById("confirm-all-form");
+    if (!grid || !popover) return;
+
+    const selectedIds = new Set();
+
+    function refreshToolbar() {
+        if (!toolbar) return;
+        if (selectedIds.size === 0) {
+            toolbar.hidden = true;
+        } else {
+            toolbar.hidden = false;
+            countEl.textContent = String(selectedIds.size);
+        }
+    }
+    function clearSelection() {
+        selectedIds.forEach((id) => {
+            const btn = grid.querySelector(`.grid-icon[data-field-id="${id}"]`);
+            if (btn) btn.classList.remove("selected");
+        });
+        selectedIds.clear();
+        refreshToolbar();
+    }
+    function closePopover() { popover.hidden = true; }
+    function openPopover(referenceRect) {
+        const pw = 480;
+        let left = referenceRect.left + window.scrollX;
+        const maxLeft = window.scrollX + document.documentElement.clientWidth - pw - 8;
+        if (left > maxLeft) left = maxLeft;
+        popover.style.left = left + "px";
+        popover.style.top  = (referenceRect.bottom + window.scrollY + 6) + "px";
+        popover.hidden = false;
+    }
+
+    grid.addEventListener("click", function (e) {
+        const btn = e.target.closest(".grid-icon");
+        if (!btn) return;
+        e.stopPropagation();
+        const fieldId = btn.dataset.fieldId;
+        if (e.shiftKey) {
+            if (selectedIds.has(fieldId)) {
+                selectedIds.delete(fieldId);
+                btn.classList.remove("selected");
+            } else {
+                selectedIds.add(fieldId);
+                btn.classList.add("selected");
+            }
+            refreshToolbar();
+            return;
+        }
+        const csv = form.querySelector('input[name="field_ids"]');
+        if (csv) csv.remove();
+        form.action = `/audit/lb-core/${fieldId}/correct`;
+        openPopover(btn.getBoundingClientRect());
+    });
+
+    if (reassignBtn) {
+        reassignBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            if (selectedIds.size === 0) return;
+            form.action = "/audit/lb-core/bulk-correct";
+            let csv = form.querySelector('input[name="field_ids"]');
+            if (!csv) {
+                csv = document.createElement("input");
+                csv.type = "hidden";
+                csv.name = "field_ids";
+                form.appendChild(csv);
+            }
+            csv.value = Array.from(selectedIds).join(",");
+            openPopover(reassignBtn.getBoundingClientRect());
+        });
+    }
+    if (clearBtn) {
+        clearBtn.addEventListener("click", function (e) {
+            e.stopPropagation();
+            clearSelection();
+            closePopover();
+        });
+    }
+
+    document.addEventListener("click", function (e) {
+        if (!e.target.closest("#reassign-popover")) closePopover();
+    });
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+            closePopover();
+            clearSelection();
+        }
+    });
+
+    if (confirmForm) {
+        confirmForm.addEventListener("submit", function (e) {
+            const count = confirmForm.dataset.count || "?";
+            const label = confirmForm.dataset.label || "this class";
+            if (!confirm(`Mark all ${count} ${label} crops as confirmed?`)) {
+                e.preventDefault();
+            }
+        });
+    }
+})();
+</script>
+
+{% endblock %}

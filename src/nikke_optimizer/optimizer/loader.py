@@ -9,10 +9,177 @@ from typing import Iterable, Optional
 
 from sqlmodel import Session, select
 
-from ..data.models import Character, Cube, OwnedCharacter
+from ..data.models import AccountState, Character, Cube, OwnedCharacter
 from .models import CharacterView
 
 log = logging.getLogger(__name__)
+
+# Default investment assumption for unowned characters when predicting
+# their stats (counter-pick scoring). Top-tier opponents are typically
+# fully invested, so we model them as LV600 / MLB (grade 3) / Core 7
+# with max skill levels.
+_UNOWNED_DEFAULT_LEVEL = 600
+_UNOWNED_DEFAULT_GRADE = 3
+_UNOWNED_DEFAULT_CORE = 7
+_UNOWNED_DEFAULT_SKILL_LEVEL = 10
+
+# In-process cache for the character class lookup (BlablaLink ``class`` field).
+_class_cache: dict[str, Optional[str]] = {}
+
+
+def _lookup_char_class(name: str) -> Optional[str]:
+    """Get a character's BlablaLink ``class`` (e.g. "Attacker") from the
+    cached roledata JSON. Returns ``None`` if the character isn't mirrored.
+    """
+    if name in _class_cache:
+        return _class_cache[name]
+    from ..simulator.base_stats import BaseStats
+
+    try:
+        bs = BaseStats.from_name(name)
+        _class_cache[name] = bs.char_class or None
+    except (FileNotFoundError, KeyError):
+        _class_cache[name] = None
+    return _class_cache[name]
+
+
+def _per_character_buffs(owned: OwnedCharacter) -> dict[str, dict[str, int]]:
+    """Build the bond/class/mfr buff dicts from per-character CSV data."""
+    return {
+        "bond_buff": {
+            "atk": owned.bond_atk or 0,
+            "hp": owned.bond_hp or 0,
+            "def": owned.bond_def or 0,
+        },
+        "class_buff": {
+            "atk": owned.class_rank_atk or 0,
+            "hp": owned.class_rank_hp or 0,
+            "def": owned.class_rank_def or 0,
+        },
+        "manufacturer_buff": {
+            "atk": owned.mfr_rank_atk or 0,
+            "hp": owned.mfr_rank_hp or 0,
+            "def": owned.mfr_rank_def or 0,
+        },
+    }
+
+
+def _equipment_totals(owned: OwnedCharacter) -> dict[str, int]:
+    """Sum the 4 OLGear slots' base stats."""
+    out = {"atk": 0, "hp": 0, "def": 0}
+    for g in (owned.ol_gear or []):
+        out["atk"] += g.base_atk or 0
+        out["hp"] += g.base_hp or 0
+        out["def"] += g.base_def or 0
+    return out
+
+
+def _treasure_stats(owned: OwnedCharacter) -> dict[str, int]:
+    return {
+        "atk": owned.treasure_atk or 0,
+        "hp": owned.treasure_hp or 0,
+        "def": owned.treasure_def or 0,
+    }
+
+
+def _cube_stats(cube) -> dict[str, int]:
+    if cube is None:
+        return {"atk": 0, "hp": 0, "def": 0}
+    return {
+        "atk": cube.atk or 0,
+        "hp": cube.hp or 0,
+        "def": cube.def_ or 0,
+    }
+
+
+def _predict_base_stats(
+    name: str,
+    *,
+    level: int,
+    grade: int,
+    core: int,
+    skill1_level: int,
+    skill2_level: int,
+    burst_skill_level: int,
+    account_state: Optional[AccountState] = None,
+    char_class: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    owned: Optional[OwnedCharacter] = None,
+    battle_cube=None,
+) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    """Return (predicted_atk, hp, def, power) from BlablaLink stat tables.
+
+    Three modes, picked by argument richness:
+
+    1. **Owned + per-char rank stats** (``owned`` provided and
+       ``owned.bond_rank`` populated): use compute_full() with
+       per-character bond/class/mfr buffs from the v2 CSV import,
+       account-wide general research from ``account_state``, and
+       equipment + cube + treasure totals — this should reproduce
+       the displayed in-game ATK/HP/DEF exactly.
+
+    2. **AccountState only** (``account_state`` + ``char_class``):
+       fall back to deriving class/mfr buffs from the user's research
+       levels via ``account_buffs.*``. Used for unowned characters.
+
+    3. **Base only**: no account state, no buffs — just level/grade/core
+       scaling on the BlablaLink table.
+
+    All four return values are ``None`` if the character isn't
+    mirrored locally (collabs / Treasures with name mismatches).
+    """
+    from ..simulator.base_stats import BaseStats
+    from ..simulator import account_buffs
+
+    try:
+        bs = BaseStats.from_name(name)
+    except (FileNotFoundError, KeyError):
+        return None, None, None, None
+    try:
+        if owned is not None and owned.bond_rank is not None:
+            # Mode 1: full per-character data from v2 CSV
+            buffs = _per_character_buffs(owned)
+            recycle = (
+                account_buffs.general_research_buff(account_state)
+                if account_state is not None
+                else {"atk": 0, "hp": 0, "def": 0}
+            )
+            stats = bs.compute_full(
+                level=level,
+                grade=grade,
+                core=core,
+                equip=_equipment_totals(owned),
+                cube=_cube_stats(battle_cube),
+                treasure=_treasure_stats(owned),
+                bond_buff=buffs["bond_buff"],
+                class_buff=buffs["class_buff"],
+                manufacturer_buff=buffs["manufacturer_buff"],
+                recycle_buff=recycle,
+            )
+        elif account_state is not None and char_class is not None:
+            # Mode 2: AccountState-derived buffs (unowned characters)
+            stats = bs.compute_full(
+                level=level,
+                grade=grade,
+                core=core,
+                class_buff=account_buffs.class_buff(account_state, char_class),
+                manufacturer_buff=account_buffs.manufacturer_buff(account_state, manufacturer),
+                recycle_buff=account_buffs.general_research_buff(account_state),
+            )
+        else:
+            # Mode 3: base only
+            stats = bs.compute(level=level, grade=grade, core=core)
+    except ValueError:
+        return None, None, None, None
+    power = bs.compute_power(
+        level=level,
+        grade=grade,
+        core=core,
+        skill1_level=skill1_level,
+        skill2_level=skill2_level,
+        ulti_level=burst_skill_level,
+    )
+    return stats["atk"], stats["hp"], stats["def"], power
 
 
 def load_owned(session: Session) -> list[CharacterView]:
@@ -23,6 +190,7 @@ def load_owned(session: Session) -> list[CharacterView]:
         )
     ).all()
     cubes_by_id = {c.id: c for c in session.exec(select(Cube)).all()}
+    account_state = session.get(AccountState, 1)  # may be None — predict will skip class/mfr buffs
     out: list[CharacterView] = []
     for owned, char in rows:
         arena_cube = cubes_by_id.get(owned.arena_cube_id) if owned.arena_cube_id else None
@@ -33,6 +201,29 @@ def load_owned(session: Session) -> list[CharacterView]:
         treasure_unlocked = (
             (owned.treasure_rarity or "").upper() == "SSR"
             and (owned.treasure_phase or 0) >= 1
+        )
+        # Predict base stats from BlablaLink tables using the user's
+        # actual investment state. After the v2 CSV import,
+        # ``core`` is the proper 0-7 Core Enhancement and
+        # ``limit_break`` is reliably populated.
+        sync_lv = owned.sync_level or _UNOWNED_DEFAULT_LEVEL
+        core_lv = owned.core or 0
+        grade_lv = owned.limit_break if owned.limit_break is not None else (
+            3 if core_lv >= 1 else 0
+        )
+        p_atk, p_hp, p_def, p_pow = _predict_base_stats(
+            char.name,
+            level=sync_lv,
+            grade=grade_lv,
+            core=core_lv,
+            skill1_level=owned.skill1_level or 1,
+            skill2_level=owned.skill2_level or 1,
+            burst_skill_level=owned.burst_skill_level or 1,
+            account_state=account_state,
+            char_class=_lookup_char_class(char.name),
+            manufacturer=char.manufacturer.value if char.manufacturer else None,
+            owned=owned,
+            battle_cube=battle_cube,
         )
         out.append(
             CharacterView(
@@ -52,6 +243,10 @@ def load_owned(session: Session) -> list[CharacterView]:
                 arena_cube_name=arena_cube.name if arena_cube else None,
                 battle_cube_name=battle_cube.name if battle_cube else None,
                 is_treasure_unlocked=treasure_unlocked,
+                predicted_base_atk=p_atk,
+                predicted_base_hp=p_hp,
+                predicted_base_def=p_def,
+                predicted_power=p_pow,
             )
         )
     log.info("loaded %d owned character views", len(out))
@@ -64,11 +259,28 @@ def load_all(session: Session) -> list[CharacterView]:
     the user doesn't own."""
     chars = session.exec(select(Character)).all()
     owned_by_name = {v.name: v for v in load_owned(session)}
+    account_state = session.get(AccountState, 1)
     out: list[CharacterView] = []
     for char in chars:
         if char.name in owned_by_name:
             out.append(owned_by_name[char.name])
             continue
+        # For unowned characters, predict at default high investment so
+        # counter-pick scoring has something to compare against. ``power``
+        # stays 0 (the user doesn't actually own them); ``predicted_power``
+        # carries the predicted value.
+        p_atk, p_hp, p_def, p_pow = _predict_base_stats(
+            char.name,
+            level=_UNOWNED_DEFAULT_LEVEL,
+            grade=_UNOWNED_DEFAULT_GRADE,
+            core=_UNOWNED_DEFAULT_CORE,
+            skill1_level=_UNOWNED_DEFAULT_SKILL_LEVEL,
+            skill2_level=_UNOWNED_DEFAULT_SKILL_LEVEL,
+            burst_skill_level=_UNOWNED_DEFAULT_SKILL_LEVEL,
+            account_state=account_state,
+            char_class=_lookup_char_class(char.name),
+            manufacturer=char.manufacturer.value if char.manufacturer else None,
+        )
         out.append(
             CharacterView(
                 name=char.name,
@@ -79,6 +291,10 @@ def load_all(session: Session) -> list[CharacterView]:
                 manufacturer=char.manufacturer,
                 role_tags=tuple(char.role_tags or ()),
                 owned=False,
+                predicted_base_atk=p_atk,
+                predicted_base_hp=p_hp,
+                predicted_base_def=p_def,
+                predicted_power=p_pow,
             )
         )
     return out

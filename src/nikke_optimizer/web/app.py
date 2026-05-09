@@ -2198,13 +2198,18 @@ def create_app(
                 if f.character_id and slug.endswith(".portrait"):
                     char_ids.add(f.character_id)
         char_names: dict[int, str] = {}
+        char_rarities: dict[int, str] = {}
         if char_ids:
             crows = session.exec(
-                select(Character.id, Character.name).where(
+                select(Character.id, Character.name, Character.rarity).where(
                     Character.id.in_(char_ids)
                 )
             ).all()
-            char_names = {int(cid): str(name) for cid, name in crows}
+            char_names = {int(cid): str(name) for cid, name, _ in crows}
+            char_rarities = {
+                int(cid): (rarity.value if hasattr(rarity, "value") else str(rarity))
+                for cid, _, rarity in crows
+            }
 
         portrait_bbox_by_slug = {
             r.slug: r.bbox for r in PLAYER_LOADOUT
@@ -2863,6 +2868,11 @@ def create_app(
         DISPLAY_LABELS as _DOLL_DISPLAY_LABELS,
         EXEMPLAR_FILES as _DOLL_EXEMPLAR_FILES,
     )
+    from ..roster.promo_tournament_lb_core_audit import (
+        AUDIT_KEYS as _LB_CORE_AUDIT_KEYS,
+        DISPLAY_LABELS as _LB_CORE_DISPLAY_LABELS,
+        EXEMPLAR_FILES as _LB_CORE_EXEMPLAR_FILES,
+    )
 
     # Stable display order across the audit page button row.
     # ``none`` (absence of any doll/treasure) sits before ``unknown``
@@ -2893,12 +2903,25 @@ def create_app(
                     PromoExtractedField.manually_corrected == True,  # noqa: E712
                 )
             ).all())
+            lb_core_total = len(session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.lb_core")
+                )
+            ).all())
+            lb_core_corrected = len(session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.lb_core"),
+                    PromoExtractedField.manually_corrected == True,  # noqa: E712
+                )
+            ).all())
         return templates.TemplateResponse(
             request,
             "audit_index.html",
             {
                 "doll_total": doll_total,
                 "doll_corrected": doll_corrected,
+                "lb_core_total": lb_core_total,
+                "lb_core_corrected": lb_core_corrected,
             },
         )
 
@@ -2985,13 +3008,18 @@ def create_app(
                 if slug.endswith(".portrait") and f.character_id:
                     char_ids.add(f.character_id)
         char_names: dict[int, str] = {}
+        char_rarities: dict[int, str] = {}
         if char_ids:
             crows = session.exec(
-                select(Character.id, Character.name).where(
+                select(Character.id, Character.name, Character.rarity).where(
                     Character.id.in_(char_ids)
                 )
             ).all()
-            char_names = {int(cid): str(name) for cid, name in crows}
+            char_names = {int(cid): str(name) for cid, name, _ in crows}
+            char_rarities = {
+                int(cid): (rarity.value if hasattr(rarity, "value") else str(rarity))
+                for cid, _, rarity in crows
+            }
 
         match_ids = list({s.match_id for s in shots})
         matches = session.exec(
@@ -3013,12 +3041,20 @@ def create_app(
                 if portrait_field and portrait_field.character_id
                 else None
             )
+            character_rarity = (
+                char_rarities.get(portrait_field.character_id)
+                if portrait_field and portrait_field.character_id
+                else None
+            )
             match = match_by_id.get(shot.match_id)
             tooltip_parts = []
             if player_field and player_field.text:
                 tooltip_parts.append(player_field.text)
             if character_name:
-                tooltip_parts.append(character_name)
+                if character_rarity:
+                    tooltip_parts.append(f"{character_name} ({character_rarity})")
+                else:
+                    tooltip_parts.append(character_name)
             elif portrait_field and portrait_field.text:
                 tooltip_parts.append(portrait_field.text)
             if match:
@@ -3240,6 +3276,332 @@ def create_app(
         )
         return RedirectResponse(
             f"/audit/dolls/{target}", status_code=303
+        )
+
+    # ------------------------------------------------------------------
+    # Limit-Break / Max-Core audit
+    # ------------------------------------------------------------------
+
+    _LB_CORE_DEFAULT_CLASS = "lb0"
+
+    def _audit_lb_core_class_counts(session) -> dict[str, int]:
+        from sqlalchemy import func as sa_func
+
+        rows = session.exec(
+            select(
+                PromoExtractedField.normalized,
+                sa_func.count(PromoExtractedField.id),
+            )
+            .where(PromoExtractedField.region_slug.like("%.lb_core"))
+            .group_by(PromoExtractedField.normalized)
+        ).all()
+        out: dict[str, int] = {}
+        for normalized, count in rows:
+            key = normalized if normalized in _LB_CORE_AUDIT_KEYS else "unknown"
+            out[key] = out.get(key, 0) + int(count)
+        for k in _LB_CORE_AUDIT_KEYS:
+            out.setdefault(k, 0)
+        return out
+
+    def _audit_lb_core_class_rows(session, class_key: str):
+        """Return rows for ``class_key`` enriched with per-row context.
+        Mirrors :func:`_audit_doll_class_rows` — same sort, same tooltip
+        shape, swapped slug filter and bbox map.
+        """
+        from ..roster.promo_tournament_regions import PLAYER_LOADOUT
+
+        lb_core_bbox_by_slug = {
+            r.slug: r.bbox for r in PLAYER_LOADOUT if r.slug.endswith(".lb_core")
+        }
+
+        rows = session.exec(
+            select(PromoExtractedField)
+            .where(
+                PromoExtractedField.region_slug.like("%.lb_core"),
+                PromoExtractedField.normalized == class_key,
+            )
+            .order_by(
+                PromoExtractedField.manually_corrected.asc(),
+                PromoExtractedField.confidence.asc().nulls_first(),
+                PromoExtractedField.id.asc(),
+            )
+        ).all()
+        if not rows:
+            return []
+
+        shot_ids = list({r.screenshot_id for r in rows})
+        shots = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.id.in_(shot_ids)
+            )
+        ).all()
+        shot_by_id = {s.id: s for s in shots}
+
+        slugs_needed = {"player_name"}
+        for r in rows:
+            slot = r.region_slug.split(".")[0]
+            slugs_needed.add(f"{slot}.portrait")
+        ctx_fields = session.exec(
+            select(PromoExtractedField).where(
+                PromoExtractedField.screenshot_id.in_(shot_ids),
+                PromoExtractedField.region_slug.in_(list(slugs_needed)),
+            )
+        ).all()
+        ctx_by_shot: dict[int, dict[str, PromoExtractedField]] = {}
+        for f in ctx_fields:
+            ctx_by_shot.setdefault(f.screenshot_id, {})[f.region_slug] = f
+
+        char_ids: set[int] = set()
+        for slug_map in ctx_by_shot.values():
+            for slug, f in slug_map.items():
+                if slug.endswith(".portrait") and f.character_id:
+                    char_ids.add(f.character_id)
+        char_names: dict[int, str] = {}
+        char_rarities: dict[int, str] = {}
+        if char_ids:
+            crows = session.exec(
+                select(Character.id, Character.name, Character.rarity).where(
+                    Character.id.in_(char_ids)
+                )
+            ).all()
+            char_names = {int(cid): str(name) for cid, name, _ in crows}
+            char_rarities = {
+                int(cid): (rarity.value if hasattr(rarity, "value") else str(rarity))
+                for cid, _, rarity in crows
+            }
+
+        match_ids = list({s.match_id for s in shots})
+        matches = session.exec(
+            select(PromoMatch).where(PromoMatch.id.in_(match_ids))
+        ).all()
+        match_by_id = {m.id: m for m in matches}
+
+        out = []
+        for f in rows:
+            shot = shot_by_id.get(f.screenshot_id)
+            if shot is None:
+                continue
+            slot = f.region_slug.split(".")[0]
+            ctx = ctx_by_shot.get(shot.id, {})
+            player_field = ctx.get("player_name")
+            portrait_field = ctx.get(f"{slot}.portrait")
+            character_name = (
+                char_names.get(portrait_field.character_id)
+                if portrait_field and portrait_field.character_id
+                else None
+            )
+            character_rarity = (
+                char_rarities.get(portrait_field.character_id)
+                if portrait_field and portrait_field.character_id
+                else None
+            )
+            match = match_by_id.get(shot.match_id)
+            tooltip_parts = []
+            if player_field and player_field.text:
+                tooltip_parts.append(player_field.text)
+            if character_name:
+                if character_rarity:
+                    tooltip_parts.append(f"{character_name} ({character_rarity})")
+                else:
+                    tooltip_parts.append(character_name)
+            elif portrait_field and portrait_field.text:
+                tooltip_parts.append(portrait_field.text)
+            if match:
+                ml = match.round_label.replace("_", " ")
+                tooltip_parts.append(
+                    f"{ml}{(' #' + str(match.match_no)) if match.match_no else ''}"
+                )
+            tooltip_parts.append(f"{shot.side or '-'} round {shot.round_no or '-'}")
+            tooltip_parts.append(f"slot {slot[4:]}")
+            if f.confidence is not None:
+                tooltip_parts.append(f"conf {f.confidence:.2f}")
+            if f.manually_corrected:
+                tooltip_parts.append("manually corrected")
+            out.append({
+                "field": f,
+                "image_url": _promo_image_url(shot.file_path),
+                "bbox": lb_core_bbox_by_slug.get(f.region_slug),
+                "tooltip": " · ".join(tooltip_parts),
+            })
+        return out
+
+    @app.get("/audit/lb-core", response_class=HTMLResponse)
+    def audit_lb_core_root() -> Response:
+        return RedirectResponse(
+            f"/audit/lb-core/{_LB_CORE_DEFAULT_CLASS}", status_code=302
+        )
+
+    @app.get("/audit/lb-core/{class_key}", response_class=HTMLResponse)
+    def audit_lb_core(request: Request, class_key: str) -> Response:
+        if class_key not in _LB_CORE_AUDIT_KEYS:
+            return RedirectResponse(
+                f"/audit/lb-core/{_LB_CORE_DEFAULT_CLASS}", status_code=302
+            )
+        with get_session(engine) as session:
+            counts = _audit_lb_core_class_counts(session)
+            entries = _audit_lb_core_class_rows(session, class_key)
+
+        class_options = [
+            {
+                "key": k,
+                "label": _LB_CORE_DISPLAY_LABELS.get(k, k),
+                "count": counts.get(k, 0),
+                "is_current": k == class_key,
+            }
+            for k in _LB_CORE_AUDIT_KEYS
+        ]
+
+        exemplar_filename = _LB_CORE_EXEMPLAR_FILES.get(class_key)
+        reference_url = (
+            f"/static/lb-core-icons/{exemplar_filename}"
+            if exemplar_filename else None
+        )
+
+        reassign_choices = []
+        for k in _LB_CORE_AUDIT_KEYS:
+            filename = _LB_CORE_EXEMPLAR_FILES.get(k)
+            reassign_choices.append({
+                "key": k,
+                "label": _LB_CORE_DISPLAY_LABELS.get(k, k),
+                "exemplar_url": (
+                    f"/static/lb-core-icons/{filename}" if filename else None
+                ),
+                "is_current": k == class_key,
+            })
+
+        ref_w, ref_h = PROMO_REF_SIZE
+        n_corrected = sum(
+            1 for e in entries if e["field"].manually_corrected
+        )
+        n_auto = len(entries) - n_corrected
+        return templates.TemplateResponse(
+            request,
+            "audit_lb_core.html",
+            {
+                "class_key": class_key,
+                "class_label": _LB_CORE_DISPLAY_LABELS.get(class_key, class_key),
+                "reference_url": reference_url,
+                "class_options": class_options,
+                "entries": entries,
+                "reassign_choices": reassign_choices,
+                "ref_w": ref_w,
+                "ref_h": ref_h,
+                "n_corrected": n_corrected,
+                "n_auto": n_auto,
+            },
+        )
+
+    @app.post("/audit/lb-core/bulk-correct")
+    def audit_lb_core_bulk_correct(
+        field_ids: str = Form(...),
+        normalized: str = Form(...),
+        return_class: str = Form(""),
+    ) -> Response:
+        if normalized not in _LB_CORE_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown lb-core key: {normalized}")
+        try:
+            ids = [int(x) for x in field_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "field_ids must be a CSV of ints")
+        if not ids:
+            raise HTTPException(400, "field_ids is empty")
+        if len(ids) > _BULK_CORRECT_LIMIT:
+            raise HTTPException(
+                400,
+                f"refusing to update more than {_BULK_CORRECT_LIMIT} rows at once",
+            )
+
+        new_text = _LB_CORE_DISPLAY_LABELS.get(normalized, normalized)
+        with get_session(engine) as session:
+            rows = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.id.in_(ids)
+                )
+            ).all()
+            for row in rows:
+                if not row.region_slug.endswith(".lb_core"):
+                    continue
+                row.normalized = normalized
+                row.text = new_text
+                row.confidence = 1.0
+                row.manually_corrected = True
+                session.add(row)
+            session.commit()
+
+        target = (
+            return_class
+            if return_class in _LB_CORE_AUDIT_KEYS
+            else _LB_CORE_DEFAULT_CLASS
+        )
+        return RedirectResponse(
+            f"/audit/lb-core/{target}", status_code=303
+        )
+
+    @app.post("/audit/lb-core/{class_key}/reclassify-auto")
+    def audit_lb_core_reclassify_auto(class_key: str) -> Response:
+        """Re-run :func:`detect_lb_core` on every auto row in this class.
+
+        Detector is deterministic, so this is a no-op until thresholds
+        are tuned. Manually-corrected rows are untouched.
+        """
+        if class_key not in _LB_CORE_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown class: {class_key}")
+        from ..roster.promo_tournament_lb_core import (
+            reclassify_class_auto_rows as _reclassify_lb_core,
+        )
+        from ..roster.promo_tournament_ocr import ocr_crop
+
+        with get_session(engine) as session:
+            _reclassify_lb_core(session, class_key, ocr_crop)
+        return RedirectResponse(
+            f"/audit/lb-core/{class_key}", status_code=303
+        )
+
+    @app.post("/audit/lb-core/{class_key}/confirm-all")
+    def audit_lb_core_confirm_all(class_key: str) -> Response:
+        if class_key not in _LB_CORE_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown class: {class_key}")
+        with get_session(engine) as session:
+            rows = session.exec(
+                select(PromoExtractedField).where(
+                    PromoExtractedField.region_slug.like("%.lb_core"),
+                    PromoExtractedField.normalized == class_key,
+                )
+            ).all()
+            for row in rows:
+                if not row.manually_corrected:
+                    row.manually_corrected = True
+                    session.add(row)
+            session.commit()
+        return RedirectResponse(
+            f"/audit/lb-core/{class_key}", status_code=303
+        )
+
+    @app.post("/audit/lb-core/{field_id}/correct")
+    def audit_lb_core_correct(
+        field_id: int,
+        normalized: str = Form(...),
+        return_class: str = Form(""),
+    ) -> Response:
+        if normalized not in _LB_CORE_AUDIT_KEYS:
+            raise HTTPException(400, f"unknown lb-core key: {normalized}")
+        with get_session(engine) as session:
+            field = session.get(PromoExtractedField, field_id)
+            if field is None:
+                raise HTTPException(404, f"field {field_id} not found")
+            field.normalized = normalized
+            field.text = _LB_CORE_DISPLAY_LABELS.get(normalized, normalized)
+            field.confidence = 1.0
+            field.manually_corrected = True
+            session.add(field)
+            session.commit()
+        target = (
+            return_class
+            if return_class in _LB_CORE_AUDIT_KEYS
+            else _LB_CORE_DEFAULT_CLASS
+        )
+        return RedirectResponse(
+            f"/audit/lb-core/{target}", status_code=303
         )
 
     @app.get("/healthz")

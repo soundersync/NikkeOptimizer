@@ -69,6 +69,22 @@ _PLAYER_CHAR_CP: tuple[Bbox, ...] = (
     (862, 1371, 1011, 1414),
     (1047, 1373, 1193, 1414),
 )
+# Limit-Break stars (3 yellow when MLB, otherwise dark) + Core-level
+# badge ("01".."07/10") at the right edge. Same relative position
+# inside every portrait card — derived from _PLAYER_CHAR_PORTRAIT so
+# overlaying the cards aligns the crops exactly.
+_LB_CORE_OFFSET: tuple[int, int] = (79, 249)  # (dx, dy) from portrait card top-left
+_LB_CORE_SIZE: tuple[int, int] = (85, 30)     # (w, h)
+
+_PLAYER_CHAR_LB_CORE: tuple[Bbox, ...] = tuple(
+    (
+        px1 + _LB_CORE_OFFSET[0],
+        py1 + _LB_CORE_OFFSET[1],
+        px1 + _LB_CORE_OFFSET[0] + _LB_CORE_SIZE[0],
+        py1 + _LB_CORE_OFFSET[1] + _LB_CORE_SIZE[1],
+    )
+    for (px1, py1, _, _) in _PLAYER_CHAR_PORTRAIT
+)
 
 
 def _build_player_loadout() -> tuple[Region, ...]:
@@ -81,6 +97,7 @@ def _build_player_loadout() -> tuple[Region, ...]:
         g = f"char{n}"
         rows.append(Region(f"{g}.portrait", f"Char {n} — Portrait", _PLAYER_CHAR_PORTRAIT[i], group=g))
         rows.append(Region(f"{g}.doll", f"Char {n} — Doll/Treasure", _PLAYER_CHAR_DOLL[i], group=g))
+        rows.append(Region(f"{g}.lb_core", f"Char {n} — LB & Core", _PLAYER_CHAR_LB_CORE[i], group=g))
         rows.append(Region(f"{g}.cp", f"Char {n} — CP", _PLAYER_CHAR_CP[i], group=g))
     return tuple(rows)
 

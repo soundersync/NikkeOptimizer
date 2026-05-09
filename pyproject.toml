@@ -37,6 +37,9 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+scrape = [
+    "playwright>=1.44",
+]
 
 [project.scripts]
 nikkeoptimizer = "nikke_optimizer.cli.main:app"

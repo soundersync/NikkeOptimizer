@@ -44,6 +44,15 @@ class CharacterView:
     # ``<name> (Treasure)`` library entry when one exists).
     is_treasure_unlocked: bool = False
 
+    # Predicted base stats from BlablaLink stat tables (pre-equipment).
+    # Populated by the loader when a roledata cache hit is available.
+    # Used by counter-pick scoring for unowned characters, and as a
+    # consistency check against captured ``power`` for owned ones.
+    predicted_base_atk: Optional[int] = None
+    predicted_base_hp: Optional[int] = None
+    predicted_base_def: Optional[int] = None
+    predicted_power: Optional[int] = None
+
     @property
     def burst_position(self) -> str:
         """One of '1', '2', '3', or 'flex'.

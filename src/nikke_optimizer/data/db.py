@@ -56,6 +56,7 @@ def init_db(engine) -> None:
     """Idempotently create all tables. Safe to call on every startup."""
     SQLModel.metadata.create_all(engine)
     _ensure_promo_extracted_field_columns(engine)
+    _ensure_owned_character_v2_columns(engine)
 
 
 def _ensure_promo_extracted_field_columns(engine) -> None:
@@ -79,6 +80,33 @@ def _ensure_promo_extracted_field_columns(engine) -> None:
                 "ADD COLUMN manually_corrected INTEGER NOT NULL DEFAULT 0"
             )
             conn.commit()
+
+
+def _ensure_owned_character_v2_columns(engine) -> None:
+    """Add per-character rank-buff columns added in the 2026-05-08
+    CSV format. SQLite doesn't support ``ALTER ... ADD IF NOT EXISTS``
+    so we check pragma and ALTER only when missing. Idempotent.
+    """
+    new_cols = [
+        "bond_rank", "bond_hp", "bond_def", "bond_atk",
+        "class_rank_level", "class_rank_hp", "class_rank_def", "class_rank_atk",
+        "mfr_rank_level", "mfr_rank_hp", "mfr_rank_def", "mfr_rank_atk",
+    ]
+    with engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in conn.exec_driver_sql(
+                "PRAGMA table_info(owned_character)"
+            )
+        }
+        if not cols:
+            return  # table not yet created
+        for col in new_cols:
+            if col not in cols:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE owned_character ADD COLUMN {col} INTEGER"
+                )
+        conn.commit()
 
 
 def get_session(engine) -> Session:
