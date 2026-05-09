@@ -42,6 +42,259 @@ from .evaluator import TeamEvaluation
 from .timeline import compute_burst_chain_offsets
 
 
+@dataclass
+class MemberState:
+    """Per-character runtime state during a per-char simulation."""
+
+    name: str
+    max_hp: float
+    hp: float
+    shield: float                # remaining shield, absorbs damage first
+    sustained_dps: float         # damage this Nikke contributes per second
+    burst_payload: float         # one-shot burst damage from this Nikke
+    eff_def: float               # used by attacker's def_factor calc
+    role: str                    # "attacker"/"defender"/"supporter"/etc.
+    is_taunting: bool = False    # taunters absorb most damage
+    heal_per_second: float = 0.0
+    heal_duration: float = 0.0
+    alive: bool = True
+    damage_dealt: float = 0.0    # cumulative for output
+    damage_taken: float = 0.0    # cumulative for output
+
+    @property
+    def is_healer(self) -> bool:
+        return self.heal_per_second > 0
+
+
+def _per_char_states(team: TeamEvaluation, opponent_avg_def: float) -> list[MemberState]:
+    """Build MemberState for each Nikke on the team."""
+    out: list[MemberState] = []
+    for m in team.members:
+        eff_atk = m.effective_atk
+        if eff_atk <= 0:
+            sustained = 0.0
+            burst = 0.0
+        else:
+            weapon_factor = WEAPON_DAMAGE_PER_SECOND_FRACTION.get(
+                (m.weapon_class or "").upper(), 0.10
+            )
+            atk_mult = _per_member_atk_damage_multiplier(m)
+            def_factor = max(
+                MIN_DAMAGE_FRACTION_THROUGH_DEF,
+                _def_reduction_factor(eff_atk, opponent_avg_def),
+            )
+            sustained = (
+                eff_atk * atk_mult * def_factor * weapon_factor
+                + eff_atk * (m.true_damage_buff_pct / 100.0) * weapon_factor
+                + eff_atk * (
+                    (m.pierce_damage_buff_pct / 100.0) * 0.5
+                    + (m.shield_damage_buff_pct / 100.0) * 0.3
+                    + (m.sustained_damage_buff_pct / 100.0) * 0.2
+                ) * weapon_factor
+            )
+            burst = m.burst_damage_magnitude * eff_atk * def_factor
+        out.append(MemberState(
+            name=m.name,
+            max_hp=float(m.base_hp + m.flat_hp_bonus),
+            hp=float(m.base_hp + m.flat_hp_bonus),
+            shield=float(m.shield_value),
+            sustained_dps=sustained,
+            burst_payload=burst,
+            eff_def=float(m.effective_def),
+            role=(m.role or "").lower(),
+            is_taunting=m.is_taunting,
+            heal_per_second=float(m.heal_per_second),
+            heal_duration=float(m.heal_duration),
+        ))
+    return out
+
+
+def _apply_damage_to_team(team: list[MemberState], damage: float) -> float:
+    """Distribute incoming damage across living team members.
+
+    Targeting priority:
+      1. Taunters (if any) absorb 100% — sticky aggro mechanic.
+      2. Otherwise, focus fire on lowest-current-HP living defender
+         (matches NIKKE PvP "focus weakest" target selection).
+
+    Damage absorbed by shields first, then HP. Returns total damage
+    actually applied (== ``damage`` unless team is fully dead).
+    """
+    if damage <= 0:
+        return 0.0
+    living = [m for m in team if m.alive]
+    if not living:
+        return 0.0
+
+    # Prefer taunters for aggro.
+    taunters = [m for m in living if m.is_taunting]
+    targets = taunters if taunters else [min(living, key=lambda m: m.hp)]
+
+    # Split damage across the targeting set (usually 1, occasionally 2 taunters).
+    per_target = damage / len(targets)
+    applied = 0.0
+    for tgt in targets:
+        remaining = per_target
+        # Shields absorb first.
+        if tgt.shield > 0:
+            absorb = min(tgt.shield, remaining)
+            tgt.shield -= absorb
+            remaining -= absorb
+        if remaining > 0:
+            absorb_hp = min(tgt.hp, remaining)
+            tgt.hp -= absorb_hp
+            remaining -= absorb_hp
+            tgt.damage_taken += absorb_hp
+            if tgt.hp <= 0:
+                tgt.alive = False
+                tgt.hp = 0.0
+        applied += per_target - remaining
+    return applied
+
+
+def _apply_heal_to_team(team: list[MemberState], heal_amount: float) -> None:
+    """Heal lowest-HP living ally up to their max HP."""
+    if heal_amount <= 0:
+        return
+    living = [m for m in team if m.alive]
+    if not living:
+        return
+    target = min(living, key=lambda m: m.hp / max(m.max_hp, 1))
+    target.hp = min(target.max_hp, target.hp + heal_amount)
+
+
+def simulate_per_character(
+    attacker: TeamEvaluation,
+    defender: TeamEvaluation,
+    *,
+    first_burst_sec: Optional[float] = None,
+    defender_first_burst_sec: Optional[float] = None,
+    cycle_period_sec: float = DEFAULT_CYCLE_PERIOD_SEC,
+    match_length_sec: float = MATCH_LENGTH_SEC,
+    dt: float = 1.0,
+    attacker_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
+    defender_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
+) -> TimeSteppedResult:
+    """Per-character simulation with focus-fire damage distribution.
+
+    Improvements over team-aggregate ``simulate``:
+    1. Track each Nikke's HP/shield separately.
+    2. Damage focuses on lowest-HP living defender (taunt-overridden).
+    3. When a defender dies, attacker team's DPS doesn't change but
+       living target count shrinks → remaining defenders die faster.
+    4. When an attacker dies, that Nikke's sustained_dps drops out
+       of the team total → defender survives longer.
+    5. Heals target the lowest-HP-fraction living ally each tick.
+    6. Match ends when all of one team dies (not just total HP=0).
+
+    The model still doesn't capture per-skill cooldowns or burst-
+    rotation timing within the chain — those are deferred. But the
+    death-event accounting alone unlocks differentiation between
+    teams that the team-aggregate model collapses together.
+    """
+    if first_burst_sec is None:
+        first_burst_sec = derive_first_burst_sec(attacker, attacker_cubes)
+    if defender_first_burst_sec is None:
+        defender_first_burst_sec = derive_first_burst_sec(defender, defender_cubes)
+
+    # Opponent avg DEF (used by each attacker's def_factor calc).
+    a_avg_def = sum(m.effective_def for m in attacker.members) / max(len(attacker.members), 1)
+    d_avg_def = sum(m.effective_def for m in defender.members) / max(len(defender.members), 1)
+
+    a_team = _per_char_states(attacker, opponent_avg_def=d_avg_def)
+    d_team = _per_char_states(defender, opponent_avg_def=a_avg_def)
+
+    a_burst_times = []
+    t_b = first_burst_sec
+    while t_b < match_length_sec:
+        a_burst_times.append(t_b)
+        t_b += cycle_period_sec
+    d_burst_times = []
+    t_b = defender_first_burst_sec
+    while t_b < match_length_sec:
+        d_burst_times.append(t_b)
+        t_b += cycle_period_sec
+    a_burst_set = set(int(t) for t in a_burst_times)
+    d_burst_set = set(int(t) for t in d_burst_times)
+
+    a_total_damage = 0.0
+    d_total_damage = 0.0
+    a_hp_timeline: list[float] = []
+    d_hp_timeline: list[float] = []
+    end_reason = "timeout"
+
+    t = 0.0
+    while t < match_length_sec:
+        # Sum living members' DPS each tick (death events change DPS!).
+        a_living = [m for m in a_team if m.alive]
+        d_living = [m for m in d_team if m.alive]
+        if not a_living:
+            end_reason = "attacker_cleared"
+            break
+        if not d_living:
+            end_reason = "defender_cleared"
+            break
+
+        a_sus = sum(m.sustained_dps for m in a_living)
+        d_sus = sum(m.sustained_dps for m in d_living)
+
+        # Sustained damage applied to opposing team this tick.
+        d_dmg = a_sus * dt
+        a_dmg = d_sus * dt
+
+        # Burst payloads — sum from living attackers if their team's
+        # burst window fires this tick.
+        if int(t) in a_burst_set:
+            d_dmg += sum(m.burst_payload for m in a_living)
+        if int(t) in d_burst_set:
+            a_dmg += sum(m.burst_payload for m in d_living)
+
+        # Apply damage with focus-fire targeting.
+        applied_to_d = _apply_damage_to_team(d_team, d_dmg)
+        applied_to_a = _apply_damage_to_team(a_team, a_dmg)
+        a_total_damage += applied_to_d
+        d_total_damage += applied_to_a
+        # Track per-attacker damage dealt, weighted by their share of dps.
+        for m in a_living:
+            if a_sus > 0:
+                m.damage_dealt += applied_to_d * (m.sustained_dps / a_sus) if a_sus else 0
+        for m in d_living:
+            if d_sus > 0:
+                m.damage_dealt += applied_to_a * (m.sustained_dps / d_sus) if d_sus else 0
+
+        # Healing — apply during burst-windows for each team.
+        a_heal_active = any(bt <= t < bt + (max((m.heal_duration for m in a_team), default=0)) for bt in a_burst_times)
+        d_heal_active = any(bt <= t < bt + (max((m.heal_duration for m in d_team), default=0)) for bt in d_burst_times)
+        if a_heal_active:
+            heal_rate = max((m.heal_per_second for m in a_living), default=0)
+            _apply_heal_to_team(a_team, heal_rate * dt)
+        if d_heal_active:
+            heal_rate = max((m.heal_per_second for m in d_living), default=0)
+            _apply_heal_to_team(d_team, heal_rate * dt)
+
+        a_hp_timeline.append(sum(m.hp for m in a_team))
+        d_hp_timeline.append(sum(m.hp for m in d_team))
+
+        t += dt
+
+    return TimeSteppedResult(
+        attacker_wins=(end_reason == "defender_cleared"),
+        match_ended_at_sec=t,
+        end_reason=end_reason,
+        attacker_total_damage=a_total_damage,
+        defender_total_damage=d_total_damage,
+        attacker_hp_remaining=sum(m.hp for m in a_team),
+        defender_hp_remaining=sum(m.hp for m in d_team),
+        attacker_hp_timeline=a_hp_timeline,
+        defender_hp_timeline=d_hp_timeline,
+        notes=[
+            f"a_first_burst={first_burst_sec:.1f}s d_first_burst={defender_first_burst_sec:.1f}s",
+            f"a_living_at_end={sum(1 for m in a_team if m.alive)}/{len(a_team)}",
+            f"d_living_at_end={sum(1 for m in d_team if m.alive)}/{len(d_team)}",
+        ],
+    )
+
+
 def derive_first_burst_sec(
     team: TeamEvaluation,
     member_cubes: Optional[list[tuple[Optional[str], Optional[int]]]] = None,
