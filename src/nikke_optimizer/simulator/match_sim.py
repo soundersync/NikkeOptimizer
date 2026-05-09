@@ -54,6 +54,9 @@ class MemberState:
     burst_payload: float         # one-shot burst damage from this Nikke
     eff_def: float               # used by attacker's def_factor calc
     role: str                    # "attacker"/"defender"/"supporter"/etc.
+    burst_position: str = "flex"  # "1"/"2"/"3"/"flex" — chain ordering
+    burst_cooldown_sec: float = 20.0
+    burst_ready_at: float = 0.0  # next sim-time the burst can fire
     is_taunting: bool = False    # taunters absorb most damage
     heal_per_second: float = 0.0
     heal_duration: float = 0.0
@@ -64,6 +67,52 @@ class MemberState:
     @property
     def is_healer(self) -> bool:
         return self.heal_per_second > 0
+
+
+def _select_burst_chain(
+    team: list[MemberState],
+    current_time: float,
+) -> list[MemberState]:
+    """Return the 3 Nikkes that fire in this burst chain, in fire order.
+
+    NIKKE PvP chain rule (per the user's note 2026-05-09):
+      - One B1, one B2, one B3 fire per chain.
+      - For each position, the LEFTMOST eligible (alive + off-cooldown)
+        Nikke fires.
+      - Flex-burst Nikkes fill any open slot.
+
+    If a position has no eligible filler, that slot is empty for this
+    chain (rare with proper team comps). Returns the chain ordered
+    [B1_pick, B2_pick, B3_pick] — that's the in-game cast order.
+    """
+    chain: list[MemberState] = []
+    used: set[int] = set()
+    # team is in left-to-right order (member position).
+    for position in ("1", "2", "3"):
+        # First-pass: exact match leftmost.
+        candidate = None
+        for i, m in enumerate(team):
+            if i in used or not m.alive:
+                continue
+            if m.burst_ready_at > current_time:
+                continue
+            if m.burst_position == position:
+                candidate = (i, m)
+                break
+        # Second-pass: flex fill.
+        if candidate is None:
+            for i, m in enumerate(team):
+                if i in used or not m.alive:
+                    continue
+                if m.burst_ready_at > current_time:
+                    continue
+                if m.burst_position == "flex":
+                    candidate = (i, m)
+                    break
+        if candidate is not None:
+            used.add(candidate[0])
+            chain.append(candidate[1])
+    return chain
 
 
 def _per_char_states(team: TeamEvaluation, opponent_avg_def: float) -> list[MemberState]:
@@ -102,6 +151,9 @@ def _per_char_states(team: TeamEvaluation, opponent_avg_def: float) -> list[Memb
             burst_payload=burst,
             eff_def=float(m.effective_def),
             role=(m.role or "").lower(),
+            burst_position=(m.burst_position or "flex"),
+            burst_cooldown_sec=float(m.burst_cooldown_sec or 20.0),
+            burst_ready_at=0.0,
             is_taunting=m.is_taunting,
             heal_per_second=float(m.heal_per_second),
             heal_duration=float(m.heal_duration),
@@ -204,18 +256,30 @@ def simulate_per_character(
     a_team = _per_char_states(attacker, opponent_avg_def=d_avg_def)
     d_team = _per_char_states(defender, opponent_avg_def=a_avg_def)
 
-    a_burst_times = []
+    # Burst-chain timeline: schedule WHEN each chain rotation BEGINS,
+    # but membership of each chain is decided at fire-time based on
+    # cooldowns + leftmost-eligible. This matches NIKKE PvP behavior:
+    # 3 Nikkes per chain (one B1, one B2, one B3), each putting their
+    # burst on per-character cooldown, so subsequent chains may pull
+    # different members.
+    a_chain_times = []
     t_b = first_burst_sec
     while t_b < match_length_sec:
-        a_burst_times.append(t_b)
+        a_chain_times.append(t_b)
         t_b += cycle_period_sec
-    d_burst_times = []
+    d_chain_times = []
     t_b = defender_first_burst_sec
     while t_b < match_length_sec:
-        d_burst_times.append(t_b)
+        d_chain_times.append(t_b)
         t_b += cycle_period_sec
-    a_burst_set = set(int(t) for t in a_burst_times)
-    d_burst_set = set(int(t) for t in d_burst_times)
+    a_chain_set = set(int(t) for t in a_chain_times)
+    d_chain_set = set(int(t) for t in d_chain_times)
+
+    # Track which chain rotations active heals were triggered by, so
+    # heal-window detection persists for `heal_duration` seconds after
+    # each chain begins.
+    a_active_chain_starts: list[float] = []
+    d_active_chain_starts: list[float] = []
 
     a_total_damage = 0.0
     d_total_damage = 0.0
@@ -225,7 +289,6 @@ def simulate_per_character(
 
     t = 0.0
     while t < match_length_sec:
-        # Sum living members' DPS each tick (death events change DPS!).
         a_living = [m for m in a_team if m.alive]
         d_living = [m for m in d_team if m.alive]
         if not a_living:
@@ -238,16 +301,25 @@ def simulate_per_character(
         a_sus = sum(m.sustained_dps for m in a_living)
         d_sus = sum(m.sustained_dps for m in d_living)
 
-        # Sustained damage applied to opposing team this tick.
         d_dmg = a_sus * dt
         a_dmg = d_sus * dt
 
-        # Burst payloads — sum from living attackers if their team's
-        # burst window fires this tick.
-        if int(t) in a_burst_set:
-            d_dmg += sum(m.burst_payload for m in a_living)
-        if int(t) in d_burst_set:
-            a_dmg += sum(m.burst_payload for m in d_living)
+        # Burst chain firing — select the 3 leftmost-eligible Nikkes
+        # (B1 → B2 → B3), put each on cooldown after firing.
+        if int(t) in a_chain_set:
+            chain = _select_burst_chain(a_team, t)
+            if chain:
+                d_dmg += sum(m.burst_payload for m in chain)
+                for m in chain:
+                    m.burst_ready_at = t + m.burst_cooldown_sec
+                a_active_chain_starts.append(t)
+        if int(t) in d_chain_set:
+            chain = _select_burst_chain(d_team, t)
+            if chain:
+                a_dmg += sum(m.burst_payload for m in chain)
+                for m in chain:
+                    m.burst_ready_at = t + m.burst_cooldown_sec
+                d_active_chain_starts.append(t)
 
         # Apply damage with focus-fire targeting.
         applied_to_d = _apply_damage_to_team(d_team, d_dmg)
@@ -262,13 +334,16 @@ def simulate_per_character(
             if d_sus > 0:
                 m.damage_dealt += applied_to_a * (m.sustained_dps / d_sus) if d_sus else 0
 
-        # Healing — apply during burst-windows for each team.
-        a_heal_active = any(bt <= t < bt + (max((m.heal_duration for m in a_team), default=0)) for bt in a_burst_times)
-        d_heal_active = any(bt <= t < bt + (max((m.heal_duration for m in d_team), default=0)) for bt in d_burst_times)
-        if a_heal_active:
+        # Healing — applies for ``heal_duration`` seconds following
+        # each chain. Use only active-chain windows from above (not
+        # the projected schedule) so heals stop if a team can't
+        # actually fire bursts (e.g. all healers dead).
+        a_heal_dur = max((m.heal_duration for m in a_team), default=0)
+        d_heal_dur = max((m.heal_duration for m in d_team), default=0)
+        if a_heal_dur > 0 and any(bt <= t < bt + a_heal_dur for bt in a_active_chain_starts):
             heal_rate = max((m.heal_per_second for m in a_living), default=0)
             _apply_heal_to_team(a_team, heal_rate * dt)
-        if d_heal_active:
+        if d_heal_dur > 0 and any(bt <= t < bt + d_heal_dur for bt in d_active_chain_starts):
             heal_rate = max((m.heal_per_second for m in d_living), default=0)
             _apply_heal_to_team(d_team, heal_rate * dt)
 

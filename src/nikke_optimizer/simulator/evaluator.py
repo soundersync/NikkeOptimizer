@@ -91,6 +91,15 @@ class NikkeSnapshot:
     element: Optional[str] = None
     weapon_class: Optional[str] = None
     role: Optional[str] = None
+    # Burst position: "1", "2", "3", or "flex". Used by match_sim's
+    # burst-chain model to determine fire order (B1 → B2 → B3 by
+    # leftmost-eligible per chain).
+    burst_position: Optional[str] = None
+    # Per-Nikke burst-skill cooldown in seconds. Default 20s matches
+    # the most common cooldown in NIKKE; some Nikkes have 40s, 30s,
+    # 15s. Loaded from OwnedCharacter.burst_cooldown_seconds when
+    # available.
+    burst_cooldown_sec: float = 20.0
 
     # Flat bonuses from cross-stat scaling effects ("ATK +30% of caster's ATK").
     # Added to base_<stat> before the multiplicative buff_pct is applied.
@@ -569,15 +578,20 @@ def evaluate_team(
             return fallback
         return int(value)
 
+    def _identity(name, key):
+        return identities.get(name, {}).get(key)
+
     team = [
         NikkeSnapshot(
             name=cs.character_name,
             base_atk=_stat(cs.character_name, "base_atk", base_atk),
             base_hp=_stat(cs.character_name, "base_hp", base_hp),
             base_def=_stat(cs.character_name, "base_def", base_def),
-            element=(identities.get(cs.character_name, {}).get("element") or "").lower() or None,
-            weapon_class=(identities.get(cs.character_name, {}).get("weapon_class") or "").lower() or None,
-            role=(identities.get(cs.character_name, {}).get("role") or "").lower() or None,
+            element=(_identity(cs.character_name, "element") or "").lower() or None,
+            weapon_class=(_identity(cs.character_name, "weapon_class") or "").lower() or None,
+            role=(_identity(cs.character_name, "role") or "").lower() or None,
+            burst_position=(_identity(cs.character_name, "burst_position") or "").lower() or None,
+            burst_cooldown_sec=float(_identity(cs.character_name, "burst_cooldown_sec") or 20.0),
         )
         for cs in sets
     ]
@@ -995,18 +1009,28 @@ def _route_treasure_forms(names: list[str]) -> list[str]:
 
 
 def _load_identities(names: list[str]) -> dict[str, dict]:
-    """Look up each character's element/weapon_class/role from the DB.
+    """Look up each character's element/weapon_class/role/burst from the DB.
 
-    Returns a mapping ``name -> {"element": str, "weapon_class": str,
-    "role": str}`` for use by ``evaluate_team``'s identity threading.
-    Empty dict on any failure (tests without DB still pass).
+    Returns a mapping ``name -> {"element", "weapon_class", "role",
+    "burst_position", "burst_cooldown_sec"}`` for use by
+    ``evaluate_team``'s identity threading. Empty dict on any failure
+    (tests without DB still pass).
+
+    ``burst_position`` is "1"/"2"/"3"/"flex" matching CharacterView's
+    convention. ``burst_cooldown_sec`` is from the user's
+    OwnedCharacter row when available, defaulting to 20s.
     """
     try:
         from ..data.db import default_db_path, make_engine, get_session
-        from ..data.models import Character
+        from ..data.enums import BurstType
+        from ..data.models import Character, OwnedCharacter
         from sqlmodel import select
         engine = make_engine(default_db_path())
         out: dict[str, dict] = {}
+        burst_pos_map = {
+            BurstType.I: "1", BurstType.II: "2", BurstType.III: "3",
+            BurstType.FLEX: "flex",
+        }
         with get_session(engine) as session:
             for name in names:
                 ch = session.exec(
@@ -1016,12 +1040,18 @@ def _load_identities(names: list[str]) -> dict[str, dict]:
                     continue
                 role = ""
                 if ch.role_tags:
-                    # role_tags[0] is the primary class per the scraper
                     role = ch.role_tags[0] if ch.role_tags else ""
+                # Owned cooldown override (some chars have CDR via skills).
+                owned = session.exec(
+                    select(OwnedCharacter).where(OwnedCharacter.character_id == ch.id)
+                ).one_or_none()
+                cd = (owned.burst_cooldown_seconds if owned else None) or 20.0
                 out[name] = {
                     "element": ch.element.value if ch.element else "",
                     "weapon_class": ch.weapon_class.value if ch.weapon_class else "",
                     "role": role,
+                    "burst_position": burst_pos_map.get(ch.burst_type, "flex") if ch.burst_type else None,
+                    "burst_cooldown_sec": cd,
                 }
         return out
     except Exception:
