@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% block title %}Tournament {{ tournament.capture_date }} — NikkeOptimizer{% endblock %}
+{% block title %}{% if format == "league" %}League{% elif format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %} {{ tournament.capture_date }} — NikkeOptimizer{% endblock %}
 {% block body %}
 
 <style>
@@ -24,6 +24,93 @@
 }
 .format-pill.promo { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
 .format-pill.duel  { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
+.format-pill.league { background: #1c2419; color: #86efac; border: 1px solid #1e5f30; }
+
+/* League leaderboard table. */
+.leaderboard {
+    width: 100%;
+    max-width: 720px;
+    margin-bottom: 26px;
+    border-collapse: collapse;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 13px;
+}
+.leaderboard th, .leaderboard td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #1f2228;
+}
+.leaderboard tr:last-child td { border-bottom: none; }
+.leaderboard th {
+    font-size: 11px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    background: #181b21;
+}
+.leaderboard td.rank {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #86efac;
+    font-weight: 600;
+    width: 50px;
+}
+.leaderboard td.name { color: #e5e7eb; font-weight: 600; }
+.leaderboard td.cp, .leaderboard td.synchro {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #d1d5db;
+    text-align: right;
+}
+.leaderboard td .text { font-weight: inherit; }
+.leaderboard td .crop-thumb {
+    /* Crops are cut from leaderboard.png at canonical sizes via
+       LEADERBOARD_REGIONS — every crop in a column shares the same
+       native dimensions, so no aspect-ratio compensation is needed
+       here. Just cap the display size so wide CP crops don't blow
+       out the table. */
+    display: block;
+    margin-top: 6px;
+    max-height: 40px;
+    max-width: 100%;
+    border: 1px solid #1f2228;
+    border-radius: 3px;
+    background: #0a0b0e;
+    image-rendering: -webkit-optimize-contrast;
+}
+.leaderboard td .crop-thumb:hover { border-color: #86efac; }
+.leaderboard td.cp .crop-thumb,
+.leaderboard td.synchro .crop-thumb { margin-left: auto; }
+.leaderboard .missing { color: #6b7280; font-style: italic; padding: 14px 12px; }
+
+/* League layout: master screenshot beside extracted table. */
+.section-h {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e5e7eb;
+    margin: 0 0 10px;
+}
+.league-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 360px) 1fr;
+    gap: 24px;
+    margin-bottom: 28px;
+}
+@media (max-width: 900px) {
+    .league-layout { grid-template-columns: 1fr; }
+}
+.league-master img.leaderboard-master {
+    width: 100%;
+    max-width: 360px;
+    height: auto;
+    display: block;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    background: #0a0b0e;
+}
+.league-master .missing { color: #6b7280; font-style: italic; }
 
 /* Promo: 8 group tiles. */
 .group-grid {
@@ -121,19 +208,105 @@
 <div class="tour-header">
     <div>
         <h1>
-            {% if format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %}
+            {% if format == "league" %}League
+            {% elif format == "champions_duel" %}Champions Duel
+            {% else %}Promotion Tournament{% endif %}
             — {{ tournament.capture_date }}
         </h1>
         <div class="meta">
             Captured at <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
         </div>
     </div>
-    <span class="format-pill {% if format == 'champions_duel' %}duel{% else %}promo{% endif %}">
-        {% if format == "champions_duel" %}duel{% else %}promo{% endif %}
+    <span class="format-pill {% if format == 'champions_duel' %}duel{% elif format == 'league' %}league{% else %}promo{% endif %}">
+        {% if format == "league" %}league
+        {% elif format == "champions_duel" %}duel
+        {% else %}promo{% endif %}
     </span>
 </div>
 
-{% if format == "champions_duel" %}
+{% if format == "league" %}
+{# League: master screenshot, leaderboard table with per-field crops, 4 player tiles. #}
+
+<div class="league-layout">
+
+<div class="league-master">
+    <h2 class="section-h">Leaderboard screenshot</h2>
+    {% if leaderboard_image_url %}
+    <a href="{{ leaderboard_image_url }}" target="_blank" rel="noopener">
+        <img src="{{ leaderboard_image_url }}" alt="leaderboard.png" class="leaderboard-master">
+    </a>
+    {% else %}
+    <div class="missing">leaderboard.png not found.</div>
+    {% endif %}
+</div>
+
+<div class="league-table-wrap">
+    <h2 class="section-h">Extracted leaderboard</h2>
+    {% if leaderboard %}
+    <table class="leaderboard">
+        <thead>
+            <tr><th>Rank</th><th>Name</th><th style="text-align:right">CP</th><th style="text-align:right">Synchro</th></tr>
+        </thead>
+        <tbody>
+        {% for entry in leaderboard %}
+            <tr>
+                <td class="rank">#{{ entry.rank }}</td>
+                <td class="name">
+                    <div class="text">{{ entry.name or "—" }}</div>
+                    {% if entry.name_crop_url %}
+                    <a href="{{ entry.name_crop_url }}" target="_blank" rel="noopener" title="{{ entry.name_crop }}">
+                        <img class="crop-thumb" src="{{ entry.name_crop_url }}" alt="name crop">
+                    </a>
+                    {% endif %}
+                </td>
+                <td class="cp">
+                    <div class="text">{% if entry.cp is not none %}{{ "{:,}".format(entry.cp) }}{% else %}—{% endif %}</div>
+                    {% if entry.cp_crop_url %}
+                    <a href="{{ entry.cp_crop_url }}" target="_blank" rel="noopener" title="{{ entry.cp_crop }}">
+                        <img class="crop-thumb" src="{{ entry.cp_crop_url }}" alt="cp crop">
+                    </a>
+                    {% endif %}
+                </td>
+                <td class="synchro">
+                    <div class="text">{% if entry.synchro_level is not none %}{{ entry.synchro_level }}{% else %}—{% endif %}</div>
+                    {% if entry.synchro_crop_url %}
+                    <a href="{{ entry.synchro_crop_url }}" target="_blank" rel="noopener" title="{{ entry.synchro_crop }}">
+                        <img class="crop-thumb" src="{{ entry.synchro_crop_url }}" alt="synchro crop">
+                    </a>
+                    {% endif %}
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="missing">No leaderboard data yet — re-run <code>nikkeoptimizer ingest-tournaments</code> to OCR.</div>
+    {% endif %}
+</div>
+
+</div>
+
+<h2 class="section-h" style="margin-top:8px;">Players</h2>
+<div class="match-grid">
+    {% for p in player_tiles %}
+    <a class="match-card" href="/promo/{{ tournament.id }}/matches/{{ p.row.id }}">
+        <div class="match-thumb">
+            {% if p.thumb %}<img src="{{ p.thumb }}" alt="player thumbnail">{% endif %}
+        </div>
+        <div class="footer">
+            <span class="num">
+                {% set lb_entry = leaderboard[p.row.match_no - 1] if leaderboard and p.row.match_no and leaderboard|length >= p.row.match_no else none %}
+                {% if lb_entry %}#{{ lb_entry.rank }} {{ lb_entry.name }}{% else %}Player {{ p.row.match_no }}{% endif %}
+            </span>
+            <span class="flag">
+                {% if p.row.has_loadouts %}loadouts{% else %}results-only{% endif %}
+            </span>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+
+{% elif format == "champions_duel" %}
 {# Duel: three round sections (QF / SF / Final). Same layout as the
    promo group page's match-tile grid. #}
 {% for round_label, label_human in [("quarterfinals", "Quarterfinals"), ("semifinals", "Semifinals"), ("finals", "Final")] %}

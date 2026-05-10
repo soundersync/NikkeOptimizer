@@ -37,10 +37,13 @@ from ..data.models import (
     PromoMatch,
     PromoMatchScreenshot,
     PromoTournament,
+    RosterSnapshot,
+    RosterSnapshotCharacter,
 )
 from ..roster.portrait_matcher import PortraitMatcher
 from ..roster.promo_tournament_ingest import (
     FORMAT_DUEL,
+    FORMAT_LEAGUE,
     FORMAT_PROMO,
     tournament_format,
 )
@@ -2424,7 +2427,16 @@ def create_app(
 
     @app.get("/promo", response_class=HTMLResponse)
     def promo_index(request: Request) -> Response:
-        """Capture dates → tournaments grid (mixed formats)."""
+        """Beta seasons → tournaments grid (mixed formats)."""
+        from ..data.config import get_self_username
+        from ..data.seasons import (
+            parse_season_number,
+            season_for_date,
+            season_start,
+        )
+
+        self_name = (get_self_username() or "").casefold()
+
         with get_session(engine) as session:
             tournaments = session.exec(
                 select(PromoTournament).order_by(
@@ -2444,20 +2456,101 @@ def create_app(
                         select(PromoGroup).where(PromoGroup.tournament_id == t.id)
                     ).all()
                 )
+                # Prefer the season encoded in storage_root (canonical
+                # archive layout); fall back to deriving from the
+                # captured date via the cadence table.
+                parent_name = Path(t.storage_root).parent.name
+                season_n = parse_season_number(parent_name)
+                if season_n is None:
+                    season_n = season_for_date(t.capture_date)
                 t_meta.append({
                     "row": t,
                     "format": tournament_format(t.storage_root),
                     "n_matches": n_matches,
                     "n_groups": n_groups,
+                    "season_n": season_n,
                 })
-            by_date: dict[str, list] = {}
+            by_season: dict[int, dict] = {}
             for m in t_meta:
-                key = m["row"].capture_date.isoformat()
-                by_date.setdefault(key, []).append(m)
+                bucket = by_season.setdefault(m["season_n"], {
+                    "items": [],
+                    "n_players": 0,
+                    "has_self": False,
+                    "start": season_start(m["season_n"]).isoformat(),
+                })
+                bucket["items"].append(m)
+
+            # Player roster snapshots — collapsed to a single per-season
+            # count + has_self indicator. The dedicated
+            # ``/promo/players/<season>`` page lists individual players.
+            snapshots = session.exec(
+                select(RosterSnapshot).order_by(
+                    RosterSnapshot.season_number.desc(),
+                    RosterSnapshot.captured_at.desc(),
+                )
+            ).all()
+            for snap in snapshots:
+                bucket = by_season.setdefault(snap.season_number, {
+                    "items": [],
+                    "n_players": 0,
+                    "has_self": False,
+                    "start": season_start(snap.season_number).isoformat(),
+                })
+                bucket["n_players"] += 1
+                if (
+                    bool(self_name)
+                    and (snap.player_username or "").casefold() == self_name
+                ):
+                    bucket["has_self"] = True
+
+            # Newest season first.
+            by_season_sorted = dict(
+                sorted(by_season.items(), key=lambda kv: kv[0], reverse=True)
+            )
         return templates.TemplateResponse(
             request,
             "promo_index.html",
-            {"by_date": by_date, "n_tournaments": len(tournaments)},
+            {
+                "by_season": by_season_sorted,
+                "n_tournaments": len(tournaments),
+                "n_snapshots": len(snapshots),
+            },
+        )
+
+    @app.get("/promo/players/{season_number}", response_class=HTMLResponse)
+    def promo_players(request: Request, season_number: int) -> Response:
+        """Per-season list of player roster snapshots."""
+        from ..data.config import get_self_username
+        from ..data.seasons import season_start
+
+        self_name = (get_self_username() or "").casefold()
+        with get_session(engine) as session:
+            snapshots = session.exec(
+                select(RosterSnapshot)
+                .where(RosterSnapshot.season_number == season_number)
+                .order_by(RosterSnapshot.captured_at.desc())
+            ).all()
+            tiles = []
+            for snap in snapshots:
+                n_chars = len(session.exec(
+                    select(RosterSnapshotCharacter).where(
+                        RosterSnapshotCharacter.snapshot_id == snap.id
+                    )
+                ).all())
+                tiles.append({
+                    "row": snap,
+                    "n_chars": n_chars,
+                    "is_self": bool(self_name)
+                        and (snap.player_username or "").casefold() == self_name,
+                })
+        return templates.TemplateResponse(
+            request,
+            "promo_players.html",
+            {
+                "season_number": season_number,
+                "season_start": season_start(season_number).isoformat(),
+                "tiles": tiles,
+            },
         )
 
     @app.get("/promo/{tournament_id}", response_class=HTMLResponse)
@@ -2490,6 +2583,46 @@ def create_app(
                     )
                     group_meta.append({"row": g, "n_matches": n_matches})
                 ctx["groups"] = group_meta
+            elif fmt == FORMAT_LEAGUE:
+                # League: 4 player matches + a leaderboard sidecar.
+                from dataclasses import asdict
+
+                from ..roster.league_leaderboard import read_sidecar
+
+                matches = session.exec(
+                    select(PromoMatch)
+                    .where(PromoMatch.tournament_id == tournament_id)
+                    .order_by(PromoMatch.match_no)
+                ).all()
+                player_tiles = []
+                for m in matches:
+                    thumb = _promo_match_thumb_url(session, m.id)
+                    player_tiles.append({"row": m, "thumb": thumb})
+                ctx["player_tiles"] = player_tiles
+
+                # Master leaderboard image URL (always shown when present).
+                league_root = Path(tournament.storage_root)
+                master_path = league_root / "leaderboard.png"
+                ctx["leaderboard_image_url"] = (
+                    _promo_image_url(str(master_path)) if master_path.is_file()
+                    else None
+                )
+
+                # Leaderboard entries — augment with /promo-images URLs
+                # for each crop so the template can show "extracted text
+                # ← source crop" inline.
+                entries = read_sidecar(league_root) or []
+                rich_entries = []
+                for e in entries:
+                    d = asdict(e)
+                    for fld in ("name_crop", "cp_crop", "synchro_crop"):
+                        crop_name = d.get(fld) or ""
+                        d[f"{fld}_url"] = (
+                            _promo_image_url(str(league_root / crop_name))
+                            if crop_name else None
+                        )
+                    rich_entries.append(d)
+                ctx["leaderboard"] = rich_entries
             else:
                 # Duel: build round sections directly off the matches.
                 matches = session.exec(
@@ -2857,6 +2990,77 @@ def create_app(
                 "ref_h": ref_h,
                 "kinds": PROMO_KINDS,
                 "format": fmt,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Roster snapshots — per-(season, player) frozen rosters
+    # ------------------------------------------------------------------
+
+    @app.get("/snapshots/{snapshot_id}", response_class=HTMLResponse)
+    def snapshot_detail(request: Request, snapshot_id: int) -> Response:
+        """Show one player's roster snapshot for a season.
+
+        Lists per-character data (power, synchro, LB/core, skill levels)
+        joined with the static Character table for canonical names.
+        Account-wide research is shown in the header.
+        """
+        from ..data.config import get_self_username
+        from ..data.seasons import season_start
+
+        self_name = (get_self_username() or "").casefold()
+        with get_session(engine) as session:
+            snap = session.get(RosterSnapshot, snapshot_id)
+            if snap is None:
+                raise HTTPException(404, f"snapshot {snapshot_id} not found")
+            entries = session.exec(
+                select(RosterSnapshotCharacter).where(
+                    RosterSnapshotCharacter.snapshot_id == snap.id
+                )
+            ).all()
+            char_ids = [e.character_id for e in entries]
+            chars = {
+                c.id: c for c in session.exec(
+                    select(Character).where(Character.id.in_(char_ids))
+                ).all()
+            }
+            rows = []
+            for e in entries:
+                ch = chars.get(e.character_id)
+                if ch is None:
+                    continue
+                d = e.data or {}
+                rows.append({
+                    "name": ch.name,
+                    "rarity": ch.rarity.value if ch.rarity else None,
+                    "element": ch.element.value if ch.element else None,
+                    "weapon_class": ch.weapon_class.value if ch.weapon_class else None,
+                    "burst_type": ch.burst_type.value if ch.burst_type else None,
+                    "manufacturer": ch.manufacturer.value if ch.manufacturer else None,
+                    "power": d.get("power"),
+                    "sync_level": d.get("sync_level"),
+                    "limit_break": d.get("limit_break"),
+                    "core": d.get("core"),
+                    "skill1_level": d.get("skill1_level"),
+                    "skill2_level": d.get("skill2_level"),
+                    "burst_skill_level": d.get("burst_skill_level"),
+                    "battle_cube_name": d.get("battle_cube_name"),
+                    "arena_cube_name": d.get("arena_cube_name"),
+                    "treasure_name": d.get("treasure_name"),
+                    "treasure_phase": d.get("treasure_phase"),
+                })
+            # Highest power first.
+            rows.sort(key=lambda r: r["power"] or 0, reverse=True)
+
+        is_self = bool(self_name) and (snap.player_username or "").casefold() == self_name
+        return templates.TemplateResponse(
+            request,
+            "snapshot_detail.html",
+            {
+                "snapshot": snap,
+                "rows": rows,
+                "is_self": is_self,
+                "season_start_date": season_start(snap.season_number).isoformat(),
             },
         )
 

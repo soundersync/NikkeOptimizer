@@ -1,0 +1,97 @@
+{% extends "_base.html" %}
+{% block title %}Beta Season {{ season_number }} — Players — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+.players-page h1 { margin: 0 0 4px; }
+.players-page .lead { color: #9ca3af; margin-bottom: 22px; font-size: 13px; }
+.player-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+}
+.player-card {
+    display: block;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 14px 16px;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.1s ease, background 0.1s ease;
+}
+.player-card:hover {
+    border-color: #3a4250;
+    background: #181b21;
+}
+.player-card .label {
+    font-size: 13px; color: #e5e7eb; font-weight: 600;
+    margin-bottom: 6px;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.format-pill {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.format-pill.player { background: #2a2419; color: #fbbf24; border: 1px solid #5f4a1e; }
+.format-pill.self   { background: #251b29; color: #c084fc; border: 1px solid #4a1e5f; }
+.player-card .meta {
+    font-size: 11px; color: #9ca3af;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.player-card .stats {
+    margin-top: 10px;
+    display: flex; gap: 14px;
+    font-size: 12px; color: #d1d5db;
+}
+.player-card .stats span strong { color: #fbbf24; }
+.empty {
+    color: #6b7280; padding: 40px 0; text-align: center;
+    border: 1px dashed #1f2228; border-radius: 8px;
+}
+</style>
+
+<div class="crumb"><a href="/promo">Tournaments</a> /</div>
+
+<div class="players-page">
+<h1>Beta Season {{ season_number }} · Players</h1>
+<p class="lead">{{ tiles|length }} roster snapshot{{ "" if tiles|length == 1 else "s" }} · season started {{ season_start }}</p>
+
+{% if not tiles %}
+<div class="empty">
+    No player snapshots yet for this season. Run
+    <code>nikkeoptimizer snapshot-roster --season {{ season_number }} --player &lt;name&gt;</code>.
+</div>
+{% else %}
+<div class="player-grid">
+    {% for p in tiles %}
+    <a class="player-card" href="/snapshots/{{ p.row.id }}">
+        <div class="label">
+            {{ p.row.player_username }}
+            <span class="format-pill {% if p.is_self %}self{% else %}player{% endif %}">
+                {% if p.is_self %}self{% else %}player{% endif %}
+            </span>
+        </div>
+        <div class="meta">
+            {{ p.row.captured_at.strftime("%Y-%m-%d") }}
+            {% if p.row.label %} · {{ p.row.label }}{% endif %}
+        </div>
+        <div class="stats">
+            <span><strong>{{ p.n_chars }}</strong> chars</span>
+            <span>Synchro <strong>{{ p.row.synchro_level }}</strong></span>
+        </div>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+</div>
+
+{% endblock %}

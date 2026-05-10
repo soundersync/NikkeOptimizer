@@ -2,7 +2,7 @@
 
 Walks ``<staging_root>/promotion_tournament_<TS>/`` folders, copies (or
 moves) the source PNGs into the canonical archive layout
-``<archive_root>/<YYYY-MM-DD>/promotion_tournament/group_*/round_*/match_*/``,
+``<archive_root>/beta_season_<N>/promotion_tournament/group_*/round_*/match_*/``,
 filters out coord-picker leftovers (``__crop.png`` / ``__masked.png``),
 then upserts ``PromoTournament`` / ``PromoGroup`` / ``PromoMatch`` /
 ``PromoMatchScreenshot`` rows.
@@ -30,12 +30,18 @@ from ..data.models import (
     PromoMatchScreenshot,
     PromoTournament,
 )
+from ..data.seasons import (
+    is_season_folder,
+    parse_season_number,
+    season_id,
+    season_start,
+)
 
 log = logging.getLogger(__name__)
 
 
 _STAGING_NAME_RE = re.compile(
-    r"^(promotion_tournament|champions_duel)_(\d{8})_(\d{6})$"
+    r"^(promotion_tournament|champions_duel|league)_(\d{8})_(\d{6})$"
 )
 _GROUP_NAME_RE = re.compile(r"^group_(\d+)$")
 # Match folders use ``match_1`` in promotion_tournament but ``match1`` in
@@ -58,21 +64,32 @@ _AGGREGATED_ROUNDS = {"top_16", "finals"}
 # top_32 in promo (per inventory), finals in duel.
 _RESULTS_ONLY_ROUNDS = {"top_32", "finals"}
 
+# League uses a single round label and per-player match folders
+# (player_1..player_4). Each player has a single ``loadout/`` (no
+# top/bottom split) plus a ``results/`` folder mirroring the promo
+# results format (overview.png + duel_*.png).
+_ROUND_LABEL_LEAGUE = "league"
+_PLAYER_DIR_RE = re.compile(r"^player_(\d+)$")
+
 # Format keys, mirrored in tournament_format(). Single source of truth.
 FORMAT_PROMO = "promotion_tournament"
 FORMAT_DUEL = "champions_duel"
+FORMAT_LEAGUE = "league"
 
 
 def tournament_format(storage_root: str) -> str:
-    """Return ``'promotion_tournament'`` or ``'champions_duel'`` for a path.
+    """Return the format key (``promotion_tournament`` /
+    ``champions_duel`` / ``league``) for a path.
 
     The format is encoded in the archive folder name (e.g.
-    ``<archive>/<date>/champions_duel/...``). Cheaper than a DB column
-    and impossible to drift from filesystem reality.
+    ``<archive>/beta_season_29/champions_duel/...``). Cheaper than a DB
+    column and impossible to drift from filesystem reality.
     """
     name = Path(storage_root).name
     if name.startswith(FORMAT_DUEL):
         return FORMAT_DUEL
+    if name.startswith(FORMAT_LEAGUE):
+        return FORMAT_LEAGUE
     return FORMAT_PROMO
 
 
@@ -138,7 +155,10 @@ def ingest_root(
     """
     staging_root = Path(staging_root).resolve()
     if archive_root is None:
-        archive_root = staging_root.parent / "captures"
+        # Match the web app's static mount: <repo>/captures/. Avoids
+        # the failure mode where dropping a staging folder under
+        # ~/Downloads/ would otherwise scatter the archive there.
+        archive_root = Path(__file__).resolve().parents[3] / "captures"
     archive_root = Path(archive_root).resolve()
     archive_root.mkdir(parents=True, exist_ok=True)
 
@@ -161,8 +181,17 @@ def ingest_root(
         captured_at = datetime.strptime(f"{ymd}{hms}", "%Y%m%d%H%M%S").replace(
             tzinfo=timezone.utc
         )
+        # Prefer the season identified by the parent staging folder
+        # (e.g. ``beta_season_29_2026-05-07``) when present; fall back
+        # to deriving from captured_at via the cadence table.
+        explicit_season = parse_season_number(src.parent.name)
+        season_slug = (
+            f"beta_season_{explicit_season}"
+            if explicit_season is not None
+            else season_id(captured_at.date())
+        )
         dest_dir = _resolve_archive_dir(
-            archive_root, captured_at.date().isoformat(), fmt=fmt, force=force
+            archive_root, season_slug, fmt=fmt, force=force
         )
         try:
             file_stats = _relocate(src, dest_dir, move=move)
@@ -210,8 +239,37 @@ def ingest_root(
     # ``force_ocr=True`` re-runs.
     if ocr:
         _run_ocr_pass(engine, stats=stats, force=force_ocr)
+        _run_league_leaderboard_pass(engine, stats=stats, force=force_ocr)
 
     return stats
+
+
+def _run_league_leaderboard_pass(engine, *, stats: IngestStats, force: bool) -> None:
+    """Walk every league tournament's archive folder and write a
+    ``leaderboard.json`` sidecar by OCR'ing the 12 pre-cropped per-rank
+    fields. Idempotent; ``force=True`` re-runs even when the sidecar
+    already exists.
+    """
+    from .league_leaderboard import process_league_archive
+
+    with Session(engine) as session:
+        league_tournaments = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_LEAGUE
+        ]
+    for t in league_tournaments:
+        league_root = Path(t.storage_root)
+        if not league_root.is_dir():
+            continue
+        try:
+            out = process_league_archive(league_root, force=force)
+        except Exception as exc:  # noqa: BLE001
+            stats.errors.append(
+                f"league leaderboard OCR failed for {league_root}: {exc}"
+            )
+            continue
+        if out is not None:
+            log.info("league leaderboard sidecar: %s", out)
 
 
 def _run_ocr_pass(engine, *, stats: IngestStats, force: bool) -> None:
@@ -405,39 +463,44 @@ def _discover_staging(staging_root: Path) -> list[Path]:
 
 
 def _discover_archived(archive_root: Path) -> list[Path]:
-    """Yield ``<archive>/<date>/<format>[_N]/`` folders for both formats."""
+    """Yield ``<archive>/beta_season_<N>/<format>[_N]/`` folders for
+    every supported format.
+    """
     if not archive_root.is_dir():
         return []
     out: list[Path] = []
-    for date_dir in sorted(archive_root.iterdir()):
-        if not date_dir.is_dir():
+    for season_dir in sorted(archive_root.iterdir()):
+        if not season_dir.is_dir() or not is_season_folder(season_dir.name):
             continue
-        for fmt_dir in sorted(date_dir.iterdir()):
+        for fmt_dir in sorted(season_dir.iterdir()):
             if not fmt_dir.is_dir():
                 continue
-            if fmt_dir.name.startswith(FORMAT_PROMO) or fmt_dir.name.startswith(
-                FORMAT_DUEL
+            if (
+                fmt_dir.name.startswith(FORMAT_PROMO)
+                or fmt_dir.name.startswith(FORMAT_DUEL)
+                or fmt_dir.name.startswith(FORMAT_LEAGUE)
             ):
                 out.append(fmt_dir)
     return out
 
 
 def _resolve_archive_dir(
-    archive_root: Path, date_iso: str, *, fmt: str, force: bool
+    archive_root: Path, season_slug: str, *, fmt: str, force: bool
 ) -> Path:
-    """Return ``<archive>/<date>/<fmt>[_N]/``.
+    """Return ``<archive>/<season_slug>/<fmt>[_N]/``.
 
-    ``fmt`` is the format key (``promotion_tournament`` or
-    ``champions_duel``). If the base folder already exists and ``force``
-    is set, a numbered suffix is appended (``_2``, ``_3``, …). Otherwise
-    the base path is returned regardless — relocation handles
-    same-source idempotency at the file level.
+    ``season_slug`` is the canonical season folder name (e.g.
+    ``beta_season_29``). ``fmt`` is the format key (``promotion_tournament``,
+    ``champions_duel``, or ``league``). If the base folder already
+    exists and ``force`` is set, a numbered suffix is appended (``_2``,
+    ``_3``, …). Otherwise the base path is returned regardless —
+    relocation handles same-source idempotency at the file level.
     """
-    base = archive_root / date_iso / fmt
+    base = archive_root / season_slug / fmt
     if not base.exists() or not force:
         return base
     n = 2
-    while (cand := archive_root / date_iso / f"{fmt}_{n}").exists():
+    while (cand := archive_root / season_slug / f"{fmt}_{n}").exists():
         n += 1
     return cand
 
@@ -480,13 +543,18 @@ def _relocate(src: Path, dest: Path, *, move: bool) -> _FileStats:
 def _iter_source_pngs(src_root: Path) -> Iterable[Path]:
     """Yield only the *original* .png files under src_root.
 
-    Skips ``__crop.png`` / ``__masked.png`` (coord-picker output) and
-    .DS_Store. Order is deterministic.
+    Skips coord-picker output (``__crop.png`` / ``__masked.png``) — the
+    project convention is that crop coordinates live as ``Region``
+    constants in code (see ``promo_tournament_regions.py``,
+    ``league_leaderboard_regions.py``, etc.), so coord-picker artifacts
+    in staging are reference material only and never enter the archive.
+    Order is deterministic.
     """
     for p in sorted(src_root.rglob("*.png")):
-        if _DERIVED_MARKER in p.stem:
-            continue
         if p.name.lower().startswith("."):
+            continue
+        stem = p.stem
+        if "__masked" in stem or "__crop" in stem:
             continue
         yield p
 
@@ -543,6 +611,35 @@ def _persist_tournament(
                 _persist_round(
                     session, tournament.id, group.id, label, round_dir, stats
                 )
+    elif fmt == FORMAT_LEAGUE:
+        # League — no groups, no head-to-head matches. 1..4 player
+        # folders each with their own loadout + results. Synthesize a
+        # single PromoGroup (group_no=1) so PromoMatch.group_id stays
+        # non-null; the leaderboard.png lives at ``storage_root`` and
+        # the 12 canonical crops are cut from it via the constants in
+        # ``league_leaderboard_regions``.
+        from .league_leaderboard import cut_leaderboard_crops
+
+        try:
+            cut_leaderboard_crops(storage_root)
+        except Exception as exc:  # noqa: BLE001
+            stats.errors.append(
+                f"leaderboard crop cut failed for {storage_root}: {exc}"
+            )
+
+        group = _upsert_group(session, tournament.id, 1, stats)
+        for player_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
+            m = _PLAYER_DIR_RE.match(player_dir.name)
+            if m is None:
+                continue
+            _persist_league_player(
+                session,
+                tournament_id=tournament.id,
+                group_id=group.id,
+                player_no=int(m.group(1)),
+                player_dir=player_dir,
+                stats=stats,
+            )
     else:
         # Champions Duel — no group level. Synthesize a single
         # PromoGroup (group_no=1) so PromoMatch.group_id stays
@@ -728,6 +825,58 @@ def _persist_results(
         )
 
 
+def _persist_league_player(
+    session: Session,
+    *,
+    tournament_id: int,
+    group_id: int,
+    player_no: int,
+    player_dir: Path,
+    stats: IngestStats,
+) -> None:
+    """Walk a league player folder.
+
+    Layout: ``player_<N>/loadout/round_<1..5>.png`` plus the standard
+    promo-style ``player_<N>/results/{overview.png, duel_<N>.png}``.
+
+    The match row uses ``round_label="league"`` and ``match_no=<player_no>``
+    so the natural-key uniqueness constraint in PromoMatch holds across
+    all 4 players.
+    """
+    loadout_dir = player_dir / "loadout"
+    results_dir = player_dir / "results"
+    has_loadouts = loadout_dir.is_dir()
+    match = _upsert_match(
+        session,
+        tournament_id=tournament_id,
+        group_id=group_id,
+        round_label=_ROUND_LABEL_LEAGUE,
+        match_no=player_no,
+        has_loadouts=has_loadouts,
+        stats=stats,
+    )
+    if has_loadouts:
+        for png in sorted(loadout_dir.glob("*.png")):
+            if _DERIVED_MARKER in png.stem:
+                continue
+            m = _PLAYER_FILE_RE.match(png.name)
+            if m is None:
+                continue
+            round_no = int(m.group(1))
+            _upsert_screenshot(
+                session,
+                match_id=match.id,
+                kind="player_loadout",
+                # League has no head-to-head sides; leave NULL.
+                side=None,
+                round_no=round_no,
+                file_path=png,
+                stats=stats,
+            )
+    if results_dir.is_dir():
+        _persist_results(session, match.id, results_dir, stats)
+
+
 def _upsert_screenshot(
     session: Session,
     *,
@@ -778,13 +927,14 @@ def _infer_captured_at_from_archive(archived: Path) -> datetime:
     """Recover a captured_at timestamp for an archive folder discovered
     without a corresponding staging folder.
 
-    The archive layout is ``<archive>/<YYYY-MM-DD>/promotion_tournament[_N]``.
-    We use 00:00 UTC on the date as the timestamp — there's no time info
-    in the archive path itself.
+    The archive layout is
+    ``<archive>/beta_season_<N>/<format>[_N]``. We use the season's
+    start date at 00:00 UTC as the timestamp — there's no per-day time
+    info in the archive path itself.
     """
-    date_str = archived.parent.name
-    try:
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-    except ValueError:
+    season_n = parse_season_number(archived.parent.name)
+    if season_n is None:
         return datetime.now(timezone.utc)
-    return d.replace(tzinfo=timezone.utc)
+    return datetime.combine(season_start(season_n), datetime.min.time()).replace(
+        tzinfo=timezone.utc
+    )

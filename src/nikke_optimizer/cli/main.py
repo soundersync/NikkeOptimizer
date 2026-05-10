@@ -87,7 +87,7 @@ def ingest_tournaments(
     archive: Optional[Path] = typer.Option(
         None,
         "--archive",
-        help="Archive root (defaults to <staging>/../captures).",
+        help="Archive root (defaults to <repo>/captures/, matching the web app's static mount).",
     ),
     move: bool = typer.Option(
         False, "--move",
@@ -107,14 +107,22 @@ def ingest_tournaments(
     ),
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),
 ) -> None:
-    """Relocate promotion_tournament_* folders into the archive and persist DB rows.
+    """Relocate tournament/league staging folders into the archive and persist DB rows.
 
-    Walks every ``promotion_tournament_<TS>`` folder under ``--staging``,
-    copies (or with ``--move``, moves) the source PNGs into
-    ``<archive>/<YYYY-MM-DD>/promotion_tournament/<group>/<round>/<match>/``,
-    skips coord-picker leftovers (``__crop.png`` / ``__masked.png``),
-    then upserts PromoTournament / PromoGroup / PromoMatch /
-    PromoMatchScreenshot rows. Idempotent — safe to re-run.
+    Walks every ``promotion_tournament_<TS>`` / ``champions_duel_<TS>`` /
+    ``league_<TS>`` folder under ``--staging``, copies (or with
+    ``--move``, moves) the source PNGs into
+    ``<archive>/beta_season_<N>/<format>/...``, skips coord-picker
+    leftovers (``__masked.png`` always; ``__crop.png`` except for
+    league leaderboard crops), then upserts PromoTournament /
+    PromoGroup / PromoMatch / PromoMatchScreenshot rows. Idempotent —
+    safe to re-run.
+
+    The season number comes from the parent staging folder when it
+    matches ``beta_season_<N>[_…]`` (e.g. dropping
+    ``beta_season_29_2026-05-07/`` as ``--staging``); otherwise it's
+    derived from the captured-at date via the cadence table in
+    ``data/seasons.py``.
     """
     from ..roster.promo_tournament_ingest import ingest_root
 
@@ -1446,6 +1454,94 @@ def import_csv_cmd(
     report = import_csv(csv_file, db_path=db)
     console.print(f"[bold green]Import complete[/]")
     console.print(report.to_dict())
+
+
+@app.command("snapshot-roster")
+def snapshot_roster_cmd(
+    season: int = typer.Option(..., "--season", help="Beta season number, e.g. 29."),
+    player: str = typer.Option(
+        ..., "--player",
+        help="Player username (your own name or another player's tag).",
+    ),
+    csv_file: Optional[Path] = typer.Option(
+        None, "--csv",
+        help="CSV path. Omit to snapshot your own current OwnedCharacter + AccountState.",
+        exists=True, dir_okay=False, readable=True,
+    ),
+    label: Optional[str] = typer.Option(None, "--label", help="Optional human-readable note."),
+    # Account-level overrides (required when --csv is given; CSVs have no account row).
+    synchro_level: Optional[int] = typer.Option(None, "--synchro-level"),
+    general: Optional[int] = typer.Option(None, "--research-general"),
+    attacker: Optional[int] = typer.Option(None, "--research-attacker"),
+    defender: Optional[int] = typer.Option(None, "--research-defender"),
+    supporter: Optional[int] = typer.Option(None, "--research-supporter"),
+    pilgrim: Optional[int] = typer.Option(None, "--research-pilgrim"),
+    elysion: Optional[int] = typer.Option(None, "--research-elysion"),
+    tetra: Optional[int] = typer.Option(None, "--research-tetra"),
+    missilis: Optional[int] = typer.Option(None, "--research-missilis"),
+    abnormal: Optional[int] = typer.Option(None, "--research-abnormal"),
+    db: Optional[Path] = typer.Option(None, help="Override DB path"),
+) -> None:
+    """Snapshot a player's roster against a beta season.
+
+    Without ``--csv``: snapshot the user's own roster from the live
+    OwnedCharacter table + AccountState singleton.
+
+    With ``--csv``: import another player's roster CSV (their drawn
+    character data) plus the account-level fields you pass via the
+    ``--research-*`` and ``--synchro-level`` options. Idempotent —
+    re-running for the same ``(season, player)`` replaces the prior
+    snapshot.
+    """
+    from ..roster.snapshot import import_snapshot_csv, make_self_snapshot
+
+    research_overrides = {
+        "synchro_level": synchro_level,
+        "general_research_level": general,
+        "class_attacker_level": attacker,
+        "class_defender_level": defender,
+        "class_supporter_level": supporter,
+        "mfr_pilgrim_level": pilgrim,
+        "mfr_elysion_level": elysion,
+        "mfr_tetra_level": tetra,
+        "mfr_missilis_level": missilis,
+        "mfr_abnormal_level": abnormal,
+    }
+    research_overrides = {k: v for k, v in research_overrides.items() if v is not None}
+
+    if csv_file is not None:
+        if not research_overrides:
+            console.print(
+                "[yellow]No --research-* / --synchro-level passed.[/] "
+                "Account-wide research will default to 0 in the snapshot."
+            )
+        report = import_snapshot_csv(
+            csv_path=csv_file,
+            season_number=season,
+            player_username=player,
+            research=research_overrides,
+            label=label,
+            db_path=db,
+        )
+    else:
+        if research_overrides:
+            console.print(
+                "[yellow]--research-* / --synchro-level options ignored.[/] "
+                "Self-snapshot pulls from the live AccountState singleton."
+            )
+        report = make_self_snapshot(
+            season_number=season,
+            player_username=player,
+            label=label,
+            db_path=db,
+        )
+
+    console.print(f"[bold green]Snapshot saved[/]: {report.to_dict()}")
+    if report.warnings:
+        for warning in report.warnings[:10]:
+            console.print(f"  · {warning}")
+        if len(report.warnings) > 10:
+            console.print(f"  · … (+{len(report.warnings) - 10} more)")
 
 
 @app.command()

@@ -735,3 +735,83 @@ class AccountState(SQLModel, table=True):
     mfr_missilis_level: int = Field(default=0)
     mfr_abnormal_level: int = Field(default=0)
     updated_at: datetime = Field(default_factory=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# Roster snapshots — per (beta season, player) frozen rosters
+# ---------------------------------------------------------------------------
+
+
+class RosterSnapshot(SQLModel, table=True):
+    """Frozen roster state for a player at the start of a beta season.
+
+    Rosters drift over a season as players invest in new characters,
+    but Champions Arena and similar season-locked formats use the
+    snapshot at season start. Capturing one snapshot per
+    (season_number, player_username) lets the simulator and tournament
+    viewer reconstruct any participant's lineup without depending on
+    the live ``OwnedCharacter`` table (which is the user's *current*
+    state and changes with each CSV import).
+
+    Mirrors ``AccountState``'s research/synchro fields directly so the
+    snapshot stands on its own — no FK back to a singleton that might
+    have changed since the snapshot was taken.
+    """
+
+    __tablename__ = "roster_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "season_number", "player_username",
+            name="uq_roster_snapshot_season_player",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    season_number: int = Field(index=True, description="Beta season number, e.g. 29")
+    player_username: str = Field(
+        index=True,
+        description="Player identifier — the user's own name or another player's tag",
+    )
+    captured_at: datetime = Field(default_factory=_utcnow)
+    source_csv_path: Optional[str] = Field(
+        default=None,
+        description="Original CSV path when imported from another player; NULL when sourced from the live OwnedCharacter table",
+    )
+    label: Optional[str] = Field(default=None, description="Optional human-readable note")
+
+    # Account-level state at snapshot time (mirrors AccountState).
+    synchro_level: int = Field(default=1)
+    general_research_level: int = Field(default=0)
+    class_attacker_level: int = Field(default=0)
+    class_defender_level: int = Field(default=0)
+    class_supporter_level: int = Field(default=0)
+    mfr_pilgrim_level: int = Field(default=0)
+    mfr_elysion_level: int = Field(default=0)
+    mfr_tetra_level: int = Field(default=0)
+    mfr_missilis_level: int = Field(default=0)
+    mfr_abnormal_level: int = Field(default=0)
+
+
+class RosterSnapshotCharacter(SQLModel, table=True):
+    """One row per character in a snapshot.
+
+    ``data`` is a JSON dict containing the full ``OwnedCharacter``
+    serialization (including ``ol_gear``, ``buff_summary``, treasure
+    fields, and cube-by-name pointers). Storing as JSON avoids
+    duplicating every OwnedCharacter column in the snapshot table —
+    the simulator deserializes this back into a transient
+    ``OwnedCharacter`` instance to build a ``CharacterView``.
+    """
+
+    __tablename__ = "roster_snapshot_character"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id", "character_id",
+            name="uq_roster_snapshot_character",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    snapshot_id: int = Field(foreign_key="roster_snapshot.id", index=True)
+    character_id: int = Field(foreign_key="character.id", index=True)
+    data: dict = Field(default_factory=dict, sa_column=Column(JSON))

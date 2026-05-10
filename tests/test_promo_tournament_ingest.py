@@ -93,8 +93,9 @@ def test_ingest_relocates_and_persists(staging_tree: tuple[Path, Path], tmp_path
     # top_16:           6
     assert stats.screenshots == 44
 
-    # Files were relocated into the canonical layout.
-    canon = archive / "2026-05-05" / "promotion_tournament"
+    # Files were relocated into the canonical layout (May 5 2026 →
+    # Beta Season 28).
+    canon = archive / "beta_season_28" / "promotion_tournament"
     assert (canon / "group_1" / "round_64" / "match_1" / "player_top" / "round_3.png").is_file()
     assert (canon / "group_1" / "top_16" / "results" / "duel_2.png").is_file()
     # Coord-picker leftovers were *not* copied.
@@ -178,7 +179,9 @@ def test_ingest_picks_up_archive_only(tmp_path: Path):
     """If a tournament was placed in the archive manually (no staging),
     the ingest still picks it up."""
     archive = tmp_path / "captures"
-    canon = archive / "2026-04-01" / "promotion_tournament"
+    # Manually placed under the canonical season-based layout
+    # (Apr 1 2026 → Beta Season 26).
+    canon = archive / "beta_season_26" / "promotion_tournament"
     base = canon / "group_3" / "round_64" / "match_1"
     _png(base / "results" / "overview.png")
     for n in range(1, 6):
@@ -245,8 +248,9 @@ def test_duel_ingest_relocates_and_persists(
     # total = 82
     assert stats.screenshots == 82
 
-    # Files relocated under captures/<date>/champions_duel/
-    canon = archive / "2026-05-05" / "champions_duel"
+    # Files relocated under captures/beta_season_<N>/champions_duel/
+    # (May 5 2026 → Beta Season 28).
+    canon = archive / "beta_season_28" / "champions_duel"
     assert (canon / "quarterfinals" / "match1" / "player_top" / "round_1.png").is_file()
     assert (canon / "finals" / "results" / "overview.png").is_file()
 
@@ -294,8 +298,8 @@ def test_duel_and_promo_coexist(
     assert stats.errors == []
     assert stats.tournaments == 2
 
-    assert (archive / "2026-05-05" / "promotion_tournament").is_dir()
-    assert (archive / "2026-05-05" / "champions_duel").is_dir()
+    assert (archive / "beta_season_28" / "promotion_tournament").is_dir()
+    assert (archive / "beta_season_28" / "champions_duel").is_dir()
 
 
 def test_force_creates_suffixed_dir_when_collision(tmp_path: Path):
@@ -314,6 +318,139 @@ def test_force_creates_suffixed_dir_when_collision(tmp_path: Path):
     db_path = tmp_path / "test.sqlite3"
     stats = ingest_root(staging, archive_root=archive, force=True, db_path=db_path, ocr=False)
     assert stats.errors == []
-    assert (archive / "2026-05-05" / "promotion_tournament").is_dir()
-    assert (archive / "2026-05-05" / "promotion_tournament_2").is_dir()
+    assert (archive / "beta_season_28" / "promotion_tournament").is_dir()
+    assert (archive / "beta_season_28" / "promotion_tournament_2").is_dir()
     assert stats.tournaments == 2
+
+
+@pytest.fixture
+def league_staging_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a league staging tournament with 4 players + leaderboard.
+
+    Layout mirrors the user's coord-picker output: top-level
+    ``leaderboard.png`` + 12 ``leaderboard__<bbox>__crop.png`` files
+    (legitimate OCR inputs, must be archived) + 12 ``__masked.png``
+    files (visualization-only, must be skipped). Each ``player_<N>/``
+    has its own ``loadout/`` (5 rounds) and ``results/`` (overview +
+    5 duels).
+    """
+    season_parent = tmp_path / "beta_season_29_2026-05-09"
+    archive = tmp_path / "captures"
+    src = season_parent / "league_20260509_202308"
+
+    # Master image: ingest cuts canonical crops from it via the
+    # LEADERBOARD_REGIONS constants. Must be large enough for every
+    # region's bbox (max y ≈ 1634).
+    src.mkdir(parents=True, exist_ok=True)
+    PIL.new("RGB", (1080, 2400), (10, 10, 10)).save(src / "leaderboard.png")
+    # Coord-picker leftovers — the user produces these to derive the
+    # constants; the ingest must filter them out (never archive).
+    for bbox in (
+        "438_778_684_823", "442_852_729_898", "311_848_379_876",
+        "438_1010_686_1055", "443_1080_725_1131", "312_1099_379_1128",
+        "439_1259_687_1303", "442_1333_724_1385", "312_1350_379_1377",
+        "437_1508_700_1556", "443_1584_726_1633", "312_1601_380_1630",
+    ):
+        _png(src / f"leaderboard__{bbox}__crop.png")
+        _png(src / f"leaderboard__{bbox}__masked.png")
+
+    # 4 players, each with loadout + results.
+    for n in range(1, 5):
+        for r in range(1, 6):
+            _png(src / f"player_{n}" / "loadout" / f"round_{r}.png")
+        _png(src / f"player_{n}" / "results" / "overview.png")
+        for r in range(1, 6):
+            _png(src / f"player_{n}" / "results" / f"duel_{r}.png")
+
+    return season_parent, archive
+
+
+def test_league_ingest_relocates_and_persists(
+    league_staging_tree: tuple[Path, Path], tmp_path: Path
+):
+    """Relocate league_<TS>/ → captures/beta_season_<N>/league/.
+
+    The season number is taken from the parent staging folder
+    (``beta_season_29_2026-05-09``) instead of derived from captured_at,
+    so the archive lives under ``beta_season_29`` even though the
+    timestamp's date (May 9) also resolves there via the cadence table.
+    """
+    staging, archive = league_staging_tree
+    db_path = tmp_path / "test.sqlite3"
+
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
+    assert stats.errors == [], stats.errors
+    assert stats.tournaments == 1
+    assert stats.groups == 1
+    # 4 player_N matches.
+    assert stats.matches == 4
+    # 5 loadouts + 1 overview + 5 duels per player = 11 × 4 = 44.
+    assert stats.screenshots == 44
+
+    # Files relocated under captures/beta_season_29/league/.
+    canon = archive / "beta_season_29" / "league"
+    assert canon.is_dir()
+    assert (canon / "leaderboard.png").is_file()
+    # Canonical crops produced by cut_leaderboard_crops from the
+    # LEADERBOARD_REGIONS constants — slug-named, never numeric-bbox.
+    crops = sorted(p.name for p in canon.glob("leaderboard__*__crop.png"))
+    assert len(crops) == 12
+    assert all("rank" in name for name in crops), crops
+    # The user's coord-picker artifacts must NOT have made it across.
+    assert not list(canon.glob("*__masked.png"))
+    numeric_bbox_crops = [
+        p for p in canon.glob("leaderboard__*__crop.png")
+        if not any(f"rank{n}_" in p.name for n in (1, 2, 3, 4))
+    ]
+    assert numeric_bbox_crops == []
+    # Per-player files are in place.
+    assert (canon / "player_1" / "loadout" / "round_1.png").is_file()
+    assert (canon / "player_4" / "results" / "overview.png").is_file()
+
+    # DB rows.
+    engine = make_engine(db_path)
+    init_db(engine)
+    with Session(engine) as session:
+        t = session.exec(select(PromoTournament)).first()
+        assert t is not None
+        assert "league" in t.storage_root
+        assert "beta_season_29" in t.storage_root
+
+        matches = session.exec(select(PromoMatch)).all()
+        match_nos = sorted(m.match_no for m in matches)
+        assert match_nos == [1, 2, 3, 4]
+        assert all(m.round_label == "league" for m in matches)
+        assert all(m.has_loadouts for m in matches)
+
+        # Loadouts have side=NULL for league (no head-to-head).
+        loadouts = [
+            s for s in session.exec(select(PromoMatchScreenshot)).all()
+            if s.kind == "player_loadout"
+        ]
+        assert len(loadouts) == 20
+        assert all(s.side is None for s in loadouts)
+
+
+def test_league_archive_only_inherits_season_from_path(tmp_path: Path):
+    """A league archive folder placed manually still gets persisted with
+    the right season — captured_at is inferred from the season's start
+    date."""
+    archive = tmp_path / "captures"
+    canon = archive / "beta_season_28" / "league"
+    _png(canon / "leaderboard.png")
+    _png(canon / "player_1" / "loadout" / "round_1.png")
+    _png(canon / "player_1" / "results" / "overview.png")
+
+    db_path = tmp_path / "test.sqlite3"
+    stats = ingest_root(
+        tmp_path / "no_staging", archive_root=archive, db_path=db_path, ocr=False
+    )
+    assert stats.errors == []
+    assert stats.tournaments == 1
+    assert stats.matches == 1
+    engine = make_engine(db_path)
+    init_db(engine)
+    with Session(engine) as session:
+        t = session.exec(select(PromoTournament)).first()
+        # April 23 2026 is the start of Beta Season 28.
+        assert t.capture_date.isoformat() == "2026-04-23"

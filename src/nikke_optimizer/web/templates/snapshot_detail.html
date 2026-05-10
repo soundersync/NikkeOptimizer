@@ -1,0 +1,220 @@
+{% extends "_base.html" %}
+{% block title %}{{ snapshot.player_username }} — Beta Season {{ snapshot.season_number }}{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+.tour-header { margin-bottom: 22px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.tour-header h1 { margin: 0 0 4px; }
+.tour-header .meta { font-size: 13px; color: #9ca3af; }
+.tour-header .meta code {
+    background: #14161b; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+}
+.format-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.format-pill.player { background: #2a2419; color: #fbbf24; border: 1px solid #5f4a1e; }
+.format-pill.self   { background: #251b29; color: #c084fc; border: 1px solid #4a1e5f; }
+
+.research-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 8px;
+    margin-bottom: 22px;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 14px 16px;
+}
+.research-grid .cell {
+    font-size: 12px;
+}
+.research-grid .cell .label {
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 10px;
+    margin-bottom: 2px;
+}
+.research-grid .cell .value {
+    color: #e5e7eb;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 14px;
+    font-weight: 500;
+}
+.research-grid .cell .value.zero { color: #4b5158; }
+
+.section-h {
+    margin: 18px 0 8px;
+    font-size: 13px;
+    color: #9ca3af;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.roster-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 12px;
+}
+.roster-table th, .roster-table td {
+    padding: 7px 10px;
+    text-align: left;
+    border-bottom: 1px solid #1f2228;
+}
+.roster-table tr:last-child td { border-bottom: none; }
+.roster-table th {
+    font-size: 10px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    background: #181b21;
+}
+.roster-table td.name { color: #e5e7eb; font-weight: 500; }
+.roster-table td.num {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #d1d5db;
+    text-align: right;
+}
+.roster-table td.power { color: #f87171; font-weight: 600; }
+.roster-table td.dim { color: #6b7280; }
+.roster-table td.tag {
+    color: #93c5fd;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.roster-table tr:hover { background: #181b21; }
+.empty { color: #6b7280; padding: 30px; text-align: center; border: 1px dashed #1f2228; border-radius: 6px; }
+</style>
+
+<div class="crumb"><a href="/promo">Tournaments</a> /</div>
+<div class="tour-header">
+    <div>
+        <h1>
+            {{ snapshot.player_username }}
+            <span style="color:#9ca3af;font-weight:400;font-size:18px;">— Beta Season {{ snapshot.season_number }}</span>
+        </h1>
+        <div class="meta">
+            Snapshot taken <code>{{ snapshot.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
+            · Season started {{ season_start_date }}
+            {% if snapshot.label %} · <em>{{ snapshot.label }}</em>{% endif %}
+            {% if snapshot.source_csv_path %} · imported from CSV{% else %} · from live OwnedCharacter{% endif %}
+        </div>
+    </div>
+    <span class="format-pill {% if is_self %}self{% else %}player{% endif %}">
+        {% if is_self %}self{% else %}player{% endif %}
+    </span>
+</div>
+
+<h3 class="section-h">Account research</h3>
+<div class="research-grid">
+    <div class="cell">
+        <div class="label">Synchro Level</div>
+        <div class="value {% if not snapshot.synchro_level or snapshot.synchro_level == 1 %}zero{% endif %}">{{ snapshot.synchro_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">General Research</div>
+        <div class="value {% if not snapshot.general_research_level %}zero{% endif %}">{{ snapshot.general_research_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Class · Attacker</div>
+        <div class="value {% if not snapshot.class_attacker_level %}zero{% endif %}">{{ snapshot.class_attacker_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Class · Defender</div>
+        <div class="value {% if not snapshot.class_defender_level %}zero{% endif %}">{{ snapshot.class_defender_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Class · Supporter</div>
+        <div class="value {% if not snapshot.class_supporter_level %}zero{% endif %}">{{ snapshot.class_supporter_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Mfr · Elysion</div>
+        <div class="value {% if not snapshot.mfr_elysion_level %}zero{% endif %}">{{ snapshot.mfr_elysion_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Mfr · Tetra</div>
+        <div class="value {% if not snapshot.mfr_tetra_level %}zero{% endif %}">{{ snapshot.mfr_tetra_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Mfr · Missilis</div>
+        <div class="value {% if not snapshot.mfr_missilis_level %}zero{% endif %}">{{ snapshot.mfr_missilis_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Mfr · Pilgrim</div>
+        <div class="value {% if not snapshot.mfr_pilgrim_level %}zero{% endif %}">{{ snapshot.mfr_pilgrim_level }}</div>
+    </div>
+    <div class="cell">
+        <div class="label">Mfr · Abnormal</div>
+        <div class="value {% if not snapshot.mfr_abnormal_level %}zero{% endif %}">{{ snapshot.mfr_abnormal_level }}</div>
+    </div>
+</div>
+
+<h3 class="section-h">Roster <span style="color:#6b7280;font-weight:400;text-transform:none;letter-spacing:0;">· {{ rows|length }} character{{ "" if rows|length == 1 else "s" }}</span></h3>
+{% if rows %}
+<table class="roster-table">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Rarity</th>
+            <th>Element</th>
+            <th>Class</th>
+            <th>Burst</th>
+            <th>Mfr</th>
+            <th style="text-align:right">Power</th>
+            <th style="text-align:right">Sync</th>
+            <th style="text-align:right">LB</th>
+            <th style="text-align:right">Core</th>
+            <th style="text-align:right">S1</th>
+            <th style="text-align:right">S2</th>
+            <th style="text-align:right">B</th>
+            <th>Battle Cube</th>
+            <th>Arena Cube</th>
+            <th>Treasure / Doll</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+        <tr>
+            <td class="name"><a href="/characters/{{ r.name }}" style="color:inherit;text-decoration:none;">{{ r.name }}</a></td>
+            <td class="tag">{{ r.rarity or "—" }}</td>
+            <td class="tag">{{ r.element or "—" }}</td>
+            <td class="tag">{{ r.weapon_class or "—" }}</td>
+            <td class="tag">{{ r.burst_type or "—" }}</td>
+            <td class="tag">{{ r.manufacturer or "—" }}</td>
+            <td class="num power">{% if r.power %}{{ "{:,}".format(r.power) }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.sync_level is not none %}{{ r.sync_level }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.limit_break is not none %}{{ r.limit_break }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.core is not none %}{{ r.core }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.skill1_level is not none %}{{ r.skill1_level }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.skill2_level is not none %}{{ r.skill2_level }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.burst_skill_level is not none %}{{ r.burst_skill_level }}{% else %}—{% endif %}</td>
+            <td class="dim">{{ r.battle_cube_name or "—" }}</td>
+            <td class="dim">{{ r.arena_cube_name or "—" }}</td>
+            <td class="dim">
+                {% if r.treasure_name %}{{ r.treasure_name }}{% if r.treasure_phase is not none %} · {{ r.treasure_phase }}{% endif %}{% else %}—{% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty">No characters in this snapshot.</div>
+{% endif %}
+
+{% endblock %}

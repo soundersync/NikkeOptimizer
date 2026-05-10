@@ -585,6 +585,55 @@ def dry_run_diff(
     return report
 
 
+def build_owned_from_row(
+    session: Session,
+    row: dict,
+    *,
+    char: Character,
+    v2: bool,
+    report: "ImportReport",
+) -> OwnedCharacter:
+    """Build a transient ``OwnedCharacter`` from one parsed CSV row.
+
+    Upserts cube rows into the live DB (cubes are shared across
+    players, not per-snapshot) and attaches ``ol_gear`` /
+    ``buff_summary`` to the returned instance, but does **not** add
+    it to the session. Callers decide whether to persist the result
+    as a live row (``import_csv``) or serialize it for a snapshot
+    (``snapshot_from_csv``).
+
+    Doll/Treasure parsing handles both the legacy ``Treasure *``
+    columns and the 2026-04-29+ ``Doll/Treasure *`` columns.
+    """
+    battle_cube = _upsert_cube(session, row.get("Battle Cube"), row.get("Battle Cube Stats"))
+    arena_cube = _upsert_cube(session, row.get("Arena Cube"), row.get("Arena Cube Stats"))
+    if battle_cube and battle_cube.id:
+        report.cubes_upserted += 1
+    if arena_cube and arena_cube.id:
+        report.cubes_upserted += 1
+
+    treasure_skill_raw = row.get("Doll/Treasure Skill Levels") or ""
+    treasure_skill_levels: list[int] = []
+    for tok in treasure_skill_raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            treasure_skill_levels.append(int(tok))
+        except ValueError:
+            report.warn(f"unparseable Doll/Treasure skill level: {tok!r}")
+
+    kwargs = _build_owned_kwargs(row, char_id=char.id, v2=v2)
+    kwargs["battle_cube_id"] = battle_cube.id if battle_cube else None
+    kwargs["arena_cube_id"] = arena_cube.id if arena_cube else None
+    kwargs["costumes"] = parse_costumes(row.get("Costumes"))
+    kwargs["raw_ocr"] = {"csv_row": row}
+    owned = OwnedCharacter(**kwargs)
+    owned.ol_gear = [_build_gear(row, i, report=report) for i in range(1, 5)]
+    owned.buff_summary = _build_buff_summary(row.get("Equipment Effects Summary"))
+    return owned
+
+
 def import_csv(
     csv_path: Path,
     *,
@@ -637,49 +686,9 @@ def import_csv(
                         delete(OwnedCharacter).where(OwnedCharacter.character_id == char.id)
                     )
 
-                battle_cube = _upsert_cube(session, row.get("Battle Cube"), row.get("Battle Cube Stats"))
-                arena_cube = _upsert_cube(session, row.get("Arena Cube"), row.get("Arena Cube Stats"))
-                if battle_cube and battle_cube.id:
-                    report.cubes_upserted += 1
-                if arena_cube and arena_cube.id:
-                    report.cubes_upserted += 1
-
-                # Slice #134 — read 2026-04-29+ Doll/Treasure columns,
-                # falling back to the legacy "Treasure ..." columns when
-                # missing. The new format adds rarity (SSR=Treasure,
-                # SR/R=Doll) and skill levels.
-                treasure_name_raw = (
-                    (row.get("Doll/Treasure Name") or row.get("Treasure Name") or "")
-                    .strip() or None
+                owned = build_owned_from_row(
+                    session, row, char=char, v2=v2, report=report,
                 )
-                treasure_phase_raw = (
-                    row.get("Doll/Treasure Phase") or row.get("Treasure Phase")
-                )
-                treasure_stats_raw = (
-                    row.get("Doll/Treasure Stats") or row.get("Treasure Stats")
-                )
-                treasure_rarity_raw = (
-                    (row.get("Doll/Treasure Rarity") or "").strip() or None
-                )
-                treasure_skill_raw = row.get("Doll/Treasure Skill Levels") or ""
-                treasure_stats = parse_stats_block(treasure_stats_raw)
-                treasure_skill_levels: list[int] = []
-                for tok in treasure_skill_raw.split(","):
-                    tok = tok.strip()
-                    if not tok:
-                        continue
-                    try:
-                        treasure_skill_levels.append(int(tok))
-                    except ValueError:
-                        report.warn(f"unparseable Doll/Treasure skill level: {tok!r}")
-                kwargs = _build_owned_kwargs(row, char_id=char.id, v2=v2)
-                kwargs["battle_cube_id"] = battle_cube.id if battle_cube else None
-                kwargs["arena_cube_id"] = arena_cube.id if arena_cube else None
-                kwargs["costumes"] = parse_costumes(row.get("Costumes"))
-                kwargs["raw_ocr"] = {"csv_row": row}
-                owned = OwnedCharacter(**kwargs)
-                owned.ol_gear = [_build_gear(row, i, report=report) for i in range(1, 5)]
-                owned.buff_summary = _build_buff_summary(row.get("Equipment Effects Summary"))
                 session.add(owned)
             session.commit()
 

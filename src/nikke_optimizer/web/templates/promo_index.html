@@ -50,6 +50,20 @@
 }
 .format-pill.promo { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
 .format-pill.duel  { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
+.format-pill.league { background: #1c2419; color: #86efac; border: 1px solid #1e5f30; }
+.format-pill.player { background: #2a2419; color: #fbbf24; border: 1px solid #5f4a1e; }
+.format-pill.self   { background: #251b29; color: #c084fc; border: 1px solid #4a1e5f; }
+
+/* Section heading inside a season block */
+.season-sub-h {
+    margin: 18px 0 8px;
+    font-size: 12px;
+    color: #9ca3af;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.season-sub-h .count { color: #6b7280; font-weight: 400; }
 .tournament-card .meta {
     font-size: 11px; color: #9ca3af;
     font-family: "SF Mono", Menlo, monospace;
@@ -68,34 +82,54 @@
 
 <div class="promo-page">
 <h1>Tournaments</h1>
-<p class="lead">{{ n_tournaments }} captured · grouped by date · drill down to matches and per-screenshot crops.</p>
+<p class="lead">{{ n_tournaments }} captured · {{ n_snapshots }} player snapshot{{ "" if n_snapshots == 1 else "s" }} · grouped by beta season · drill down to matches and per-screenshot crops.</p>
 
-{% if not by_date %}
+{% if not by_season %}
 <div class="empty">
     No tournaments captured yet. Run <code>nikkeoptimizer ingest-tournaments</code>.
 </div>
 {% else %}
-{% for date_str, items in by_date.items() %}
+{% for season_n, bucket in by_season.items() %}
 <section class="date-section">
-    <h2>{{ date_str }}</h2>
+    <h2>Beta Season {{ season_n }} <span style="color:#6b7280;font-weight:400;font-size:13px;">· started {{ bucket.start }}</span></h2>
+
     <div class="tournament-grid">
-        {% for item in items %}
+        {% for item in bucket["items"] %}
         <a class="tournament-card" href="/promo/{{ item.row.id }}">
             <div class="label">
-                {% if item.format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %}
-                <span class="format-pill {% if item.format == 'champions_duel' %}duel{% else %}promo{% endif %}">
-                    {% if item.format == "champions_duel" %}duel{% else %}promo{% endif %}
+                {% if item.format == "champions_duel" %}Champions Duel
+                {% elif item.format == "league" %}League
+                {% else %}Promotion Tournament{% endif %}
+                <span class="format-pill {% if item.format == 'champions_duel' %}duel{% elif item.format == 'league' %}league{% else %}promo{% endif %}">
+                    {% if item.format == "champions_duel" %}duel
+                    {% elif item.format == "league" %}league
+                    {% else %}promo{% endif %}
                 </span>
             </div>
-            <div class="meta">{{ item.row.captured_at.strftime("%H:%M:%S") }} UTC</div>
+            <div class="meta">{{ item.row.capture_date.isoformat() }} · {{ item.row.captured_at.strftime("%H:%M:%S") }} UTC</div>
             <div class="stats">
-                {% if item.format != "champions_duel" %}
+                {% if item.format == "promotion_tournament" %}
                 <span><strong>{{ item.n_groups }}</strong> groups</span>
                 {% endif %}
-                <span><strong>{{ item.n_matches }}</strong> matches</span>
+                <span><strong>{{ item.n_matches }}</strong> {% if item.format == "league" %}players{% else %}matches{% endif %}</span>
             </div>
         </a>
         {% endfor %}
+
+        {% if bucket["n_players"] %}
+        <a class="tournament-card" href="/promo/players/{{ season_n }}">
+            <div class="label">
+                Players
+                <span class="format-pill {% if bucket['has_self'] %}self{% else %}player{% endif %}">
+                    {% if bucket['has_self'] %}+ you{% else %}player{% endif %}
+                </span>
+            </div>
+            <div class="meta">{{ bucket["n_players"] }} roster snapshot{{ "" if bucket["n_players"] == 1 else "s" }}</div>
+            <div class="stats">
+                <span><strong>{{ bucket["n_players"] }}</strong> player{{ "" if bucket["n_players"] == 1 else "s" }}</span>
+            </div>
+        </a>
+        {% endif %}
     </div>
 </section>
 {% endfor %}
