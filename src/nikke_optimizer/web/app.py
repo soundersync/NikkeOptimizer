@@ -2029,6 +2029,7 @@ def create_app(
         *,
         current_overview_id: Optional[int] = None,
         current_side: Optional[str] = None,
+        tournament_id: Optional[int] = None,
     ) -> Optional[dict]:
         """Find a representative loadout for ``player_name``.
 
@@ -2046,6 +2047,11 @@ def create_app(
           crop is the same player. Use that match's loadouts as the
           canonical source. Handles the case where the current match's
           overview name OCR returned nothing.
+
+        ``tournament_id`` scopes both tiers to a single tournament.
+        Every format (league, promotion, duel) uploads its own loadouts
+        with the match data, so canonical fallback should never reach
+        across tournaments / seasons.
         """
         from rapidfuzz import fuzz
 
@@ -2061,7 +2067,10 @@ def create_app(
             query_ov = session.get(PromoMatchScreenshot, current_overview_id)
             if query_ov is not None:
                 hash_match = find_canonical_match_via_image(
-                    session, query_ov, current_side
+                    session,
+                    query_ov,
+                    current_side,
+                    tournament_id=tournament_id,
                 )
                 if hash_match is not None:
                     source = loadout_for_matched_overview(
@@ -2084,14 +2093,19 @@ def create_app(
             return None
 
         # Find player_name extractions on player_loadout screenshots.
-        rows = session.exec(
+        ocr_stmt = (
             select(PromoExtractedField, PromoMatchScreenshot)
             .where(
                 PromoExtractedField.region_slug == "player_name",
                 PromoExtractedField.screenshot_id == PromoMatchScreenshot.id,
                 PromoMatchScreenshot.kind == "player_loadout",
             )
-        ).all()
+        )
+        if tournament_id is not None:
+            ocr_stmt = ocr_stmt.join(
+                PromoMatch, PromoMatch.id == PromoMatchScreenshot.match_id
+            ).where(PromoMatch.tournament_id == tournament_id)
+        rows = session.exec(ocr_stmt).all()
         if not rows:
             return None
         # Tier 1: exact match.
@@ -2699,13 +2713,16 @@ def create_app(
             buckets: dict[str, list] = {
                 "player_top": [],
                 "player_bottom": [],
+                "player": [],
                 "results_overview": [],
                 "results_duel": [],
             }
             for s in shots:
                 key = s.kind
                 if s.kind == "player_loadout":
-                    key = f"player_{s.side}"
+                    # League uploads one player per match (side=NULL);
+                    # promo + duel are head-to-head (side="top"/"bottom").
+                    key = f"player_{s.side}" if s.side else "player"
                 if key in buckets:
                     buckets[key].append({
                         "row": s,
@@ -2734,12 +2751,14 @@ def create_app(
                         derived_loadouts["left"]["name"],
                         current_overview_id=overview_id,
                         current_side="left",
+                        tournament_id=match.tournament_id,
                     ),
                     "right": _promo_canonical_loadout(
                         session,
                         derived_loadouts["right"]["name"],
                         current_overview_id=overview_id,
                         current_side="right",
+                        tournament_id=match.tournament_id,
                     ),
                 }
         return templates.TemplateResponse(

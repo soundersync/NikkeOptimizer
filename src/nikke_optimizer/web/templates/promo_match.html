@@ -467,6 +467,21 @@ h1 { margin: 0 0 4px; }
 {% endif %}
 
 {% if match.has_loadouts %}
+{% if format == "league" %}
+<section class="section">
+    <h2>Player — Loadouts <span class="count">{{ buckets.player|length }} rounds</span></h2>
+    {% if buckets.player %}
+    <div class="shot-grid cols-5">
+        {% for s in buckets.player %}
+        <a class="shot-card" href="/promo/screenshots/{{ s.row.id }}">
+            <div class="shot-thumb">{% if s.url %}<img src="{{ s.url }}" alt="round {{ s.row.round_no }}">{% endif %}</div>
+            <div class="label">Round {{ s.row.round_no }}</div>
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}<div class="empty-section">No loadouts captured.</div>{% endif %}
+</section>
+{% else %}
 <section class="section">
     <h2>Player Top — Loadouts <span class="count">{{ buckets.player_top|length }} rounds</span></h2>
     {% if buckets.player_top %}
@@ -494,6 +509,7 @@ h1 { margin: 0 0 4px; }
     </div>
     {% else %}<div class="empty-section">No loadouts captured.</div>{% endif %}
 </section>
+{% endif %}
 {% endif %}
 
 <section class="section">

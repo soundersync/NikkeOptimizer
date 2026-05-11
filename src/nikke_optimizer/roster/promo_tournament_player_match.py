@@ -197,6 +197,7 @@ def find_canonical_match_via_image(
     *,
     threshold_bits: int = _MATCH_THRESHOLD_BITS,
     excluded_match_ids: Optional[set[int]] = None,
+    tournament_id: Optional[int] = None,
 ) -> Optional[HashMatch]:
     """Find another overview — preferably one with loadouts — whose name
     crop is the same player as ``query_overview``'s ``query_side`` crop.
@@ -210,6 +211,11 @@ def find_canonical_match_via_image(
 
     ``excluded_match_ids`` lets the caller skip matches it doesn't
     want canonical loadouts from (e.g. its own match).
+
+    ``tournament_id`` scopes the candidate overviews to a single
+    tournament — every format (league, promotion, duel) uploads its
+    own loadouts, so cross-tournament canonical fallback is never
+    wanted.
     """
     if query_side not in ("left", "right"):
         raise ValueError(f"query_side must be 'left' or 'right', got {query_side!r}")
@@ -222,11 +228,14 @@ def find_canonical_match_via_image(
     excluded_match_ids = set(excluded_match_ids or ())
     excluded_match_ids.add(query_overview.match_id)
 
-    overviews = session.exec(
-        select(PromoMatchScreenshot).where(
-            PromoMatchScreenshot.kind == "results_overview"
-        )
-    ).all()
+    overview_stmt = select(PromoMatchScreenshot).where(
+        PromoMatchScreenshot.kind == "results_overview"
+    )
+    if tournament_id is not None:
+        overview_stmt = overview_stmt.join(
+            PromoMatch, PromoMatch.id == PromoMatchScreenshot.match_id
+        ).where(PromoMatch.tournament_id == tournament_id)
+    overviews = session.exec(overview_stmt).all()
 
     # Pre-fetch has_loadouts per match so we can prefer those.
     match_ids = {ov.match_id for ov in overviews}
