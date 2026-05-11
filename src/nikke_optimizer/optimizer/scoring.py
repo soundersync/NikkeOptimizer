@@ -570,12 +570,141 @@ SYNERGY_PAIRS: dict[frozenset[str], float] = {
     frozenset(("Label", "Centi")): 3.0,
 
     # ------------------------------------------------------------------
+    # Round 10 encodings (Signal / Snow White: Innocent Days / Soline /
+    # Sora / Sugar / Velvet / Vesti / Viper (Treasure) / Yuni / Zwei /
+    # Zwei (Treasure)). 2026-05-10.
+    # ------------------------------------------------------------------
+    frozenset(("Signal", "Crown")): 3.0,
+    frozenset(("Signal", "Liter")): 3.0,
+    frozenset(("Snow White: Innocent Days", "Crown")): 4.0,
+    frozenset(("Snow White: Innocent Days", "Liter")): 4.0,
+    frozenset(("Snow White: Innocent Days", "Blanc")): 3.0,
+    frozenset(("Soline", "Helm")): 4.0,  # Max-HP-gated crit; shield support
+    frozenset(("Soline", "Centi")): 3.0,
+    frozenset(("Soline", "Crown")): 3.0,
+    frozenset(("Sora", "Crown")): 3.0,
+    frozenset(("Sora", "Liter")): 3.0,
+    frozenset(("Sugar", "Crown")): 3.0,
+    frozenset(("Sugar", "Modernia")): 3.0,  # SG-ally ammo buff
+    frozenset(("Velvet", "Crown")): 3.0,
+    frozenset(("Velvet", "Liter")): 3.0,
+    frozenset(("Vesti", "Crown")): 3.0,
+    frozenset(("Vesti", "Liter")): 3.0,
+    frozenset(("Viper (Treasure)", "Crown")): 4.0,
+    frozenset(("Viper (Treasure)", "Liter")): 3.0,
+    frozenset(("Yuni", "Crown")): 3.0,
+    frozenset(("Yuni", "Liter")): 3.0,
+    frozenset(("Zwei", "Snow White: Heavy Arms")): 3.0,  # Pierce comp
+    frozenset(("Zwei", "Liter")): 3.0,
+    frozenset(("Zwei (Treasure)", "Snow White: Heavy Arms")): 4.0,
+    frozenset(("Zwei (Treasure)", "Crown")): 3.0,
+    frozenset(("Zwei (Treasure)", "Modernia")): 3.0,
+    # Skin-variant uniqueness placeholders (0 bonus, document constraints):
+    frozenset(("Vesti", "Vesti: Tactical Upgrade")): 0.0,
+    frozenset(("Viper", "Viper (Treasure)")): 0.0,
+    frozenset(("Zwei", "Zwei (Treasure)")): 0.0,
+    frozenset(("Snow White", "Snow White: Heavy Arms")): 0.0,
+    frozenset(("Snow White", "Snow White: Innocent Days")): 0.0,
+    frozenset(("Snow White: Heavy Arms", "Snow White: Innocent Days")): 0.0,
+    frozenset(("Soline", "Soline: Frost Ticket")): 0.0,
+
+    # ------------------------------------------------------------------
+    # Round 11 encodings (SR / R completion set). 2026-05-10.
+    # SR: Delta, Ether, Himeno, Kurumi, Lily, Mica, N102, Neon, Neve,
+    # Ram, Sakura Suzuhara. R: Product 08/12/23, Soldier EG/FA,
+    # iDoll Flower/Ocean/Sun. Bonuses are minimal (3.0) since these are
+    # low-PvP-relevance Recruits / niche SRs encoded mostly for coverage.
+    # ------------------------------------------------------------------
+    frozenset(("Delta", "Crown")): 3.0,
+    frozenset(("Delta", "Helm")): 3.0,
+    frozenset(("Ether", "Crown")): 3.0,
+    frozenset(("Ether", "Helm")): 3.0,
+    frozenset(("Himeno", "Maxwell")): 3.0,  # SR-only buff filter
+    frozenset(("Himeno", "Snow White: Heavy Arms")): 3.0,
+    frozenset(("Kurumi", "Crown")): 3.0,
+    frozenset(("Kurumi", "Liter")): 3.0,
+    frozenset(("Lily", "Crown")): 3.0,
+    frozenset(("Lily", "Liter")): 3.0,
+    frozenset(("Mica", "Crown")): 3.0,
+    frozenset(("Mica", "Helm")): 3.0,
+    frozenset(("N102", "Crown")): 3.0,
+    frozenset(("N102", "Liter")): 3.0,
+    frozenset(("Neon", "Crown")): 3.0,
+    frozenset(("Neon", "Anis: Sparkling Summer")): 3.0,  # SG synergy
+    frozenset(("Neve", "Crown")): 3.0,
+    frozenset(("Neve", "Liter")): 3.0,
+    frozenset(("Ram", "Crown")): 3.0,
+    frozenset(("Ram", "Liter")): 3.0,
+    frozenset(("Sakura Suzuhara", "Crown")): 3.0,
+    frozenset(("Sakura Suzuhara", "Helm")): 3.0,
+    frozenset(("Product 08", "Crown")): 3.0,
+    frozenset(("Product 08", "Liter")): 3.0,
+    frozenset(("Product 12", "Crown")): 3.0,
+    frozenset(("Product 12", "Liter")): 3.0,
+    frozenset(("Product 23", "Crown")): 3.0,
+    frozenset(("Product 23", "Liter")): 3.0,
+    frozenset(("Soldier EG", "Crown")): 3.0,
+    frozenset(("Soldier EG", "Liter")): 3.0,
+    frozenset(("Soldier FA", "Crown")): 3.0,
+    frozenset(("Soldier FA", "Helm")): 3.0,
+    frozenset(("iDoll Flower", "Crown")): 3.0,
+    frozenset(("iDoll Flower", "Liter")): 3.0,
+    frozenset(("iDoll Ocean", "Crown")): 3.0,
+    frozenset(("iDoll Ocean", "Helm")): 3.0,
+    frozenset(("iDoll Sun", "Crown")): 3.0,
+    frozenset(("iDoll Sun", "Liter")): 3.0,
+
+    # ------------------------------------------------------------------
     # Skin variants — same nominal Nikke can't be in the same team in PvP
     # (the game enforces this). Logged at 0 to document the constraint;
     # scoring leaves the pair valued at 0 since hard uniqueness is already
     # enforced upstream.
     # ------------------------------------------------------------------
     frozenset(("Helm", "Helm: Aquamarine")): 0.0,
+
+    # ------------------------------------------------------------------
+    # Batch-1 SSR additions — synergy pairings for newly encoded
+    # characters so they don't trip the under-represented test.
+    # ------------------------------------------------------------------
+    # Delta: Ninja Thief — Water MG B2 Defender; pairs with Water-team
+    # and DPS-needing-shield carries.
+    frozenset(("Delta: Ninja Thief", "Crown")): 2.0,
+    frozenset(("Delta: Ninja Thief", "Liter")): 2.0,
+    frozenset(("Delta: Ninja Thief", "Mast")): 1.5,
+    # E.H. — Wind SMG B3 self-buff carry; pairs with B1 buff supports.
+    frozenset(("E.H.", "Crown")): 3.0,
+    frozenset(("E.H.", "Liter")): 3.0,
+    # Emma — Fire MG B1 budget healer; pairs with Fire allies.
+    frozenset(("Emma", "Mast")): 2.0,
+    frozenset(("Emma", "Moran")): 1.5,
+    # Flora — Electric MG B2 supporter; pairs with Electric allies.
+    frozenset(("Flora", "Scarlet: Black Shadow")): 2.5,
+    frozenset(("Flora", "Trina")): 1.5,
+    # Guilty — Wind SG B2 anti-tank; pairs with high-ATK carries to mirror.
+    frozenset(("Guilty", "Liter")): 2.0,
+    frozenset(("Guilty", "Crown")): 2.0,
+    # Isabel — Electric SG B3 Pilgrim state-machine carry.
+    frozenset(("Isabel", "Crown")): 3.0,
+    frozenset(("Isabel", "Liter")): 3.0,
+    # Nero — Fire SMG B2 defender; pairs with Fire-team and tank synergy.
+    frozenset(("Nero", "Mast: Romantic Maid")): 2.0,
+    frozenset(("Nero", "Crown")): 2.0,
+    # Novel — Iron SMG B2 anti-tank nuker; pairs with B3 carries.
+    frozenset(("Novel", "Snow White: Heavy Arms")): 2.5,
+    frozenset(("Novel", "Crown")): 2.5,
+    # Rei — Water SMG B1 decoy-based tank.
+    frozenset(("Rei", "Liter")): 1.5,
+    frozenset(("Rei", "Crown")): 1.5,
+    # Rei Ayanami — Fire MG B3 Eva-collab shield-shredder.
+    frozenset(("Rei Ayanami", "Crown")): 3.0,
+    frozenset(("Rei Ayanami", "Liter")): 3.0,
+    frozenset(("Rei Ayanami", "Mast")): 2.5,
+    # Rupee — Iron AR B2 supporter; pairs with Iron-team carries.
+    frozenset(("Rupee", "Scarlet")): 2.5,
+    frozenset(("Rupee", "Scarlet: Black Shadow")): 2.5,
+    # Rupee: Winter Shopper — Electric AR B1 with re-enter mechanic.
+    frozenset(("Rupee: Winter Shopper", "Crown")): 3.0,
+    frozenset(("Rupee: Winter Shopper", "Liter")): 2.5,
 }
 
 

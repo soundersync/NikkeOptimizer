@@ -131,7 +131,20 @@ class NikkeSnapshot:
     heal_per_second: float = 0.0
     heal_duration: float = 0.0
 
+    # Source-attribution fields. ``heal_per_second`` is the rate the
+    # snapshot RECEIVES (max across all incoming heal effects, since
+    # all-allies heals broadcast the same value to every member).
+    # ``heal_emit_per_second`` is the rate the snapshot SOURCES — only
+    # set when this character's own skill emits the heal effect, so
+    # match_sim can attribute heal output to the actual healer instead
+    # of guessing via "max heal_per_second across team".
+    heal_emit_per_second: float = 0.0
+    heal_emit_duration: float = 0.0
+
     burst_damage_magnitude: float = 0.0  # sum of burst-skill DEAL_DAMAGE × ATK
+    burst_aoe_target_count: int = 1      # how many enemies the burst hits
+                                          # (per nikke.gg, AOE bursts apply
+                                          # FULL magnitude to EACH enemy)
     has_pierce: bool = False
     is_taunting: bool = False
 
@@ -273,6 +286,23 @@ _ENEMY_TARGET_KINDS = {
 }
 
 
+def _enemy_target_multiplicity(target) -> int:
+    """How many enemies an enemy-targeting effect hits in a 5-Nikke fight.
+
+    Per nikke.gg, AOE bursts hit each enemy at FULL magnitude (not split).
+    So a "925% to all enemies" effect contributes 5× the magnitude to the
+    caster's total burst potential.
+    """
+    if target.kind == TargetKind.ALL_ENEMIES:
+        return 5
+    if target.kind == TargetKind.ENEMIES_RANDOM_K:
+        return max(1, target.count)
+    if target.kind == TargetKind.ENEMY_FRONT:
+        return min(2, max(1, target.count))  # taunters typically 1-2
+    # ST: ENEMY_HIGHEST_HP, ENEMY_LOWEST_HP, PRIMARY_TARGET
+    return 1
+
+
 def _apply_effect_to_snapshot(
     effect: Effect,
     caster: NikkeSnapshot,
@@ -289,11 +319,21 @@ def _apply_effect_to_snapshot(
     # have a snapshot target on our team, but they still represent damage
     # this Nikke contributes. Accumulate on the caster so burst_payload
     # rolls up correctly at the team level.
+    #
+    # Per nikke.gg/damage-formula: AOE bursts apply FULL magnitude to
+    # EACH enemy (not split). Store per-target magnitude AND the target
+    # count separately so match_sim can apply payload per-target.
     if (
         effect.kind in (EffectKind.DEAL_DAMAGE, EffectKind.DEAL_TRUE_DAMAGE)
         and effect.target.kind in _ENEMY_TARGET_KINDS
     ):
+        target_mult = _enemy_target_multiplicity(effect.target)
+        # Store per-target magnitude (NOT multiplied).
         caster.burst_damage_magnitude += effect.magnitude
+        # Track max target count seen on this caster.
+        caster.burst_aoe_target_count = max(
+            caster.burst_aoe_target_count, target_mult
+        )
 
     targets = _resolve_targets(effect, caster, team, burst_user)
     for t in targets:
@@ -400,10 +440,11 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
                 else 0
             )
             scaled_mag = base * (mag / 100.0)
+            dur = effect.duration_seconds or 1.0
             target.heal_per_second = max(target.heal_per_second, scaled_mag)
-            target.heal_duration = max(
-                target.heal_duration, effect.duration_seconds or 1.0
-            )
+            target.heal_duration = max(target.heal_duration, dur)
+            caster.heal_emit_per_second = max(caster.heal_emit_per_second, scaled_mag)
+            caster.heal_emit_duration = max(caster.heal_emit_duration, dur)
             return
         # GRANT_SHIELD — same treatment for ATK/DEF scaled shields. The
         # default branch below already handles CASTER_MAX_HP shields
@@ -466,16 +507,18 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
         # heal magnitudes by 100×).
         scaled = caster.base_hp * (mag / 100.0)
         capped = min(scaled, caster.base_hp * HEAL_RATE_CEILING)
+        dur = effect.duration_seconds or 0.0
         target.heal_per_second = max(target.heal_per_second, capped)
-        target.heal_duration = max(target.heal_duration, effect.duration_seconds or 0.0)
+        target.heal_duration = max(target.heal_duration, dur)
+        caster.heal_emit_per_second = max(caster.heal_emit_per_second, capped)
+        caster.heal_emit_duration = max(caster.heal_emit_duration, dur)
     elif kind is EffectKind.HEAL_HP_FLAT:
-        # One-time burst heal — usually "heal X% of caster's max HP".
-        # Modeled as a 1-sec heal-per-second pulse equal to the full
-        # heal amount. Same ceiling as HEAL_PER_SECOND applies.
         scaled = caster.base_hp * (mag / 100.0)
         capped = min(scaled, caster.base_hp * HEAL_RATE_CEILING)
         target.heal_per_second = max(target.heal_per_second, capped)
         target.heal_duration = max(target.heal_duration, 1.0)
+        caster.heal_emit_per_second = max(caster.heal_emit_per_second, capped)
+        caster.heal_emit_duration = max(caster.heal_emit_duration, 1.0)
     elif kind is EffectKind.BUFF_PIERCE:
         target.has_pierce = True
     elif kind is EffectKind.TAUNT:
@@ -632,11 +675,11 @@ def evaluate_team(
             elif key == "shield_pct_caster_hp":
                 snap.shield_value += snap.base_hp * (val / 100.0)
             elif key == "heal_pct_caster_hp_per_sec":
-                snap.heal_per_second = max(
-                    snap.heal_per_second,
-                    snap.base_hp * (val / 100.0),
-                )
+                rate = snap.base_hp * (val / 100.0)
+                snap.heal_per_second = max(snap.heal_per_second, rate)
                 snap.heal_duration = max(snap.heal_duration, 10.0)
+                snap.heal_emit_per_second = max(snap.heal_emit_per_second, rate)
+                snap.heal_emit_duration = max(snap.heal_emit_duration, 10.0)
             elif key == "max_hp_buff_pct":
                 snap.base_hp = int(snap.base_hp * (1.0 + val / 100.0))
             elif key == "damage_taken_reduction_pct":

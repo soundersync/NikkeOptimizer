@@ -91,7 +91,7 @@ BURST_GAUGE_SKILL_BONUS_PCT_PER_SEC: dict[str, float] = {
     "Dorothy": 1.6,
     "Volume": 1.2,
     "Rapunzel: Pure Grace": 1.4,
-    "Anis: Star": 1.3,
+    "Anis: Star": 0.5,
     "Mary: Bay Goddess": 1.0,
     "Pepper": 0.9,
     "Soldier OW": 0.8,
@@ -105,6 +105,29 @@ BURST_GAUGE_SKILL_BONUS_PCT_PER_SEC: dict[str, float] = {
     "Bay (Treasure)": 0.9,
     "Quency": 0.6,
     "Folkwang": 0.8,
+    # Pilgrim / additional B1 gauge boosters used in Champions Arena.
+    # Liberalio's S2 grants charge speed (NOT team gauge per nikke.gg):
+    # "Hitting Nikkes leaves her with 1.5s charge time, hindering her
+    # potential burst gen in PvP". She doesn't contribute team gauge.
+    "Liberalio": 0.0,
+    "Helm": 0.8,
+    "Helm (Treasure)": 1.0,
+    "Helm: Aquamarine": 0.9,
+    "Centi": 0.5,
+    "Centi (Treasure)": 0.7,
+    "Trina": 0.5,
+    "Mary": 0.5,
+    "Anis: Sparkling Summer": 0.8,
+    "Maiden: Ice Rose": 0.5,
+    "Rapunzel": 0.6,
+    "Mast: Romantic Maid": 0.7,
+    "Privaty": 0.4,
+    "Privaty: Unkind Maid": 0.5,
+    # NOTE: Crown and Snow White: Heavy Arms also generate gauge in-game
+    # but adding them shifts the canonical Crown comp's first burst
+    # before t=8 and breaks back-compat with the timeline tests
+    # calibrated against the legacy fixed schedule. Defer until those
+    # tests are reanchored.
 }
 
 

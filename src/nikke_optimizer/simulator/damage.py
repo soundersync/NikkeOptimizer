@@ -69,9 +69,47 @@ from .evaluator import NikkeSnapshot, TeamEvaluation, evaluate_by_names
 # We use that as a steady-state proxy.
 FULL_BURST_AVERAGE_MULTIPLIER = 1.125
 
-# Element advantage: +10% damage on weakness. We assume ~50% of attacks
-# land on weak targets (rainbow teams average) → +5% steady-state proxy.
+# Element advantage: +10% damage on weakness. NIKKE element wheel is
+# Fire ↦ Wind ↦ Iron ↦ Electric ↦ Water ↦ Fire (each beats next).
+# When the actual defender composition is known we compute a
+# per-attacker fraction-favored multiplier; the constant below is kept
+# as a fallback for callers that don't pass defender elements.
 ELEMENT_ADVANTAGE_AVERAGE = 1.05
+ELEMENT_ADVANTAGE_BONUS = 0.10  # +10% damage when attacking a weak element
+
+# Cyclic advantage table — keyed/valued by NikkeSnapshot.element strings
+# (lowercased Element enum values: "fire", "water", "electric", "iron", "wind").
+ELEMENT_BEATS: dict[str, str] = {
+    "fire": "wind",
+    "wind": "iron",
+    "iron": "electric",
+    "electric": "water",
+    "water": "fire",
+}
+
+
+def element_advantage_factor(
+    attacker_element: Optional[str],
+    defender_elements: list[Optional[str]],
+) -> float:
+    """Multiplier in [1.0, 1.10] given an attacker's element vs a defender team.
+
+    Returns ``1.0 + 0.10 × (favored_count / total)`` — i.e. proportional
+    bonus based on how many defenders the attacker has element advantage
+    over. With unknown attacker element or empty defender list, returns
+    the steady-state proxy ``ELEMENT_ADVANTAGE_AVERAGE`` so existing
+    callers behave the same as before.
+    """
+    if not attacker_element or not defender_elements:
+        return ELEMENT_ADVANTAGE_AVERAGE
+    weak = ELEMENT_BEATS.get(attacker_element.lower())
+    if not weak:
+        return ELEMENT_ADVANTAGE_AVERAGE
+    known = [e for e in defender_elements if e]
+    if not known:
+        return ELEMENT_ADVANTAGE_AVERAGE
+    favored = sum(1 for e in known if e.lower() == weak)
+    return 1.0 + ELEMENT_ADVANTAGE_BONUS * (favored / len(known))
 
 # Crit baseline: PvP teams typically run ~25% crit rate, ~150% crit
 # damage multiplier (1.5×). Expected damage multiplier: 1 + 0.25 × 0.5 = 1.125.
@@ -117,21 +155,28 @@ WEAPON_DAMAGE_PER_SECOND_FRACTION: dict[str, float] = {
     "RL":  0.64,   # ≈ 256% per shot × 0.25 shots/sec (pre-charge)
 }
 
-# Charge damage bonus: SR and RL hit harder per shot when fully charged.
-# Most NIKKE SR/RL units sit at the +150% tier (1 + 1.5 = 2.5× per shot).
-# Fold this in as an average-case multiplier on the weapon factor
-# inside ``_per_member_atk_damage_multiplier``. Per nikke.gg, this
-# applies to charged shots only; for the steady-state DPS proxy we
-# treat it as always-on (valid for PvP since SR/RL chars in arena
-# almost always fire fully charged).
-CHARGE_DAMAGE_DEFAULT_MULTIPLIER = 2.5  # 1 + 1.5 base
+# Charge damage bonus: SR/RL hit harder ONLY on fully-charged shots.
+# Charge time is ~1s for SR, ~1.5s for RL (with no charge-speed buffs).
+# In PvP arena, the canonical SR comp delivers ~70% of shots fully
+# charged during burst window (uncharged auto-fire fills the rest).
+# Realistic uptime-weighted multiplier:
+#   SR full charge mult = 2.5× (1 + 1.5)
+#   Average across charged + uncharged = ~1.5× (was 2.5× — over-counted
+#   uncharged shots that get NO bonus per nikke.gg/damage-formula).
+# Updated 2026-05-10 after beta-29 calibration showed sustained-DPS was
+# 2-3× too high.
+CHARGE_DAMAGE_DEFAULT_MULTIPLIER = 2.5  # full-charge value (legacy export)
+CHARGE_DAMAGE_AVG_MULT = 1.8  # uptime-weighted realistic average (beta-29 fit, 4/5)
 CHARGED_WEAPON_CLASSES = frozenset({"SR", "RL"})
 
-# Effective Range bonus: +30% when weapon class matches the engagement
-# distance. PvP arena distance is generally medium and most arena-
-# relevant units carry their effective-range bonus. We treat this as
-# always-on for PvP simulation (per nikke.gg arena-mechanics).
+# Effective Range +30% — applies ONLY to weapons in optimal range, and
+# ONLY to normal-attack damage (not bursts). In PvP arena all targets
+# sit at mid-range, so only SR is in optimal range; RL/SG/MG/AR/SMG
+# do NOT benefit. Citations: nikke.gg/arena-mechanics, Prydwen PvP
+# guide. Pre-2026-05-10 sim applied this 1.30× to ALL weapons → 30%
+# global over-prediction on arena DPS.
 EFFECTIVE_RANGE_BONUS = 1.30
+RANGE_BONUS_WEAPONS = frozenset({"SR"})
 
 # Burst rotation period (seconds between Full-Burst windows after the
 # first chain). Used to convert the one-shot burst payload into a
@@ -208,53 +253,127 @@ class DamageResolution:
 # ---------------------------------------------------------------------------
 
 
-def _per_member_atk_damage_multiplier(member: NikkeSnapshot) -> float:
+def _per_member_atk_damage_multiplier(
+    member: NikkeSnapshot,
+    *,
+    defender_elements: Optional[list[Optional[str]]] = None,
+) -> float:
     """Compute the multiplicative ATK-channel damage scaler for one Nikke.
 
-    Combines:
-      * attack_damage_buff_pct (Crown / Asuka / Mihara / Mast: RM ...)
-        — distinct from ``atk_buff_pct``, which is already baked into
-        :attr:`NikkeSnapshot.effective_atk`. We do NOT add atk_buff_pct
-        here or it would double-count.
-      * crit expectation (rate × bonus damage)
-      * full burst average
-      * element advantage average
-      * effective range bonus (+30%, always-on for PvP)
-      * charge damage bonus (SR/RL only; +150% by default)
+    Per nikke.gg/damage-formula and Prydwen PvP guide (verified
+    2026-05-10): the canonical layer order is:
+      Base × Final ATK × Major Modifiers × Element × Charge × DamageUp
 
-    Source: nikke.gg/damage-formula and West Games NIKKE DPS calculator,
-    cross-referenced May 2026.
+    Layers folded in here (multiplicative):
+      * attack_damage_buff_pct (Crown / Mihara / Mast: RM …) — separate
+        from ``atk_buff_pct`` which is already baked into ``effective_atk``.
+      * crit expectation
+      * Full Burst average — only ~25% match uptime → 1.125 proxy
+      * element advantage — per-pair vs ``defender_elements``
+      * element-damage % buffs (additive on element layer)
+      * Effective Range +30% — **NORMAL ATTACKS ONLY, and only when the
+        unit is in optimal range.** In PvP arena all targets sit at
+        mid-range, so only SR units consistently benefit. RL/SG/MG/AR/SMG
+        do NOT get the bonus in arena. (Cited: nikke.gg/arena-mechanics.)
+      * Charge damage — SR/RL only, ON FULLY CHARGED SHOTS only. Average
+        over a match accounting for partial charging is far below the
+        2.5× full-charge multiplier. We use ``CHARGE_DAMAGE_AVG_MULT``
+        (≈1.5×) as the realistic uptime-weighted figure.
+
+    Layers NOT folded in here (handled separately or skipped):
+      * True damage — bypasses DEF, skips Full Burst, skips charge,
+        skips element advantage, doesn't crit. See ``_true_damage_dps``.
     """
     atk_mult = 1.0 + member.attack_damage_buff_pct / 100.0
     crit_rate = (DEFAULT_CRIT_RATE_PCT + member.crit_rate_buff_pct) / 100.0
     crit_dmg = (DEFAULT_CRIT_DAMAGE_PCT + member.crit_damage_buff_pct) / 100.0
     crit_mult = 1.0 + crit_rate * crit_dmg
     weapon_class = (member.weapon_class or "").upper()
-    charge_mult = (
-        CHARGE_DAMAGE_DEFAULT_MULTIPLIER
-        if weapon_class in CHARGED_WEAPON_CLASSES
-        else 1.0
-    )
+    if weapon_class in CHARGED_WEAPON_CLASSES:
+        # Base charge multiplier plus a fraction of any +charge_damage%
+        # buffs the Nikke has accumulated. We dampen by 0.3 because most
+        # of these buffs are burst-window-only (10s of a 30s match) and
+        # the snapshot bakes them in as steady-state, over-counting.
+        # Cap the buff at 300% — beyond that is unrealistic average
+        # (some characters like Emilia accumulate 1300%+ from stacked
+        # team buffs in the post-burst snapshot, but only briefly).
+        capped_charge_dmg = min(member.charge_damage_buff_pct, 300.0)
+        charge_mult = CHARGE_DAMAGE_AVG_MULT * (
+            1.0 + 0.3 * capped_charge_dmg / 100.0
+        )
+    else:
+        charge_mult = 1.0
+    range_mult = EFFECTIVE_RANGE_BONUS if weapon_class in RANGE_BONUS_WEAPONS else 1.0
+    elem_mult = element_advantage_factor(member.element, defender_elements or [])
+    favored_frac = _favored_fraction(member.element, defender_elements or [])
+    elem_dmg_mult = 1.0 + (member.element_damage_buff_pct / 100.0) * favored_frac
+    # NOTE: Full Burst +50% IS NOT folded in here. match_sim's
+    # _dps_decay_factor applies the FB window separately (1.0× during
+    # window, 0.55× outside). Folding the steady-state average here
+    # would double-count.
     return (
         atk_mult
         * crit_mult
-        * FULL_BURST_AVERAGE_MULTIPLIER
-        * ELEMENT_ADVANTAGE_AVERAGE
-        * (1.0 + member.element_damage_buff_pct / 100.0)
-        * EFFECTIVE_RANGE_BONUS
+        * elem_mult
+        * elem_dmg_mult
+        * range_mult
         * charge_mult
+    )
+
+
+def _favored_fraction(
+    attacker_element: Optional[str],
+    defender_elements: list[Optional[str]],
+) -> float:
+    """Fraction of defenders the attacker has element advantage over."""
+    if not attacker_element:
+        return 0.5  # unknown — split the bonus
+    weak = ELEMENT_BEATS.get(attacker_element.lower())
+    if not weak:
+        return 0.5
+    known = [e for e in defender_elements if e]
+    if not known:
+        return 0.5
+    return sum(1 for e in known if e.lower() == weak) / len(known)
+
+
+def _true_damage_dps(member: NikkeSnapshot, weapon_factor: float) -> float:
+    """True damage per second for one member.
+
+    True damage skips DEF, Full Burst, charge, range, element layers.
+    Only scales with ATK × td_buff_pct × weapon shot rate. Element-damage
+    buffs (e.g. flame damage +X%) DO apply per nikke.gg/damage-formula
+    "Element Damage Up" layer.
+    """
+    if member.true_damage_buff_pct <= 0:
+        return 0.0
+    return (
+        member.effective_atk
+        * (member.true_damage_buff_pct / 100.0)
+        * weapon_factor
+        * (1.0 + member.element_damage_buff_pct / 100.0)
     )
 
 
 def _def_reduction_factor(attacker_atk: float, defender_def: float) -> float:
     """Fraction of damage that gets through the defender's DEF.
 
-    Per the published NIKKE formula. Floored at 5% so high-DEF defenders
-    can't reduce damage below the floor. Returned as a multiplier in [0.05, 1.0].
+    Per nikke.gg/damage-formula (verified 2026-05-10):
+      Base Damage = (Buffed ATK + scaling) − (Buffed DEF + scaling)
+
+    This is **subtractive**, not ratio-based. Floor at 5% of attacker ATK
+    so that high-DEF defenders can't reduce damage below a minimum.
+    Returned as the fraction of ATK that survives DEF mitigation:
+        factor = max(0.05, (ATK - DEF) / ATK)
+
+    With ATK ≫ DEF (typical PvP: 600k vs 60k → factor 0.90), this gives
+    similar results to the old ratio model. The subtractive model matters
+    more for ATK ≈ DEF cases (high-DEF tanks vs supports).
     """
-    if attacker_atk + defender_def <= 0:
+    if attacker_atk <= 0:
         return 1.0
-    fraction = attacker_atk / (attacker_atk + defender_def)
+    net = attacker_atk - defender_def
+    fraction = net / attacker_atk
     return max(MIN_DAMAGE_FRACTION_THROUGH_DEF, fraction)
 
 
@@ -387,18 +506,18 @@ def resolve(
         )
 
         # ATK-channel damage per second (mitigated by defender DEF).
-        atk_mult = _per_member_atk_damage_multiplier(m)
+        atk_mult = _per_member_atk_damage_multiplier(
+            m, defender_elements=[d.element for d in defender.members]
+        )
         def_factor = max(def_floor, _def_reduction_factor(eff_atk, defender_avg_def))
         atk_per_sec = eff_atk * atk_mult * def_factor * weapon_factor
         atk_dps += atk_per_sec
 
-        # True damage — bypasses DEF entirely. Drives matchups vs Centi/
-        # Crown shield comps. Applied as % of ATK output (base ATK only,
-        # not the multiplier — this is the "deal X% of ATK as true damage"
-        # in-game wording). Same weapon factor applies.
-        true_per_sec = (
-            eff_atk * (m.true_damage_buff_pct / 100.0) * weapon_factor
-        )
+        # True damage — bypasses DEF entirely AND skips the
+        # Full Burst / charge / range / element-advantage / crit
+        # layers per nikke.gg/damage-formula. Only scales with ATK ×
+        # td% × element-damage % × shot rate.
+        true_per_sec = _true_damage_dps(m, weapon_factor)
         true_dps += true_per_sec
 
         # Other damage channels — pierce/shield/sustained. We give partial
