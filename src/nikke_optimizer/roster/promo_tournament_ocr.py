@@ -41,9 +41,9 @@ _SKIP_SLUGS = frozenset(
 # LB stars + Core badge — color-based star count + targeted badge OCR
 # handled by promo_tournament_lb_core.detect_lb_core.
 _LB_CORE_SLUG_RE = re.compile(r"^char\d\.lb_core$")
-# CP / damage / heal — store digits-only canonical form.
+# CP / damage / heal / synchro level — store digits-only canonical form.
 _NUMBER_SLUG_RE = re.compile(
-    r"^(team_cp|char\d\.cp|(left|right)\.char\d\.(atk|def|heal))$"
+    r"^(team_cp|player_level|char\d\.cp|(left|right)\.char\d\.(atk|def|heal))$"
 )
 # HP percentage.
 _PERCENT_SLUG_RE = re.compile(r"^(left|right)\.char\d\.hp$")

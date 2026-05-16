@@ -90,6 +90,7 @@ _PLAYER_CHAR_LB_CORE: tuple[Bbox, ...] = tuple(
 def _build_player_loadout() -> tuple[Region, ...]:
     rows: list[Region] = [
         Region("player_name", "Player Name", (514, 815, 854, 851), group="header"),
+        Region("player_level", "Player Level", (373, 857, 449, 889), group="header"),
         Region("team_cp", "Team CP", (1043, 732, 1208, 787), group="header"),
     ]
     for i in range(5):
