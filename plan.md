@@ -49,6 +49,34 @@ machines + filter enforcement still TODO.
 
 ## Open work, by impact
 
+### Just-shipped (2026-05-17)
+
+- **Auto-import daemon** (`src/nikke_optimizer/auto_import.py` +
+  `nikkeoptimizer auto-import` CLI + `scripts/launchd/`). Subscribes
+  to Syncthing's `/rest/events` API filtered to `FolderCompletion`
+  for the folder containing `incoming-captures/`; debounces 5s; calls
+  `ingest_root()` in-process (PaddleOCR warm across runs); single-
+  instance via flock; persists last event id. Installed as user
+  launchd agent (`KeepAlive=true`, `RunAtLoad=true`). Writes a
+  human-readable audit stanza per run to `logs/auto_import.log`
+  (5MB rotation). **Copy-only — never touches `incoming-captures/`.**
+- **Ingest hardening to support the daemon**:
+  - `_discover_staging` now recurses one level into `beta_season_<N>_*`
+    subdirs so `--staging incoming-captures/champion_arena` picks up
+    every tournament across every season under it. Backward-compatible
+    with `--staging beta_season_<N>_*/` invocations.
+  - PNG dimension validation: source PNGs are checked against
+    `REFERENCE_PNG_SIZE = (1510, 2013)` in `_relocate`. Mismatches are
+    warn + skip + listed in `IngestStats.files_wrong_size`; left in
+    staging, never copied to the archive (per
+    [[capture_resolution_normalize_at_source]]).
+  - `promotion_tournament_player_data_*` folders are silently ignored
+    (the `_player_data_` infix fails `_STAGING_NAME_RE`).
+- **24 new tests** (`tests/test_auto_import.py` × 13 + 3 in
+  `tests/test_promo_tournament_ingest.py`); existing fixture tests
+  use an autouse `monkeypatch` of `REFERENCE_PNG_SIZE` so 8×8 fixture
+  PNGs still pass.
+
 ### Just-shipped (2026-04-28)
 
 - **Slice #61 — Prydwen scraper extended** with `specialities`,

@@ -30,6 +30,9 @@ data/raw/
 # Inbox for raw uploads + per-user capture staging.
 /incoming-captures/
 
+# Auto-import daemon audit log + launchd stdout/stderr capture.
+/logs/
+
 # Debug-script dump payloads (the .py scripts are tracked; their
 # captured response bodies aren't).
 /scripts/debug/dumps/

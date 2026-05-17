@@ -28,6 +28,16 @@ from nikke_optimizer.data.models import (
 from nikke_optimizer.roster.promo_tournament_ingest import ingest_root
 
 
+@pytest.fixture(autouse=True)
+def _relax_reference_png_size(monkeypatch):
+    """The fixture PNGs are 8×8 for speed; the prod check is 1510×2013.
+    Loosen the constant for tests that use ``_png`` so the dimension
+    guard doesn't reject every fixture file.
+    """
+    import nikke_optimizer.roster.promo_tournament_ingest as mod
+    monkeypatch.setattr(mod, "REFERENCE_PNG_SIZE", (8, 8))
+
+
 def _png(path: Path, color: tuple[int, int, int] = (255, 0, 0)) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     PIL.new("RGB", (8, 8), color).save(path)
@@ -342,7 +352,10 @@ def league_staging_tree(tmp_path: Path) -> tuple[Path, Path]:
     # LEADERBOARD_REGIONS constants. Must be large enough for every
     # region's bbox (max y ≈ 1634).
     src.mkdir(parents=True, exist_ok=True)
-    PIL.new("RGB", (1080, 2400), (10, 10, 10)).save(src / "leaderboard.png")
+    # Match the actual prod size (1510×2013) so the ingest dimension
+    # check accepts it after the autouse monkeypatch relaxes the
+    # reference to (8, 8) — anything ≠ that size would be rejected.
+    PIL.new("RGB", (8, 8), (10, 10, 10)).save(src / "leaderboard.png")
     # Coord-picker leftovers — the user produces these to derive the
     # constants; the ingest must filter them out (never archive).
     for bbox in (
@@ -454,3 +467,93 @@ def test_league_archive_only_inherits_season_from_path(tmp_path: Path):
         t = session.exec(select(PromoTournament)).first()
         # April 23 2026 is the start of Beta Season 28.
         assert t.capture_date.isoformat() == "2026-04-23"
+
+
+# ---------------------------------------------------------------------------
+# Recursive discovery + dimension validation
+# ---------------------------------------------------------------------------
+
+
+def test_recursive_discovery_picks_up_tournaments_under_season_subdirs(tmp_path):
+    """``_discover_staging`` should descend one level into
+    ``beta_season_<N>_*`` subdirs so callers can point at the
+    ``champion_arena/`` root rather than a specific season folder.
+    """
+    from nikke_optimizer.roster.promo_tournament_ingest import _discover_staging
+
+    staging = tmp_path / "champion_arena"
+    s29 = staging / "beta_season_29_2026-05-07"
+    s28 = staging / "beta_season_28_2026-04-23"
+    (s29 / "promotion_tournament_20260507_120000").mkdir(parents=True)
+    (s29 / "champions_duel_20260512_120000").mkdir(parents=True)
+    (s28 / "league_20260423_120000").mkdir(parents=True)
+
+    # Folder that should be ignored (suffix breaks the staging regex).
+    (s29 / "promotion_tournament_player_data_20260507_120000").mkdir(parents=True)
+
+    found = [p.name for p in _discover_staging(staging)]
+    assert found == [
+        "league_20260423_120000",
+        "champions_duel_20260512_120000",
+        "promotion_tournament_20260507_120000",
+    ]
+
+
+def test_recursive_discovery_still_works_pointed_at_season_dir(tmp_path):
+    """Backward compat: pointing ``--staging`` at a specific
+    ``beta_season_*`` folder must still find the tournaments inside it.
+    """
+    from nikke_optimizer.roster.promo_tournament_ingest import _discover_staging
+
+    season_dir = tmp_path / "beta_season_29_2026-05-07"
+    (season_dir / "promotion_tournament_20260507_120000").mkdir(parents=True)
+    (season_dir / "champions_duel_20260512_120000").mkdir(parents=True)
+
+    found = [p.name for p in _discover_staging(season_dir)]
+    assert found == [
+        "champions_duel_20260512_120000",
+        "promotion_tournament_20260507_120000",
+    ]
+
+
+def test_wrong_dimension_pngs_are_skipped_and_recorded(tmp_path, monkeypatch):
+    """A staging PNG with the wrong dims must:
+      - not be copied to the archive
+      - not be deleted from staging (even with move=True)
+      - be recorded in stats.files_wrong_size
+    """
+    import nikke_optimizer.roster.promo_tournament_ingest as mod
+    # Override the autouse monkeypatch from this module's fixture so we
+    # can assert real rejection behavior.
+    monkeypatch.setattr(mod, "REFERENCE_PNG_SIZE", (1510, 2013))
+
+    staging = tmp_path / "champion_arena"
+    archive = tmp_path / "captures"
+    src = staging / "promotion_tournament_20260505_010000"
+
+    # Correctly-sized PNG — should be copied.
+    good = src / "group_1" / "top_16" / "results" / "overview.png"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    PIL.new("RGB", (1510, 2013), (255, 0, 0)).save(good)
+
+    # Wrong-sized PNG — should be rejected.
+    bad = src / "group_1" / "top_16" / "results" / "duel_1.png"
+    PIL.new("RGB", (1080, 1920), (0, 255, 0)).save(bad)
+
+    db_path = tmp_path / "test.sqlite3"
+    stats = mod.ingest_root(
+        staging, archive_root=archive, db_path=db_path, ocr=False, move=True,
+    )
+
+    # Good file copied + present in archive.
+    canon = archive / "beta_season_28" / "promotion_tournament" / "group_1" / "top_16" / "results"
+    assert (canon / "overview.png").is_file()
+    # Bad file: not in archive, still in staging (not deleted by move).
+    assert not (canon / "duel_1.png").exists()
+    assert bad.is_file(), "wrong-dim file must be left in staging"
+    # Stats record it.
+    assert len(stats.files_wrong_size) == 1
+    wrong_path, wrong_size = stats.files_wrong_size[0]
+    assert wrong_path == bad
+    assert wrong_size == (1080, 1920)
+    assert "wrong_size=1" in str(stats)

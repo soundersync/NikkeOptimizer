@@ -39,6 +39,13 @@ from ..data.seasons import (
 
 log = logging.getLogger(__name__)
 
+# Source-capture reference dimensions. Every PNG dropped under
+# ``incoming-captures/champion_arena/`` must match this. Mismatches mean
+# the iPhone capture pipeline drifted (different device, screen-recording
+# setting, post-processing); ingest skips them rather than feeding
+# garbage to OCR. See [[capture_resolution_normalize_at_source]].
+REFERENCE_PNG_SIZE: tuple[int, int] = (1510, 2013)
+
 
 _STAGING_NAME_RE = re.compile(
     r"^(promotion_tournament|champions_duel|league)_(\d{8})_(\d{6})$"
@@ -102,6 +109,7 @@ class IngestStats:
     files_copied: int = 0
     files_skipped: int = 0
     files_moved_deleted: int = 0
+    files_wrong_size: list[tuple[Path, tuple[int, int]]] = field(default_factory=list)
     ocr_screenshots: int = 0
     ocr_fields: int = 0
     ocr_skipped: int = 0
@@ -118,6 +126,8 @@ class IngestStats:
         ]
         if self.files_moved_deleted:
             parts.append(f"deleted={self.files_moved_deleted}")
+        if self.files_wrong_size:
+            parts.append(f"wrong_size={len(self.files_wrong_size)}")
         if self.ocr_screenshots or self.ocr_skipped:
             parts.append(
                 f"ocr=(processed={self.ocr_screenshots} fields={self.ocr_fields} cached={self.ocr_skipped})"
@@ -201,6 +211,7 @@ def ingest_root(
         stats.files_copied += file_stats.copied
         stats.files_skipped += file_stats.skipped
         stats.files_moved_deleted += file_stats.deleted
+        stats.files_wrong_size.extend(file_stats.wrong_size)
 
         with Session(engine) as session:
             _persist_tournament(
@@ -454,12 +465,27 @@ def run_backfill_pass(engine) -> IngestStats:
 
 
 def _discover_staging(staging_root: Path) -> list[Path]:
+    """Find tournament staging folders under ``staging_root``.
+
+    Looks at ``staging_root``'s direct children, plus one level deeper
+    into any ``beta_season_<N>[_…]`` subdir. This lets callers point at
+    either a tournament-specific dir (``beta_season_29_2026-05-07/``)
+    OR the season-parent dir (``champion_arena/``) and pick up every
+    tournament across every season under it.
+    """
     if not staging_root.is_dir():
         return []
-    return sorted(
-        p for p in staging_root.iterdir()
-        if p.is_dir() and _STAGING_NAME_RE.match(p.name)
-    )
+    found: list[Path] = []
+    for top in staging_root.iterdir():
+        if not top.is_dir():
+            continue
+        if _STAGING_NAME_RE.match(top.name):
+            found.append(top)
+        elif parse_season_number(top.name) is not None:
+            for child in top.iterdir():
+                if child.is_dir() and _STAGING_NAME_RE.match(child.name):
+                    found.append(child)
+    return sorted(found)
 
 
 def _discover_archived(archive_root: Path) -> list[Path]:
@@ -515,14 +541,41 @@ class _FileStats:
     copied: int = 0
     skipped: int = 0
     deleted: int = 0
+    wrong_size: list[tuple[Path, tuple[int, int]]] = field(default_factory=list)
+
+
+def _png_size(path: Path) -> Optional[tuple[int, int]]:
+    """Return (width, height) or None if the PNG can't be opened."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as im:
+            return im.size
+    except (OSError, ValueError):
+        return None
 
 
 def _relocate(src: Path, dest: Path, *, move: bool) -> _FileStats:
     """Copy every relevant .png from ``src`` tree into the matching path
-    under ``dest``. Returns per-file stats."""
+    under ``dest``. Returns per-file stats.
+
+    PNGs whose dimensions don't match ``REFERENCE_PNG_SIZE`` are skipped
+    (not copied, not deleted from staging) and recorded in
+    ``stats.wrong_size`` so the caller can surface them.
+    """
     stats = _FileStats()
     dest.mkdir(parents=True, exist_ok=True)
     for src_file in _iter_source_pngs(src):
+        size = _png_size(src_file)
+        if size is not None and size != REFERENCE_PNG_SIZE:
+            log.warning(
+                "skipping wrong-dim PNG %s (%s, expected %s)",
+                src_file, size, REFERENCE_PNG_SIZE,
+            )
+            stats.wrong_size.append((src_file, size))
+            continue
         rel = src_file.relative_to(src)
         out = dest / rel
         out.parent.mkdir(parents=True, exist_ok=True)

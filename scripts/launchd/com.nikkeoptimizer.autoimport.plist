@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nikkeoptimizer.autoimport</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sleepingcounty/miniconda3/bin/nikkeoptimizer</string>
+        <string>auto-import</string>
+    </array>
+
+    <!-- Auto-restart on crash, throttled by ThrottleInterval. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Wait at least 30s between restart attempts (avoids a tight crash loop). -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Start automatically at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Working directory + log destinations. The daemon writes its
+         own structured audit log; these are for the launchd
+         supervisor's stdout/stderr (Python tracebacks, etc). -->
+    <key>WorkingDirectory</key>
+    <string>/Users/sleepingcounty/git-other/NikkeOptimizer</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sleepingcounty/git-other/NikkeOptimizer/logs/auto_import.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/sleepingcounty/git-other/NikkeOptimizer/logs/auto_import.stderr.log</string>
+
+    <!-- launchd resets PATH; if your env needs anything custom, add
+         it here. Default is enough for the conda-installed CLI. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/sleepingcounty/miniconda3/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

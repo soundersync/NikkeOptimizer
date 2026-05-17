@@ -172,6 +172,44 @@ def ingest_tournaments(
             console.print(f"  · {err}")
 
 
+@app.command(name="auto-import")
+def auto_import_cmd(
+    staging: Optional[Path] = typer.Option(
+        None, "--staging",
+        help="Staging dir to walk (defaults to <repo>/incoming-captures/champion_arena).",
+    ),
+    log_path: Optional[Path] = typer.Option(
+        None, "--log",
+        help="Audit log path (defaults to <repo>/logs/auto_import.log).",
+    ),
+    lock_path: Optional[Path] = typer.Option(
+        None, "--lock",
+        help="Lock file (defaults to /tmp/nikke-autoimport.lock).",
+    ),
+) -> None:
+    """Run the auto-import daemon: subscribe to Syncthing's event API and
+    trigger ``ingest-tournaments`` whenever the watched folder reports
+    completion.
+
+    Reads Syncthing's API key + folder ID from
+    ``~/Library/Application Support/Syncthing/config.xml`` (matches the
+    folder whose ``path`` contains the staging dir).
+
+    Designed for launchd (``KeepAlive=true``). Single-instance enforced
+    via flock. Audit log rotates at 5MB.
+    """
+    from .. import auto_import
+
+    kwargs: dict = {}
+    if staging is not None:
+        kwargs["staging"] = staging
+    if log_path is not None:
+        kwargs["log_path"] = log_path
+    if lock_path is not None:
+        kwargs["lock_path"] = lock_path
+    raise typer.Exit(code=auto_import.run_daemon(**kwargs) or 0)
+
+
 @app.command(name="label-tournament-portraits")
 def label_tournament_portraits(
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path"),

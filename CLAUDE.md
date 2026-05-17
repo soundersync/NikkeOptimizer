@@ -65,6 +65,7 @@ NikkeOptimizer/
 
   src/nikke_optimizer/
     cli/main.py                       # typer CLI; `nikkeoptimizer <cmd>`
+    auto_import.py                    # Syncthing-event-driven ingest daemon + audit log
     data/
       db.py                           # SQLite engine + path resolution
       models.py                       # SQLModel schema (Character, OwnedCharacter, AccountState, ...)
@@ -114,7 +115,12 @@ NikkeOptimizer/
 
   scripts/
     migrations/                       # NNNN_*.sql + apply_migrations.py (idempotent, dual-DB)
+    launchd/                          # auto-import daemon plist + install instructions
     debug/                            # exploratory scripts (.gitignored dumps/ subdir)
+
+  logs/                               # gitignored; auto-import daemon writes here
+    auto_import.log                   # human-readable audit, one stanza per ingest run
+    auto_import.{stdout,stderr}.log   # launchd supervisor capture
 ```
 
 ---
@@ -180,7 +186,43 @@ nikkeoptimizer fetch-roledata --all         # mirror every character (~30 min @ 
 nikkeoptimizer roledata-coverage            # cross-reference simulator library vs cache
 nikkeoptimizer set-research --general 300   # set Outpost research levels (singleton)
 nikkeoptimizer refresh --name "Mint"        # refresh a single character from Prydwen (or all)
+nikkeoptimizer ingest-tournaments \         # one-shot relocate + OCR pass over staging
+  --staging incoming-captures/champion_arena
+nikkeoptimizer auto-import                  # foreground daemon mode (normally launchd-run)
 ```
+
+### Auto-import daemon (Syncthing → ingest)
+
+Installed as a user launchd agent that auto-starts at login. See
+`scripts/launchd/README.md` for the full operator manual; the
+high-frequency commands:
+
+```sh
+# Status / live tail / restart / stop.
+launchctl print gui/$UID/com.nikkeoptimizer.autoimport | grep -E 'state|pid|last exit'
+tail -f logs/auto_import.log              # human-readable audit, one stanza per run
+tail -f logs/auto_import.stderr.log       # Python tracebacks / PaddleOCR progress
+launchctl kickstart -k gui/$UID/com.nikkeoptimizer.autoimport   # restart
+launchctl bootout    gui/$UID/com.nikkeoptimizer.autoimport     # stop (auto-restart at login)
+```
+
+How it works:
+- Reads Syncthing's API key + folder ID from
+  `~/Library/Application Support/Syncthing/config.xml` at startup.
+- Long-polls `GET /rest/events?events=FolderCompletion` filtered to
+  the folder whose path contains `incoming-captures/`.
+- On `completion: 100`, debounces 5s, then calls `ingest_root()`
+  in-process (PaddleOCR stays warm across runs).
+- Single-instance via `flock /tmp/nikke-autoimport.lock`. Last seen
+  event id persisted to
+  `~/Library/Application Support/NikkeOptimizer/state/syncthing_last_event_id.txt`
+  so a restart skips already-handled events.
+- **Copy-only** — never moves or deletes from `incoming-captures/`;
+  staging stays Syncthing's domain.
+- Source PNGs are dimension-checked against
+  `REFERENCE_PNG_SIZE = (1510, 2013)` in `promo_tournament_ingest.py`.
+  Mismatches are warn + skip + listed in the audit stanza; never
+  copied to the archive.
 
 ### ShiftyPad (BlablaLink player-profile scraper)
 
