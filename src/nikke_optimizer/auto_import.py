@@ -13,12 +13,15 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
+import re
+import subprocess
 import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -410,3 +413,172 @@ def run_daemon(
                     pending_since = None
                 else:
                     time.sleep(max(0.0, DEBOUNCE_SECONDS - elapsed))
+
+
+# ---------------------------------------------------------------------------
+# Web-tab helpers: daemon status, audit-log parsing, launchctl control
+# ---------------------------------------------------------------------------
+
+
+LAUNCHD_LABEL = "com.nikkeoptimizer.autoimport"
+LAUNCHD_PLIST = Path.home() / "Library/LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+@dataclass
+class DaemonStatus:
+    """Snapshot of the launchd agent's current state."""
+    installed: bool            # plist present under ~/Library/LaunchAgents
+    loaded: bool               # launchctl knows about it
+    running: bool              # state = running with a live pid
+    pid: Optional[int]
+    last_exit_code: Optional[str]   # raw text, e.g. "(never exited)" or "0"
+    raw: str                   # full `launchctl print` body (or error text)
+
+
+def daemon_status() -> DaemonStatus:
+    """Query launchd for the current state of the auto-import agent.
+
+    Never raises — returns ``installed=False/loaded=False/running=False``
+    when launchctl errors. ``raw`` carries the underlying output for
+    display in the UI.
+    """
+    installed = LAUNCHD_PLIST.exists()
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return DaemonStatus(
+            installed=installed, loaded=False, running=False,
+            pid=None, last_exit_code=None, raw=f"launchctl error: {exc}",
+        )
+
+    if result.returncode != 0:
+        return DaemonStatus(
+            installed=installed, loaded=False, running=False,
+            pid=None, last_exit_code=None,
+            raw=result.stderr.strip() or result.stdout.strip(),
+        )
+
+    body = result.stdout
+    # `launchctl print` output has `state = running` and `pid = 12345`
+    # on their own indented lines. Parse defensively.
+    state_match = re.search(r"^\s*state\s*=\s*(\S+)", body, re.MULTILINE)
+    pid_match = re.search(r"^\s*pid\s*=\s*(\d+)", body, re.MULTILINE)
+    exit_match = re.search(r"^\s*last exit code\s*=\s*(.+)$", body, re.MULTILINE)
+
+    state = state_match.group(1) if state_match else ""
+    pid = int(pid_match.group(1)) if pid_match else None
+    return DaemonStatus(
+        installed=installed,
+        loaded=True,
+        running=(state == "running" and pid is not None),
+        pid=pid,
+        last_exit_code=exit_match.group(1).strip() if exit_match else None,
+        raw=body,
+    )
+
+
+@dataclass
+class AuditEntry:
+    """One parsed stanza from the audit log."""
+    when_iso: str              # raw timestamp string from the header
+    trigger: str               # "startup" / "FolderCompletion(folder=…)" / …
+    body: str                  # full stanza minus the `=== … ===` header line
+
+
+_AUDIT_HEADER_RE = re.compile(
+    r"^=== (?P<when>.+?) — trigger: (?P<trigger>.+?) ===\s*$", re.MULTILINE,
+)
+
+
+def parse_audit_log_entries(
+    log_path: Path, *, n: int = 10,
+) -> list[AuditEntry]:
+    """Return the most recent ``n`` audit stanzas, newest first.
+
+    Reads the whole file (the rotation cap keeps it ≤5MB). Returns an
+    empty list when the file is missing or malformed.
+    """
+    if not log_path.is_file():
+        return []
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        return []
+
+    headers = list(_AUDIT_HEADER_RE.finditer(text))
+    entries: list[AuditEntry] = []
+    for i, m in enumerate(headers):
+        body_start = m.end()
+        body_end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        entries.append(AuditEntry(
+            when_iso=m.group("when").strip(),
+            trigger=m.group("trigger").strip(),
+            body=text[body_start:body_end].strip("\n"),
+        ))
+    # Newest last in the file → reverse for "newest first".
+    entries.reverse()
+    return entries[:n]
+
+
+# ---------------------------------------------------------------------------
+# launchctl control wrappers (thin — used by the web UI buttons)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LaunchctlResult:
+    ok: bool
+    action: str                # "start" / "stop" / "restart"
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _launchctl(args: list[str], action: str) -> LaunchctlResult:
+    try:
+        r = subprocess.run(
+            ["launchctl", *args], capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return LaunchctlResult(
+            ok=False, action=action, returncode=-1, stdout="", stderr=str(exc),
+        )
+    return LaunchctlResult(
+        ok=(r.returncode == 0),
+        action=action,
+        returncode=r.returncode,
+        stdout=r.stdout.strip(),
+        stderr=r.stderr.strip(),
+    )
+
+
+def launchctl_start() -> LaunchctlResult:
+    """Bootstrap the agent into launchd (idempotent — already-loaded
+    returns nonzero with a benign message)."""
+    if not LAUNCHD_PLIST.exists():
+        return LaunchctlResult(
+            ok=False, action="start", returncode=-1,
+            stdout="",
+            stderr=f"plist missing: {LAUNCHD_PLIST}. Install per scripts/launchd/README.md.",
+        )
+    return _launchctl(
+        ["bootstrap", f"gui/{os.getuid()}", str(LAUNCHD_PLIST)], action="start",
+    )
+
+
+def launchctl_stop() -> LaunchctlResult:
+    """Bootout the agent (sends SIGTERM to the current ingest)."""
+    return _launchctl(
+        ["bootout", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"], action="stop",
+    )
+
+
+def launchctl_restart() -> LaunchctlResult:
+    """Kickstart -k: kill the current instance and start a fresh one."""
+    return _launchctl(
+        ["kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"],
+        action="restart",
+    )

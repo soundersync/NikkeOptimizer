@@ -1,0 +1,214 @@
+{% extends "_base.html" %}
+{% block title %}Auto Importer — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.ai-page h1 { margin-bottom: 4px; }
+.ai-page .lead { color: #9ca3af; margin-bottom: 24px; font-size: 13px; }
+
+.ai-status {
+    display: flex; gap: 24px; align-items: center;
+    background: #14161b; border: 1px solid #1f2228; border-radius: 6px;
+    padding: 14px 20px; margin-bottom: 12px;
+}
+.ai-status .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    display: inline-block; flex: none;
+}
+.ai-status .dot.running  { background: #16a34a; box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.20); }
+.ai-status .dot.stopped  { background: #6b7280; }
+.ai-status .dot.missing  { background: #b45309; }
+.ai-status .label   { font-weight: 600; color: #e5e7eb; }
+.ai-status .meta    { color: #9ca3af; font-size: 12px; }
+.ai-status .meta code { color: #d1d5db; }
+.ai-status .actions { margin-left: auto; display: flex; gap: 8px; }
+.ai-status .actions form { display: inline; margin: 0; }
+.ai-status .actions button {
+    background: #1f2937; color: #e5e7eb; border: 1px solid #374151;
+    padding: 6px 14px; border-radius: 4px; font-size: 13px; cursor: pointer;
+}
+.ai-status .actions button:hover  { background: #2a3645; border-color: #4b5563; }
+.ai-status .actions button.danger { color: #fca5a5; border-color: #7f1d1d; }
+.ai-status .actions button.danger:hover { background: #2a1313; }
+
+.ai-action-banner {
+    background: #102a18; border: 1px solid #22543d; color: #6ee7b7;
+    padding: 8px 14px; margin-bottom: 12px; border-radius: 4px; font-size: 13px;
+}
+.ai-action-banner.err {
+    background: #2a1313; border-color: #7f1d1d; color: #fca5a5;
+}
+
+.ai-section h2 {
+    font-size: 14px; color: #d1d5db; margin: 24px 0 8px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+.ai-entry {
+    background: #14161b; border: 1px solid #1f2228; border-radius: 6px;
+    padding: 12px 16px; margin-bottom: 10px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    color: #d1d5db;
+}
+.ai-entry .ai-when    { color: #9ca3af; font-size: 11px; }
+.ai-entry .ai-trigger { color: #60a5fa; }
+.ai-entry pre {
+    margin: 6px 0 0; white-space: pre-wrap; color: #d1d5db;
+    font-family: inherit; font-size: 12px;
+}
+
+.ai-empty {
+    color: #6b7280; font-size: 12px; padding: 14px 0; font-style: italic;
+}
+
+.ai-tail {
+    background: #0a0a0a; border: 1px solid #1f2228; border-radius: 6px;
+    color: #cbd5e1; font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+    padding: 12px 16px; height: 320px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all;
+}
+.ai-tail .ai-tail-meta { color: #6b7280; font-size: 11px; }
+
+.ai-paths {
+    color: #6b7280; font-size: 11px; margin-top: 12px;
+}
+.ai-paths code { color: #9ca3af; }
+</style>
+
+<div class="ai-page">
+<h1>Auto Importer</h1>
+<p class="lead">
+    Syncthing-event-driven ingest daemon. Subscribes to
+    <code>FolderCompletion</code> on <code>incoming-captures/</code>
+    and runs <code>ingest-tournaments</code> in-process whenever a
+    sync completes.
+</p>
+
+{% if action_result %}
+{% set parts = action_result.split(':', 1) %}
+{% set action = parts[0] %}
+{% set outcome = parts[1] if parts|length > 1 else '' %}
+<div class="ai-action-banner {% if not outcome.startswith('ok') %}err{% endif %}">
+    Action <strong>{{ action }}</strong> — {{ outcome }}
+</div>
+{% endif %}
+
+<div class="ai-status">
+    {% if not status.installed %}
+        <span class="dot missing"></span>
+        <div>
+            <div class="label">Not installed</div>
+            <div class="meta">
+                Plist missing at <code>{{ plist_path }}</code>.
+                See <code>scripts/launchd/README.md</code>.
+            </div>
+        </div>
+    {% elif status.running %}
+        <span class="dot running"></span>
+        <div>
+            <div class="label">Running</div>
+            <div class="meta">
+                PID <code>{{ status.pid }}</code>
+                · last exit code <code>{{ status.last_exit_code or '?' }}</code>
+            </div>
+        </div>
+    {% else %}
+        <span class="dot stopped"></span>
+        <div>
+            <div class="label">Stopped</div>
+            <div class="meta">
+                {% if status.loaded %}
+                    Loaded but not running
+                    · last exit code <code>{{ status.last_exit_code or '?' }}</code>
+                {% else %}
+                    Not loaded by launchctl
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+
+    <div class="actions">
+        {% if not status.running %}
+            <form method="post" action="/auto-import/start">
+                <button type="submit">Start</button>
+            </form>
+        {% else %}
+            <form method="post" action="/auto-import/restart">
+                <button type="submit">Restart</button>
+            </form>
+            <form method="post" action="/auto-import/stop"
+                  onsubmit="return confirm('Stopping mid-OCR-pass will discard the current ingest. The next start will reprocess. Continue?');">
+                <button type="submit" class="danger">Stop</button>
+            </form>
+        {% endif %}
+    </div>
+</div>
+
+<div class="ai-section">
+    <h2>Live log tail (SSE)</h2>
+    <div id="ai-tail" class="ai-tail">
+        <div class="ai-tail-meta">Connecting to /auto-import/stream…</div>
+    </div>
+</div>
+
+<div class="ai-section">
+    <h2>Recent runs ({{ entries|length }})</h2>
+    {% for e in entries %}
+    <div class="ai-entry">
+        <div>
+            <span class="ai-when">{{ e.when_iso }}</span>
+            ·
+            <span class="ai-trigger">{{ e.trigger }}</span>
+        </div>
+        <pre>{{ e.body }}</pre>
+    </div>
+    {% else %}
+    <div class="ai-empty">
+        No audit entries yet. The daemon writes one stanza per ingest
+        run; if it's running and hasn't fired yet, sit tight.
+    </div>
+    {% endfor %}
+</div>
+
+<div class="ai-paths">
+    audit log: <code>{{ log_path }}</code>
+    · stderr: <code>{{ stderr_path }}</code>
+    · plist: <code>{{ plist_path }}</code>
+</div>
+</div>
+
+<script>
+// Live tail via Server-Sent Events. Single connection; auto-reconnects
+// on transient drops (EventSource does that for free). Append-only
+// rendering with autoscroll-to-bottom.
+(function() {
+    const tailEl = document.getElementById("ai-tail");
+    if (!tailEl) return;
+
+    let first = true;
+    const es = new EventSource("/auto-import/stream");
+
+    es.onopen = () => {
+        if (first) {
+            tailEl.textContent = "";  // clear placeholder
+            first = false;
+        }
+    };
+    es.onmessage = (evt) => {
+        if (first) { tailEl.textContent = ""; first = false; }
+        // Determine if we should autoscroll (user is near bottom).
+        const nearBottom = tailEl.scrollHeight - tailEl.scrollTop - tailEl.clientHeight < 60;
+        tailEl.appendChild(document.createTextNode(evt.data + "\n"));
+        if (nearBottom) tailEl.scrollTop = tailEl.scrollHeight;
+    };
+    es.onerror = () => {
+        // EventSource auto-reconnects; just note it. Don't close.
+        const meta = document.createElement("span");
+        meta.className = "ai-tail-meta";
+        meta.textContent = "[stream reconnecting…]\n";
+        tailEl.appendChild(meta);
+    };
+})();
+</script>
+
+{% endblock %}

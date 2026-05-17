@@ -3831,4 +3831,103 @@ def create_app(
     def healthz() -> dict:
         return {"ok": True, "matcher_loaded": app.state.matcher is not None}
 
+    # ------------------------------------------------------------------
+    # Auto-import tab — status, controls, live log via SSE
+    # ------------------------------------------------------------------
+
+    @app.get("/auto-import", response_class=HTMLResponse)
+    def auto_import_page(
+        request: Request, action_result: Optional[str] = None,
+    ) -> Response:
+        from .. import auto_import as ai
+
+        status = ai.daemon_status()
+        entries = ai.parse_audit_log_entries(ai.DEFAULT_LOG_PATH, n=10)
+        return templates.TemplateResponse(
+            request, "auto_importer.html",
+            {
+                "status": status,
+                "entries": entries,
+                "log_path": ai.DEFAULT_LOG_PATH,
+                "stderr_path": ai.DEFAULT_LOG_PATH.with_name("auto_import.stderr.log"),
+                "plist_path": ai.LAUNCHD_PLIST,
+                "action_result": action_result,
+            },
+        )
+
+    @app.post("/auto-import/start")
+    def auto_import_start() -> Response:
+        from .. import auto_import as ai
+        r = ai.launchctl_start()
+        msg = "ok" if r.ok else f"err:{r.stderr or r.stdout or r.returncode}"
+        return RedirectResponse(
+            f"/auto-import?action_result=start:{msg}", status_code=303,
+        )
+
+    @app.post("/auto-import/stop")
+    def auto_import_stop() -> Response:
+        from .. import auto_import as ai
+        r = ai.launchctl_stop()
+        msg = "ok" if r.ok else f"err:{r.stderr or r.stdout or r.returncode}"
+        return RedirectResponse(
+            f"/auto-import?action_result=stop:{msg}", status_code=303,
+        )
+
+    @app.post("/auto-import/restart")
+    def auto_import_restart() -> Response:
+        from .. import auto_import as ai
+        r = ai.launchctl_restart()
+        msg = "ok" if r.ok else f"err:{r.stderr or r.stdout or r.returncode}"
+        return RedirectResponse(
+            f"/auto-import?action_result=restart:{msg}", status_code=303,
+        )
+
+    @app.get("/auto-import/stream")
+    def auto_import_stream() -> Response:
+        """SSE endpoint: tails the audit log and emits each appended line
+        as a `data:` event. Handles file rotation (inode change) and
+        sends a `:keepalive` comment every poll cycle when idle so
+        proxies don't drop the connection.
+        """
+        from .. import auto_import as ai
+        from fastapi.responses import StreamingResponse
+        import time as _time
+
+        def _gen():
+            path = ai.DEFAULT_LOG_PATH
+            last_size = path.stat().st_size if path.exists() else 0
+            last_inode = path.stat().st_ino if path.exists() else None
+            yield ":connected\n\n"
+            while True:
+                if not path.exists():
+                    yield ":waiting\n\n"
+                    _time.sleep(1.0)
+                    continue
+                stat = path.stat()
+                if stat.st_ino != last_inode or stat.st_size < last_size:
+                    # File rotated or truncated.
+                    last_size = 0
+                    last_inode = stat.st_ino
+                if stat.st_size > last_size:
+                    with path.open("rb") as fp:
+                        fp.seek(last_size)
+                        chunk = fp.read().decode("utf-8", errors="replace")
+                    last_size = stat.st_size
+                    for line in chunk.splitlines():
+                        # Prefix every SSE message with `data:` per the
+                        # protocol. Empty lines become blank `data:`.
+                        yield f"data: {line}\n\n"
+                else:
+                    yield ":keepalive\n\n"
+                _time.sleep(1.0)
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",  # in case a proxy is in the way
+            },
+        )
+
     return app
