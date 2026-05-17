@@ -75,6 +75,7 @@ NikkeOptimizer/
         blablalink.py                 # BlablaLink CDN per-character stat tables (Playwright)
         shiftyspad.py                 # BlablaLink player-profile scraper (live + snapshot modes)
         shiftyspad_decoder.py         # gear/cube/treasure/bond tid resolvers (cached tables)
+        blablalink_user_lookup.py     # name → openid search + level verify + triage CSV (lookup-players)
     roster/
       csv_importer.py                 # CSV → OwnedCharacter rows (v1 + v2 format, dry-run diff)
       shiftyspad_importer.py          # ShiftyPad → OwnedCharacter (live) + RosterSnapshot (Champions)
@@ -244,6 +245,11 @@ nikkeoptimizer snapshot-names --season 30 --player Aerin                        
 
 # Stubs for new characters BlablaLink knows about but Prydwen hasn't covered yet
 nikkeoptimizer stub-character "Mint"                                            # minimal Character row from BlablaLink
+
+# Player-lookup triage (no DB writes): name+level list → 31-col CSV
+# of who's on NA, who's Public, plus the base64 uid to pipe into fetch-shiftyspad.
+nikkeoptimizer lookup-players players.csv                                       # → ~/Downloads/nikke_player_lookup_<date>.csv
+nikkeoptimizer lookup-players - --tolerance 20 --only "Agito,Royalvio"          # stdin + subset
 ```
 
 The `web` command auto-launches the default browser; pass `--no-open`
@@ -253,6 +259,26 @@ The ShiftyPad scraper paces detail-page navigations at random 3-7s
 intervals (per [[blablalink-scraper-behavior]]) — a full 186-char
 sync takes ~15 min. Subset/snapshot scrapes that target a handful of
 chars finish in well under a minute.
+
+### Player-lookup triage flow
+
+`lookup-players` is the *triage* step before `fetch-shiftyspad`: given
+a `(name, expected_level)` list, it calls BlablaLink's `SearchUser` +
+`GetUserGamePlayerInfo` to find each player's `intl_openid` on NA
+(`area_id == "82"`), then navigates `/shiftyspad/home` once to capture
+the same XHRs `fetch-shiftyspad` would (`BasicInfo`, `OutpostInfo`,
+`GetUserCharacters` — the latter just to read its return code for the
+`My Nikkes` public/private flag). All 31 CSV fields are derived from
+typed JSON paths, not innerText regex.
+
+Output schema is tuned for hand-off: every Found row carries a `UID`
+column (the base64 string `fetch-shiftyspad` takes positionally) and a
+`Worth Fetching` flag (yes iff roster *or* outpost is Public). The CLI
+prints ready-to-paste `nikkeoptimizer fetch-shiftyspad <uid>` lines
+at the end of the run. `Status` values: `Found` / `No Search Results`
+/ `Not On NA` / `Level Mismatch`. Default tolerance ±15 (widen for
+older lists). No DB writes — pure JSON → CSV. Source: SKILL.md (the
+original Claude-in-Chrome flow), reimplemented in Python.
 
 ---
 
