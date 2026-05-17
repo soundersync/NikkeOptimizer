@@ -3351,5 +3351,125 @@ def fetch_shiftyspad_cmd(
         console.print(f"\n[dim]dry run — pass --apply to write changes[/]")
 
 
+# ---------------------------------------------------------------------------
+# BlablaLink player lookup (SKILL.md flow as a Python scraper)
+# ---------------------------------------------------------------------------
+
+
+@app.command("lookup-players")
+def lookup_players_cmd(
+    input_path: Path = typer.Argument(
+        ...,
+        help="Path to player list (CSV-ish: Rank,Name,lvl  or  Name,lvl  or  Name, Lv.XXX). "
+             "Use '-' to read from stdin.",
+    ),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Output CSV path. Defaults to ~/Downloads/nikke_player_lookup_YYYY-MM-DD.csv",
+    ),
+    tolerance: int = typer.Option(
+        15, "--tolerance", "-t",
+        help="Level-match tolerance ±N (SKILL.md default 10; widen to 15+ for older lists).",
+    ),
+    show_browser: bool = typer.Option(
+        False, "--show-browser", help="Run Chromium with a visible window (default: headless).",
+    ),
+    only: Optional[str] = typer.Option(
+        None, "--only", help="Comma-separated subset of names to look up (case-insensitive).",
+    ),
+) -> None:
+    """Look up Nikke players on BlablaLink (NA), verify by level, export CSV.
+
+    Requires a logged-in BlablaLink session — run ``shiftyspad-login``
+    first if you haven't. Cookies persist ~30 days in the Playwright
+    profile.
+
+    Output schema (31 columns) matches the JS skill's CSV. Status values:
+    Found / "No Search Results" / "Not On NA" / "Level Mismatch".
+    """
+    import sys
+    from ..data.scrapers.blablalink_user_lookup import (
+        CSV_COLUMNS,
+        PlayerQuery,
+        default_csv_path,
+        parse_player_input,
+        run_lookup,
+        write_csv,
+    )
+
+    if str(input_path) == "-":
+        raw = sys.stdin.read()
+    else:
+        raw = Path(input_path).read_text(encoding="utf-8")
+    queries = parse_player_input(raw)
+    if not queries:
+        console.print("[red]no parseable players in input[/]")
+        raise typer.Exit(1)
+
+    if only:
+        wanted = {n.strip().upper() for n in only.split(",") if n.strip()}
+        queries = [q for q in queries if q.name.upper() in wanted]
+        if not queries:
+            console.print(f"[red]--only filter excluded every player[/]")
+            raise typer.Exit(1)
+
+    out_path = output or default_csv_path()
+    console.print(f"[cyan]players:[/] {len(queries)}")
+    console.print(f"[cyan]tolerance:[/] ±{tolerance}")
+    console.print(f"[cyan]output:[/] {out_path}")
+    console.print()
+
+    rows: list[dict[str, object]] = []
+    status_counts: dict[str, int] = {}
+
+    def on_progress(p) -> None:
+        if p.status in {"searching", "fetching-home"}:
+            console.print(
+                f"  [{p.index+1:2d}/{p.total}] [dim]{p.name:<20s}[/] {p.status}…"
+            )
+            return
+        # terminal status for this player
+        colour = {
+            "Found": "green",
+            "No Search Results": "yellow",
+            "Not On NA": "yellow",
+            "Level Mismatch": "yellow",
+        }.get(p.status, "red")
+        console.print(
+            f"  [{p.index+1:2d}/{p.total}] [bold]{p.name:<20s}[/] "
+            f"[{colour}]{p.status}[/]"
+        )
+        status_counts[p.status] = status_counts.get(p.status, 0) + 1
+
+    rows = run_lookup(queries, tolerance=tolerance, headless=not show_browser,
+                     on_progress=on_progress)
+
+    write_csv(rows, out_path)
+    console.print()
+    console.print(f"[bold green]wrote[/] {out_path}  ({len(rows)} rows, {len(CSV_COLUMNS)} cols)")
+    if status_counts:
+        summary = "  ".join(f"{k}: {v}" for k, v in sorted(status_counts.items()))
+        console.print(f"[dim]{summary}[/]")
+
+    fetchable = [r for r in rows if r.get("Worth Fetching") == "yes"]
+    if fetchable:
+        console.print()
+        console.print(f"[bold cyan]worth fetching ({len(fetchable)}):[/]")
+        for r in fetchable:
+            roster = r.get("My Nikkes Status", "?")
+            outpost = r.get("Outpost Info Status", "?")
+            console.print(
+                f"  [bold]{r['Player Name']:<14s}[/] "
+                f"Lv.{r['Actual Level']:<4}  "
+                f"roster=[{'green' if roster=='Public' else 'yellow'}]{roster}[/] "
+                f"outpost=[{'green' if outpost=='Public' else 'yellow'}]{outpost}[/]  "
+                f"[dim]{r['UID']}[/]"
+            )
+        console.print()
+        console.print("[dim]hand off to fetch-shiftyspad:[/]")
+        for r in fetchable:
+            console.print(f"  nikkeoptimizer fetch-shiftyspad {r['UID']}")
+
+
 if __name__ == "__main__":
     app()
