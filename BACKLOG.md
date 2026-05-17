@@ -158,6 +158,63 @@ User-observed cases where the optimizer recommends teams they wouldn't field. Ca
    - **"For 1 round" durations** (SW:HA S2): currently encoded as 1.0 second; simulator must distinguish charge rounds from seconds.
 - **RNG model** — Defender wins on 5-min timeout. Attacker damage variance is real. Pinning down the RNG seed model is needed before "deterministic" simulation claims.
 
+## Snapshot architecture — future extensions (post Champions v1)
+
+Champions v1 reuses the existing `RosterSnapshot` schema as-is (one
+snapshot per `(season_number, player_username)`). When Rookie Arena
+work begins we'll need to extend it to support **multiple snapshots
+per (season, player)** keyed by date. Design captured here so the v1
+build-out doesn't paint us into a corner.
+
+**Schema changes needed for Rookie:**
+
+```python
+class RosterSnapshot(SQLModel, table=True):
+    # NEW
+    snapshot_kind: str          # 'champions_season' | 'rookie_daily' | 'shiftyspad_sync'
+    snapshot_date: Optional[date] = None  # required for rookie_daily; null for champions_season
+    # Replace the existing unique constraint:
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_kind", "season_number", "snapshot_date", "player_username",
+            name="uq_roster_snapshot_kind_season_date_player",
+        ),
+    )
+```
+
+Backfill: every existing row gets `snapshot_kind='champions_season'`
+(they were all Champions before this split).
+
+**Rookie flow recap** (from 2026-05-16 discussion):
+- Rookie Arena = 5 battles/day per player at *actual* per-character
+  sync levels (not Champions' fixed-400 clamp).
+- Snapshot scope: only the chars that appeared in that day's loadouts
+  (typically ≤5 unique chars per player per day).
+- Trigger: after match results land via `arena_importer`, run a
+  scrape pass to capture each player's state for those chars.
+- Storage: one `RosterSnapshot` per `(season, date, player)` plus
+  sparse `RosterSnapshotCharacter` rows for just the played chars.
+
+**Resolution stays the same** as Champions v1: `ArenaMatch` has
+`user_snapshot_id` + `opponent_snapshot_id` FKs, the simulator
+looks the right snapshot up by FK. The Champions LV-400 in-match
+clamp is mode-specific (applied at resolution time, not stored in
+the snapshot). Rookie reads the per-character `lv` from the snapshot
+verbatim.
+
+**Open considerations left for that slice:**
+- Auto-trigger snapshot scrape from `arena_importer` (convenient)
+  vs. explicit `nikkeoptimizer fetch-shiftyspad --snapshot-kind rookie_daily`
+  (decoupled). v1 lean: explicit.
+- Slot membership for Rookie's "actual sync level" — current
+  ShiftyPad endpoints don't expose synchro-slot membership; the home
+  roster's `lv` field gives effective displayed level which is what
+  we want. Re-validate before Rookie wiring.
+- Privacy: if an opponent's roster is private, write a sparse
+  snapshot with `label='private_roster'` and zero per-char rows;
+  outpost research (mostly public) still lands on the account-level
+  fields. Simulator falls back to defaults for missing per-char data.
+
 ## Done — kept here as forward-thinking notes
 
 - Phase 2 alpha: rookie / SP / Champions / counter / counter-sp / explain (shipped)

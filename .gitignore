@@ -23,3 +23,13 @@ data/raw/
 # `nikkeoptimizer ingest-tournaments` into /captures.
 /captures/
 /champion_arena/
+
+# Claude Code agent settings (per-user, not project state).
+/.claude/
+
+# Inbox for raw uploads + per-user capture staging.
+/incoming-captures/
+
+# Debug-script dump payloads (the .py scripts are tracked; their
+# captured response bodies aren't).
+/scripts/debug/dumps/

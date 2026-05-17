@@ -72,8 +72,11 @@ NikkeOptimizer/
       scrapers/
         prydwen.py                    # Prydwen.gg character data scraper
         blablalink.py                 # BlablaLink CDN per-character stat tables (Playwright)
+        shiftyspad.py                 # BlablaLink player-profile scraper (live + snapshot modes)
+        shiftyspad_decoder.py         # gear/cube/treasure/bond tid resolvers (cached tables)
     roster/
       csv_importer.py                 # CSV → OwnedCharacter rows (v1 + v2 format, dry-run diff)
+      shiftyspad_importer.py          # ShiftyPad → OwnedCharacter (live) + RosterSnapshot (Champions)
       arena.py                        # arena screenshot extractors
       arena_importer.py               # arena import pipeline + CP cross-validation auto-confirm
       portrait_matcher.py             # Apple Vision feature-print matching
@@ -93,6 +96,7 @@ NikkeOptimizer/
       scoring.py                      # heuristic scorer + ScoringWeights + rescore_with_evaluator
       constraints.py                  # burst-chain validity check
       rookie.py / sp_arena.py / champions.py / counter.py
+      snapshot_views.py               # CharacterView ← RosterSnapshot (Champions LV-400 clamp)
     web/
       app.py                          # FastAPI; create_app(db_path, portrait_library)
       templates/                      # Jinja2 (server-rendered, no JS framework)
@@ -107,6 +111,10 @@ NikkeOptimizer/
     test_simulator_*.py               # 78 tests, no DB/OCR deps
     test_arena*.py                    # require macOS + sqlmodel + portrait library
     ...
+
+  scripts/
+    migrations/                       # NNNN_*.sql + apply_migrations.py (idempotent, dual-DB)
+    debug/                            # exploratory scripts (.gitignored dumps/ subdir)
 ```
 
 ---
@@ -171,10 +179,38 @@ nikkeoptimizer fetch-roledata <id|name>     # mirror BlablaLink character stat t
 nikkeoptimizer fetch-roledata --all         # mirror every character (~30 min @ rate 9.5)
 nikkeoptimizer roledata-coverage            # cross-reference simulator library vs cache
 nikkeoptimizer set-research --general 300   # set Outpost research levels (singleton)
+nikkeoptimizer refresh --name "Mint"        # refresh a single character from Prydwen (or all)
+```
+
+### ShiftyPad (BlablaLink player-profile scraper)
+
+```sh
+nikkeoptimizer shiftyspad-login                                # one-time browser login (cookies persist ~30d)
+nikkeoptimizer fetch-shiftyspad <uid>                          # dry-run sync to live OwnedCharacter table
+nikkeoptimizer fetch-shiftyspad <uid> --apply                  # actually write
+nikkeoptimizer fetch-shiftyspad <uid> --names "Alice,Modernia" # subset by name
+nikkeoptimizer fetch-shiftyspad <uid> --max-chars 3            # safety cap during dev
+
+# Champions Arena snapshots — sparse RosterSnapshot per (season, player).
+# Always writes (no dry-run); re-running replaces the prior snapshot.
+nikkeoptimizer fetch-shiftyspad <uid> --snapshot --season 30                    # self snapshot (auto player name)
+nikkeoptimizer fetch-shiftyspad <uid> --snapshot --season 30 \
+    --player-username "Aerin" --names "Crown,Modernia,Liter"                    # opponent snapshot, sparse
+
+# Convenience: derive the name list from already-captured match data
+nikkeoptimizer snapshot-names --season 30 --player Aerin                        # prints comma-separated
+
+# Stubs for new characters BlablaLink knows about but Prydwen hasn't covered yet
+nikkeoptimizer stub-character "Mint"                                            # minimal Character row from BlablaLink
 ```
 
 The `web` command auto-launches the default browser; pass `--no-open`
 for headless. Default port 8765.
+
+The ShiftyPad scraper paces detail-page navigations at random 3-7s
+intervals (per [[blablalink-scraper-behavior]]) — a full 186-char
+sync takes ~15 min. Subset/snapshot scrapes that target a handful of
+chars finish in well under a minute.
 
 ---
 
@@ -250,6 +286,83 @@ reproduce displayed in-game stats **to the digit** for owned characters
 
 ---
 
+## ShiftyPad scraper + Champions snapshots
+
+The ShiftyPad scraper (`data/scrapers/shiftyspad.py` + `roster/shiftyspad_importer.py`)
+pulls a player's profile + roster + per-character details via 4 BlablaLink
+endpoints. Two write modes:
+
+**Live mode** (default): writes to `OwnedCharacter` / `AccountState` —
+the user's current roster. Partial-update semantics (preserves OL gear
+rows that the CSV importer populated). Dry-run by default; pass
+`--apply` to commit.
+
+**Snapshot mode** (`--snapshot --season N`): writes to `RosterSnapshot`
++ `RosterSnapshotCharacter`. Always writes; replaces any prior
+snapshot for the same `(season_number, player_username)`. Sparse by
+design — only chars passed via `--names` (or all chars when omitted)
+get per-char rows. Account-level fields land on the snapshot row from
+`outpost_info`.
+
+### OL gear decoding (the load-bearing find)
+
+Every gear `option_id` (the 3 rolled bonuses per piece) is decoded
+from `state_effects[i].function_details[0].function_value` (integer ×
+100 = percent) returned alongside `character_details` in the same
+endpoint. Combined with cached static CDN tables (`yu-75` gear, `bl-25`
+bonus groups, `qe-66` bond, per-tid cube/treasure files under
+`<user_data_dir>/blablalink/tables/`), the scraper renders exact
+in-game gear stats — validated formula `(base × (10 + lv) + 5) // 10`.
+
+The static tables auto-cache from page navigations
+(`maybe_persist_table_response` in `shiftyspad_decoder.py`), so a
+single full scrape pre-warms the decoder for every cube/treasure the
+player has equipped.
+
+### Champions snapshot resolution
+
+`ArenaMatch` rows for Champions mode link to two `RosterSnapshot`
+rows via `user_snapshot_id` + `opponent_snapshot_id` FKs (migration
+0001). `optimizer/snapshot_views.py:load_views_for_match()` returns
+the right `CharacterView` list per side, applying the Champions
+**LV-400 cap at resolution time** (snapshots store the player's
+actual sync level — clamping is mode-specific).
+
+When `fetch-shiftyspad --snapshot --season N` runs, it auto-links any
+existing Champions `ArenaMatch` rows in that season where
+`player_username` appears as user or opponent. Match-season membership
+is derived via `data/seasons.season_for_date(match.captured_at.date())`.
+
+### Stub characters (Mint case)
+
+When BlablaLink ships a new Nikke before Prydwen does, the scraper
+flags her as `unmatched`. Workflow:
+
+1. `nikkeoptimizer stub-character "Mint"` — creates a minimal
+   `Character` row from BlablaLink data (rarity/element/weapon/class/mfr).
+   Marked with `source = "blablalink_stub"`.
+2. Future scrapes report her under "stubs awaiting Prydwen refresh"
+   with the upgrade hint.
+3. When Prydwen catches up: `nikkeoptimizer refresh --name Mint`
+   overwrites the stub with full review data; `source` flips to
+   `"prydwen"`; the warning silently disappears.
+
+### Schema migrations
+
+`scripts/migrations/0001_arena_match_snapshot_fks.sql` is the first
+migration shipped via `scripts/migrations/apply_migrations.py`. The
+runner detects existing columns + uses `CREATE INDEX IF NOT EXISTS`,
+so it's idempotent. Always applied to BOTH databases per
+[[dual-DB-ALTER]] memory; missing DBs (e.g. `/tmp/nikke_test.sqlite3`
+when not yet created) are gracefully skipped.
+
+For new migrations: drop a `NNNN_description.sql` in `scripts/migrations/`,
+re-run `apply_migrations.py`. Update the SQLModel definition in the
+same change so a fresh DB built from `SQLModel.metadata.create_all`
+gets the same shape.
+
+---
+
 ## CSV format versions
 
 The importer handles both:
@@ -272,14 +385,20 @@ flags Power drops worth investigating before any writes happen.
 
 There's a persistent memory at
 `~/.claude/projects/-Users-sleepingcounty-git-other-NikkeOptimizer/memory/`.
-Read `MEMORY.md` there for short hooks pointing to:
+Read `MEMORY.md` there for the live index. Highlights worth knowing:
 
-- Portrait library data quirks (label byte-duplicates)
-- Vision feature-print API gotcha (pyobjc metadata)
-- FastAPI Jinja2 signature change (positional args)
-- No DB migrations (column adds need rebuild)
-- Don't trust memory for NIKKE attributes (query DB first)
-- Doll vs Treasure CSV gap (CSV columns mislabeled, no per-Treasure unlock data)
+- **No DB migrations** — column adds rebuild dev DB; or use the
+  scripts/migrations/ runner now landing as a pattern.
+- **Dual-DB ALTER pattern** — when adding columns, alter both
+  `/tmp/nikke_test.sqlite3` AND the user's main DB.
+- **BlablaLink scraper behavior** — must mimic human browsing
+  (one char at a time, randomized delays, no bulk fetches even when
+  the API allows it). Account-flagging risk.
+- **NIKKE synchro level semantics** — outpost cap vs per-char
+  actual vs CSV column are three distinct things; Champions overrides
+  sync to 400 in-match (applied at resolution, not at snapshot time).
+- **Don't trust my memory for NIKKE attributes** — query the
+  Character table first.
 
 When you learn something non-obvious about how the user works or about
 a project constraint, save it there. Format and rules are in the

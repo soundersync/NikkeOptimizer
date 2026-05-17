@@ -402,6 +402,16 @@ class ArenaMatch(SQLModel, table=True):
     # usernames where the simple username comparison fails.
     is_user_lineup: Optional[bool] = Field(default=None)
     captured_at: datetime = Field(default_factory=_utcnow)
+    # Snapshot linkage — populated when this match is part of a
+    # Champions Arena season run. Both nullable; legacy matches stay
+    # NULL and the simulator falls back to live OwnedCharacter data.
+    # See migration 0001_arena_match_snapshot_fks.sql.
+    user_snapshot_id: Optional[int] = Field(
+        default=None, foreign_key="roster_snapshot.id", index=True,
+    )
+    opponent_snapshot_id: Optional[int] = Field(
+        default=None, foreign_key="roster_snapshot.id", index=True,
+    )
 
 
 # ---------------------------------------------------------------------------

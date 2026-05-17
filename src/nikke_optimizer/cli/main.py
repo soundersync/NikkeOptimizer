@@ -44,11 +44,38 @@ def _root(
 def refresh(
     db: Optional[Path] = typer.Option(None, help="Override DB path"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Bypass on-disk fetch cache"),
+    name: Optional[list[str]] = typer.Option(
+        None, "--name", "-n",
+        help="Refresh only the named character(s); pass multiple times or "
+             "comma-separated. Resolved against Prydwen slugs case-insensitively. "
+             "Default: refresh every character.",
+    ),
 ) -> None:
-    """Fetch character data from Prydwen and upsert into the local database."""
+    """Fetch character data from Prydwen and upsert into the local database.
+
+    Examples:
+
+      \b
+      nikkeoptimizer refresh                       # refresh all characters
+      nikkeoptimizer refresh --name Mint           # just one character
+      nikkeoptimizer refresh -n Mint -n "Red Hood" # several
+      nikkeoptimizer refresh --name "Mint,Red Hood" --no-cache
+    """
     from ..data.scrapers.refresh import refresh_async
 
-    counts = asyncio.run(refresh_async(db_path=db, use_cache=not no_cache))
+    # Allow either repeated flags or a comma-separated single value.
+    names: Optional[list[str]] = None
+    if name:
+        names = []
+        for entry in name:
+            for piece in entry.split(","):
+                p = piece.strip()
+                if p:
+                    names.append(p)
+
+    counts = asyncio.run(
+        refresh_async(db_path=db, use_cache=not no_cache, names=names)
+    )
     console.print(f"[bold green]Refresh complete[/]: {counts}")
     console.print(f"DB: {db or default_db_path()}")
 
@@ -2856,6 +2883,472 @@ def seed_treasures_cmd(
     console.print(
         f"[bold green]Seeded[/] {n_skills} treasure-skill rows across {n_chars} characters."
     )
+
+
+# ---------------------------------------------------------------------------
+# ShiftyPad scraper
+# ---------------------------------------------------------------------------
+
+
+@app.command("shiftyspad-login")
+def shiftyspad_login_cmd(
+    sentinel: Path = typer.Option(
+        Path("/tmp/blablalink-login-done"),
+        "--sentinel", help="Path to touch when login is complete (script polls for it).",
+    ),
+    max_wait_minutes: int = typer.Option(30, "--max-wait", help="Max wait time before giving up."),
+) -> None:
+    """Open a Chromium window for manual BlablaLink login.
+
+    The persistent profile under
+    ``~/Library/Application Support/NikkeOptimizer/blablalink/_browser_profile/``
+    is reused so subsequent ``fetch-shiftyspad`` calls inherit the
+    session cookies. Steps:
+
+      1. A Chromium window opens at https://www.blablalink.com/.
+      2. Log in via whatever method you normally use.
+      3. (Optional) Navigate to your own ShiftyPad profile and verify
+         "My Nikkes" renders content — confirms the session works.
+      4. In another terminal, run ``touch /tmp/blablalink-login-done``
+         (or the value of ``--sentinel``). The script detects the file,
+         captures the cookies, and exits.
+
+    Cookies persist for ~30 days; re-run when sessions expire.
+    """
+    import time as _time
+    from ..data.scrapers.shiftyspad import default_browser_profile_dir
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        console.print("[red]Playwright is not installed. Run: pip install -e '.[scrape]' && playwright install chromium[/]")
+        raise typer.Exit(1)
+
+    if sentinel.exists():
+        sentinel.unlink()
+    profile = default_browser_profile_dir()
+    console.print(f"[cyan]persistent profile:[/] {profile}")
+    console.print(f"[cyan]when done logging in, run:[/] touch {sentinel}")
+
+    deadline = _time.monotonic() + max_wait_minutes * 60
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=str(profile),
+            headless=False,
+        )
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://www.blablalink.com/", wait_until="domcontentloaded")
+        while _time.monotonic() < deadline:
+            if sentinel.exists():
+                break
+            _time.sleep(1.0)
+        cookies = ctx.cookies()
+        ctx.close()
+    bla_auth = [c for c in cookies if c["name"].startswith("game_")]
+    console.print(
+        f"[green]captured[/] {len(cookies)} cookies "
+        f"({len(bla_auth)} look like game-session cookies)"
+    )
+    if sentinel.exists():
+        sentinel.unlink()
+    if not bla_auth:
+        console.print(
+            "[yellow]warning:[/] no game_* cookies found — login may not have succeeded."
+        )
+
+
+@app.command("snapshot-names")
+def snapshot_names_cmd(
+    season: int = typer.Option(..., "--season", help="Beta season number (e.g. 30)."),
+    player: str = typer.Option(
+        ..., "--player",
+        help="Player identifier — matches ArenaMatch.user_username or "
+             "opponent_username.",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Print the unique characters a player used in a Champions Arena season.
+
+    Read-only convenience for the snapshot-scraping flow. Walks
+    ArenaMatch rows for the season, filters by player name (either
+    side), unions the character lists from all 5 teams, then prints
+    a comma-separated list ready to paste into `fetch-shiftyspad --names`.
+
+    Example:
+
+      \b
+      nikkeoptimizer snapshot-names --season 30 --player Aerin
+      → "Crown,Modernia,Liter,..." # paste into --names of fetch-shiftyspad
+    """
+    from ..data.models import ArenaMatch
+    from ..data.seasons import season_for_date
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        matches = session.exec(
+            select(ArenaMatch).where(ArenaMatch.mode == "champion")
+        ).all()
+
+    chars: set[str] = set()
+    matched_n = 0
+    for m in matches:
+        if not m.captured_at:
+            continue
+        try:
+            if season_for_date(m.captured_at.date()) != season:
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        if m.user_username == player:
+            chars.update(c for c in (m.user_team or []) if c)
+            matched_n += 1
+        if m.opponent_username == player:
+            chars.update(c for c in (m.opponent_team or []) if c)
+            matched_n += 1
+
+    if not chars:
+        console.print(
+            f"[yellow]no Champions matches found for player={player!r} "
+            f"in season {season}[/]"
+        )
+        raise typer.Exit(0)
+
+    sorted_chars = sorted(chars)
+    console.print(
+        f"[cyan]{len(sorted_chars)} unique char(s) across {matched_n} "
+        f"match-sides for {player!r} in season {season}:[/]"
+    )
+    console.print(",".join(sorted_chars))
+
+
+@app.command("stub-character")
+def stub_character_cmd(
+    name: str = typer.Argument(..., help="Character display name (e.g. 'Mint')."),
+    from_shiftyspad: bool = typer.Option(
+        True, "--from-shiftyspad/--no-shiftyspad",
+        help="Source minimal fields from the mirrored BlablaLink nikke list. "
+             "Default is the only mode currently supported.",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Create a minimal `Character` row from BlablaLink data.
+
+    Use this when a Nikke shows up in your ShiftyPad roster but isn't on
+    Prydwen yet (typical for the first few days after a new release).
+    The stub lets the optimizer treat the character normally; once
+    Prydwen ships her review, `nikkeoptimizer refresh --name <X>`
+    upgrades the stub to full data.
+
+    The stub's `source` column is set to `"blablalink_stub"`, which
+    `fetch-shiftyspad` surfaces as a recurring reminder.
+    """
+    from ..roster.shiftyspad_importer import stub_from_shiftyspad
+    if not from_shiftyspad:
+        console.print("[red]Only --from-shiftyspad is supported today.[/]")
+        raise typer.Exit(1)
+    char, status = stub_from_shiftyspad(name, db_path=db)
+    if status == "not_found":
+        console.print(
+            f"[red]'{name}' not found in BlablaLink nikke list mirror.[/]\n"
+            f"  Try `nikkeoptimizer fetch-roledata --all` to refresh the mirror."
+        )
+        raise typer.Exit(1)
+    if status == "exists":
+        console.print(
+            f"[yellow]Character '{name}' already exists in the DB[/] "
+            f"(source={char.source!r}). Not overwritten."
+        )
+        if char.source != "blablalink_stub":
+            console.print(
+                "[dim]  → already has Prydwen data; no stub needed.[/]"
+            )
+        return
+    console.print(
+        f"[bold green]Stub created[/] for '{name}'\n"
+        f"  rarity={char.rarity.value} element={char.element.value} "
+        f"weapon={char.weapon_class.value} burst={char.burst_type.value} "
+        f"mfr={char.manufacturer.value if char.manufacturer else '?'}\n"
+        f"  role_tags={char.role_tags} source={char.source!r}\n"
+        f"[dim]  → upgrade to full Prydwen data later via:[/] "
+        f"nikkeoptimizer refresh --name {name}"
+    )
+
+
+@app.command("fetch-shiftyspad")
+def fetch_shiftyspad_cmd(
+    uid: str = typer.Argument(
+        ..., help="Base64-encoded uid from the shiftyspad URL (?uid=...).",
+    ),
+    names: Optional[str] = typer.Option(
+        None, "--names",
+        help="Comma-separated character names to fetch details for. Default: all owned.",
+    ),
+    max_chars: Optional[int] = typer.Option(
+        None, "--max-chars",
+        help="Cap on per-character detail fetches (safety lever during dev). "
+             "Home-page data (basic_info, outpost, roster summary) is always fetched.",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write changes to DB. Default is dry-run.",
+    ),
+    headless: bool = typer.Option(
+        True, "--headless/--no-headless",
+        help="Run Chromium headless. --no-headless shows the browser.",
+    ),
+    delay_lo: float = typer.Option(
+        3.0, "--delay-lo", help="Min seconds between detail-page navigations.",
+    ),
+    delay_hi: float = typer.Option(
+        7.0, "--delay-hi", help="Max seconds between detail-page navigations.",
+    ),
+    snapshot: bool = typer.Option(
+        False, "--snapshot",
+        help="Write to RosterSnapshot (Champions Arena) instead of the live "
+             "OwnedCharacter table. Requires --season; --player-username "
+             "defaults to the BlablaLink nickname for self-scrapes. Always "
+             "writes (no dry-run) — re-run replaces the existing snapshot.",
+    ),
+    season: Optional[int] = typer.Option(
+        None, "--season",
+        help="Beta season number (e.g. 30). Required with --snapshot.",
+    ),
+    player_username: Optional[str] = typer.Option(
+        None, "--player-username",
+        help="Player identifier for the snapshot row (defaults to the scraped "
+             "profile's nickname). Required when the nickname isn't available.",
+    ),
+    no_link_matches: bool = typer.Option(
+        False, "--no-link-matches",
+        help="With --snapshot: skip the auto-link to existing ArenaMatch FKs.",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Sync a ShiftyPad player profile into the local DB.
+
+    Default is a **dry run** — fetches the data and prints a diff
+    against the current DB without writing. Pass ``--apply`` to
+    commit the changes.
+
+    Behavior:
+      - The home page is loaded once: that captures BasicInfo,
+        OutpostInfo, and the owned-characters list in a single
+        navigation.
+      - For each target character, the detail page is loaded
+        sequentially with a randomized ``--delay-lo``..``--delay-hi``
+        gap between (mimics a user clicking through their roster;
+        keep the defaults unless you have a reason).
+      - When a profile has My Nikkes private, the roster + details
+        are unavailable but the public Outpost fields still sync.
+      - When a profile's Outpost research is per-field redacted, the
+        scraper skips the research fields (synchro level + battle
+        level stay public).
+
+    Examples:
+
+      \b
+      nikkeoptimizer fetch-shiftyspad <uid>            # full dry-run
+      nikkeoptimizer fetch-shiftyspad <uid> --apply    # full sync
+      nikkeoptimizer fetch-shiftyspad <uid> --names "Alice,Modernia" --apply
+      nikkeoptimizer fetch-shiftyspad <uid> --max-chars 3  # safety-capped probe
+    """
+    from ..data.scrapers.shiftyspad import (
+        ShiftyPadFetcher,
+        fetch_character_details,
+    )
+    from ..roster.shiftyspad_importer import (
+        NameCodeIndex,
+        sync,
+        sync_to_snapshot,
+    )
+
+    if snapshot and season is None:
+        console.print("[red]--snapshot requires --season N[/]")
+        raise typer.Exit(1)
+
+    name_filter = None
+    if names:
+        name_filter = {n.strip() for n in names.split(",") if n.strip()}
+    name_index = NameCodeIndex.from_mirror()
+
+    # Reverse lookup: English name → name_code (case-insensitive).
+    name_to_code = {v.lower(): k for k, v in name_index.name_code_to_name.items()}
+
+    console.print(f"[cyan]fetching home page for[/] uid={uid}")
+    with ShiftyPadFetcher(
+        headless=headless,
+        detail_delay_range=(delay_lo, delay_hi),
+    ) as f:
+        home = f.fetch_home(uid)
+        console.print(
+            f"  basic_info:    {'yes' if home.basic_info else 'no'}\n"
+            f"  outpost_info:  {'yes' if home.outpost_info else 'no'}"
+            f" {'(research private)' if home.is_outpost_private else ''}\n"
+            f"  characters:    {len(home.characters)}"
+            f" {'(roster private)' if home.is_roster_private else ''}"
+        )
+
+        # Decide which characters to fetch details for.
+        target_codes: list[int] = []
+        if home.characters and not home.is_roster_private:
+            if name_filter:
+                missing: list[str] = []
+                for n in name_filter:
+                    code = name_to_code.get(n.lower())
+                    if code is None:
+                        missing.append(n)
+                    else:
+                        target_codes.append(code)
+                if missing:
+                    console.print(f"[yellow]no name_code for:[/] {missing}")
+            else:
+                target_codes = [
+                    int(c["name_code"]) for c in home.characters
+                    if c.get("name_code") is not None
+                ]
+            if max_chars is not None:
+                target_codes = target_codes[:max_chars]
+
+        details = []
+        if target_codes:
+            console.print(
+                f"[cyan]fetching details for {len(target_codes)} character(s)[/]"
+                f" — estimated {len(target_codes) * (delay_lo + delay_hi) / 2:.0f}s"
+            )
+
+            def _progress(i: int, n: int, code: int) -> None:
+                name = name_index.name_code_to_name.get(code, f"#{code}")
+                console.print(f"  [dim]({i + 1}/{n})[/] {name}")
+
+            details = fetch_character_details(
+                uid, target_codes,
+                name_code_to_resource_id=name_index.name_code_to_resource_id,
+                fetcher=f,
+                progress=_progress,
+            )
+
+    # ---- Snapshot mode (Champions Arena, season-locked) ----
+    if snapshot:
+        # Resolve player_username: prefer explicit flag, else nickname.
+        resolved_username = player_username
+        if resolved_username is None and home.basic_info:
+            resolved_username = home.basic_info.get("nickname")
+        if not resolved_username:
+            console.print(
+                "[red]--player-username is required when the profile's "
+                "nickname isn't available[/]"
+            )
+            raise typer.Exit(1)
+        snap_report = sync_to_snapshot(
+            home, details,
+            season_number=season,
+            player_username=resolved_username,
+            name_index=name_index,
+            db_path=db,
+            link_matches=not no_link_matches,
+        )
+        console.print()
+        console.print(
+            f"[bold green]Snapshot written[/]: id={snap_report.snapshot_id} "
+            f"season={snap_report.season_number} "
+            f"player={snap_report.player_username!r}"
+        )
+        console.print(
+            f"  chars written: {snap_report.chars_written} "
+            f"(matched {snap_report.matched} of {snap_report.rows_seen} seen)"
+        )
+        if snap_report.replaced_existing:
+            console.print(f"  [dim]replaced prior snapshot for same (season, player)[/]")
+        if snap_report.matches_linked:
+            console.print(
+                f"  [green]linked {snap_report.matches_linked} "
+                f"ArenaMatch row(s) to this snapshot[/]"
+            )
+        if snap_report.is_outpost_private:
+            console.print("  [yellow]outpost research is redacted on this profile[/]")
+        if snap_report.is_roster_private:
+            console.print("  [yellow]roster is private — no per-char rows written[/]")
+        if snap_report.unmatched:
+            console.print(f"  [yellow]unmatched ({len(snap_report.unmatched)}):[/] {snap_report.unmatched[:10]}")
+        return
+
+    # ---- Live-table mode (default) ----
+    report = sync(
+        home, details, name_index=name_index, db_path=db, apply=apply,
+    )
+
+    # Print summary.
+    console.print()
+    if report.profile_summary:
+        console.print("[bold]Profile:[/]")
+        for k, v in report.profile_summary.items():
+            tag = "[red]" if k == "is_banned" and v else ""
+            console.print(f"  {k}: {tag}{v}{'[/]' if tag else ''}")
+
+    if report.account_state_changes:
+        console.print("\n[bold]AccountState changes:[/]")
+        for k, (old, new) in report.account_state_changes.items():
+            console.print(f"  {k}: {old} → {new}")
+    else:
+        console.print("\n[dim]no AccountState changes[/]")
+
+    changed = report.changed()
+    extras_only = [d for d in report.diffs if d.extras and not (d.changes or d.is_new)]
+    if changed:
+        console.print(f"\n[bold]Character changes ({len(changed)}):[/]")
+        for d in changed[:50]:
+            tag = "[green](new)[/]" if d.is_new else ""
+            console.print(f"  {d.name} {tag}")
+            for f_, (old, new) in d.changes.items():
+                console.print(f"    {f_}: {old} → {new}")
+            if d.extras:
+                # Inline-print simple extras (cube/treasure/costume),
+                # break out OL gear separately for readability.
+                gear = d.extras.pop("ol_gear", None) if isinstance(d.extras, dict) else None
+                if d.extras:
+                    console.print(f"    [dim]extras:[/] {d.extras}")
+                if gear:
+                    for slot_info in gear:
+                        bn = " | ".join(slot_info.get("bonuses", []))
+                        if "stats" in slot_info:
+                            console.print(
+                                f"    [dim]{slot_info['slot']:5s} {slot_info['name']:25s} {slot_info['stats']}  →  {bn}[/]"
+                            )
+                        else:
+                            console.print(f"    [dim]{slot_info['slot']:5s} {slot_info['name']}[/]")
+        if len(changed) > 50:
+            console.print(f"  [dim]... +{len(changed) - 50} more[/]")
+    else:
+        console.print("[dim]no per-character changes[/]")
+    if extras_only:
+        console.print(
+            f"\n[dim]{len(extras_only)} chars have unchanged columns but captured extras (cube/treasure/costume/arena_combat)[/]"
+        )
+
+    if report.unmatched:
+        console.print(f"\n[yellow]unmatched ({len(report.unmatched)}):[/] {report.unmatched[:10]}")
+        console.print(
+            "[dim]  → add a stub via:[/] "
+            "nikkeoptimizer stub-character --from-shiftyspad <Name>"
+        )
+    if report.stubs_awaiting_refresh:
+        console.print(
+            f"\n[yellow]stubs awaiting Prydwen refresh "
+            f"({len(report.stubs_awaiting_refresh)}):[/] "
+            f"{report.stubs_awaiting_refresh}"
+        )
+        console.print(
+            "[dim]  → when Prydwen catches up:[/] "
+            "nikkeoptimizer refresh --name <X>"
+        )
+    if report.fuzzy_warnings:
+        console.print(f"\n[yellow]fuzzy matches:[/]")
+        for w in report.fuzzy_warnings[:20]:
+            console.print(f"  {w}")
+
+    if apply:
+        console.print(f"\n[bold green]applied:[/] {report.matched} character rows synced")
+    else:
+        console.print(f"\n[dim]dry run — pass --apply to write changes[/]")
 
 
 if __name__ == "__main__":
