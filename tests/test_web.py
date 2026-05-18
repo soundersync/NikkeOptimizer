@@ -90,6 +90,213 @@ def test_dashboard_renders(client):
     assert "1" in r.text  # 1 cube, 1 capture, 1 needs review
 
 
+def _seed_player_data_tournament(engine, tmp_path: Path) -> int:
+    """Seed one player_data PromoTournament with a populated sidecar.
+
+    Returns the tournament id so callers can hit /promo/<id>.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    from nikke_optimizer.data.models import (
+        PromoGroup,
+        PromoMatch,
+        PromoMatchScreenshot,
+        PromoTournament,
+    )
+
+    storage_root = tmp_path / "captures" / "beta_season_29" / "promotion_tournament_player_data"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    captured = datetime(2026, 5, 11, 11, 33, 53, tzinfo=timezone.utc)
+
+    with get_session(engine) as session:
+        t = PromoTournament(
+            captured_at=captured,
+            capture_date=captured.date(),
+            storage_root=str(storage_root),
+        )
+        session.add(t)
+        session.commit()
+        session.refresh(t)
+        tid = t.id
+        g = PromoGroup(tournament_id=tid, group_no=1)
+        session.add(g)
+        session.commit()
+        session.refresh(g)
+        m = PromoMatch(
+            tournament_id=tid, group_id=g.id,
+            round_label="round_64", match_no=1, has_loadouts=True,
+        )
+        session.add(m)
+        session.commit()
+        session.refresh(m)
+        for side in ("top", "bottom"):
+            session.add(PromoMatchScreenshot(
+                match_id=m.id, kind="player_loadout", side=side,
+                round_no=None,
+                file_path=str(storage_root / f"player_{side}.png"),
+            ))
+        session.commit()
+
+    # Sidecar — what the OCR pass would have written.
+    sidecar = {
+        "season_number": 29,
+        "tournament_id": tid,
+        "storage_root": str(storage_root),
+        "players": [
+            {
+                "group_no": 1, "match_no": 1, "side": "top",
+                "screenshot_id": 1,
+                "player_name": "BBB", "player_name_confidence": 0.95,
+                "player_level": 151, "team_cp": 3697055,
+                "chars": [
+                    {"slot": 1, "name": "Moran", "name_raw": "Moran",
+                     "name_match_score": 98.0, "cp": 152840, "lb": 3, "core": "MAX"},
+                ] + [
+                    {"slot": i, "name": None, "name_raw": None,
+                     "name_match_score": None, "cp": None, "lb": None, "core": None}
+                    for i in range(2, 6)
+                ],
+            },
+            {
+                "group_no": 1, "match_no": 1, "side": "bottom",
+                "screenshot_id": 2,
+                "player_name": "ZTARMAN", "player_name_confidence": 0.92,
+                "player_level": 169, "team_cp": 3923739,
+                "chars": [
+                    {"slot": i, "name": None, "name_raw": None,
+                     "name_match_score": None, "cp": None, "lb": None, "core": None}
+                    for i in range(1, 6)
+                ],
+            },
+        ],
+    }
+    (storage_root / "players_lookup.json").write_text(json.dumps(sidecar))
+
+    return tid
+
+
+def test_promo_index_renders_player_data_card(client, tmp_path):
+    """The /promo index shows a Player Data tile for the new format."""
+    engine = make_engine(tmp_path / "web.sqlite3")
+    _seed_player_data_tournament(engine, tmp_path)
+    r = client.get("/promo")
+    assert r.status_code == 200
+    assert "Player Data" in r.text
+    assert "pre-bracket" in r.text
+    assert "<strong>2</strong> players" in r.text
+
+
+def test_promo_tournament_page_renders_player_data(client, tmp_path):
+    """The per-tournament page renders the per-player status table
+    without crashing on the new format.
+    """
+    engine = make_engine(tmp_path / "web.sqlite3")
+    tid = _seed_player_data_tournament(engine, tmp_path)
+    r = client.get(f"/promo/{tid}")
+    assert r.status_code == 200
+    assert "Player Data" in r.text
+    # Both players appear by name.
+    assert "BBB" in r.text
+    assert "ZTARMAN" in r.text
+    # The 151 level + Moran roster slot land in the table.
+    assert "151" in r.text
+    assert "Moran" in r.text
+    # No scrape run yet → pending status pill.
+    assert "pending" in r.text
+
+
+def test_promo_tournament_page_renders_scrape_details(client, tmp_path):
+    """When a status sidecar exists, the per-player row renders
+    privacy chips, BlablaLink profile link, and actual-level meta.
+    """
+    import json
+
+    engine = make_engine(tmp_path / "web.sqlite3")
+    tid = _seed_player_data_tournament(engine, tmp_path)
+    # Plant a status sidecar next to the seeded player_data root.
+    storage_root = tmp_path / "captures" / "beta_season_29" / "promotion_tournament_player_data"
+    (storage_root / "players_lookup_status.json").write_text(json.dumps({
+        "sidecar_version": 1,
+        "tournament_id": tid,
+        "season_number": 29,
+        "last_run_at": "2026-05-17T19:50:58+00:00",
+        "players": {
+            "BBB": {
+                "name": "BBB", "level": 151, "status": "found",
+                "snapshot_id": 7,
+                "snapshotted_at": "2026-05-17T19:50:58+00:00",
+                "actual_level": 152, "uid": "TXktQkItVUlELQ==",
+                "is_roster_private": False, "is_outpost_private": False,
+                "char_names_attempted": ["Moran"],
+                "char_names_matched": ["Moran"],
+                "error": None,
+            },
+            "ZTARMAN": {
+                "name": "ZTARMAN", "level": 169, "status": "not_on_na",
+                "snapshot_id": None, "snapshotted_at": None,
+                "actual_level": None, "uid": None,
+                "is_roster_private": None, "is_outpost_private": None,
+                "char_names_attempted": [], "char_names_matched": [],
+                "error": None,
+            },
+        },
+    }))
+
+    r = client.get(f"/promo/{tid}")
+    assert r.status_code == 200
+    # Found row: chips + BL link + actual-level + fetched count.
+    assert "Nikkes public" in r.text
+    assert "Outpost public" in r.text
+    assert "Open profile" in r.text
+    assert "blablalink.com/shiftyspad" in r.text
+    assert "actual lv" in r.text
+    assert "fetched" in r.text
+    # Not-on-na row: explanation line, no BL link.
+    assert "name matches on a non-NA server" in r.text
+
+
+def test_promo_tournament_page_renders_scrape_progress_panel(client, tmp_path):
+    """Status sidecar drives the scrape progress panel — including the
+    auto-refresh meta tag when the file's mtime is fresh.
+    """
+    import json
+    import time
+
+    engine = make_engine(tmp_path / "web.sqlite3")
+    tid = _seed_player_data_tournament(engine, tmp_path)
+    storage_root = tmp_path / "captures" / "beta_season_29" / "promotion_tournament_player_data"
+    status_path = storage_root / "players_lookup_status.json"
+    status_path.write_text(json.dumps({
+        "sidecar_version": 1, "tournament_id": tid, "season_number": 29,
+        "last_run_at": "2026-05-17T19:50:58+00:00",
+        "players": {
+            "BBB": {
+                "name": "BBB", "level": 151, "status": "found",
+                "snapshot_id": 7, "snapshotted_at": "2026-05-17T19:50:58+00:00",
+                "actual_level": 152, "uid": "TXktQkItVUlELQ==",
+                "is_roster_private": False, "is_outpost_private": False,
+                "char_names_attempted": [], "char_names_matched": [], "error": None,
+            },
+        },
+    }))
+    # Fresh mtime → panel reports "running" + emits auto-refresh meta.
+    r = client.get(f"/promo/{tid}")
+    assert r.status_code == 200
+    assert "Scrape running" in r.text
+    assert 'http-equiv="refresh"' in r.text
+    assert "processed</span>1 / 2" in r.text
+
+    # Backdate mtime past the 60s window → "idle", no auto-refresh.
+    old = time.time() - 600
+    import os
+    os.utime(status_path, (old, old))
+    r = client.get(f"/promo/{tid}")
+    assert r.status_code == 200
+    assert "Scrape idle" in r.text
+    assert 'http-equiv="refresh"' not in r.text
+
+
 def test_cubes_list_renders(client):
     r = client.get("/cubes")
     assert r.status_code == 200

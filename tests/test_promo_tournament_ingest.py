@@ -287,6 +287,121 @@ def test_duel_ingest_relocates_and_persists(
         )
 
 
+@pytest.fixture
+def player_data_staging_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Mini staging tree for the player_data format (post-2026-05-17).
+
+    Structurally identical to a regular promo bracket: each ``match_N``
+    folder has ``player_top/`` and ``player_bottom/`` subfolders, each
+    containing 5 per-round PNGs. NO ``results/`` subdir (that's the
+    only structural difference from a played promotion_tournament).
+    2 groups × 2 matches × 2 sides × 5 rounds = 40 PNGs.
+    """
+    staging = tmp_path / "champion_arena"
+    archive = tmp_path / "captures"
+    src = staging / "promotion_tournament_player_data_20260517_144917"
+
+    for group_no in (1, 2):
+        for match_no in (1, 2):
+            base = src / f"group_{group_no}" / "round_64" / f"match_{match_no}"
+            for round_no in (1, 2, 3, 4, 5):
+                _png(base / "player_top" / f"round_{round_no}.png")
+                _png(base / "player_bottom" / f"round_{round_no}.png")
+    # A coord-picker leftover that must be skipped.
+    _png(
+        src / "group_1" / "round_64" / "match_1" / "player_top"
+        / "round_1__10_20_30_40__crop.png"
+    )
+    return staging, archive
+
+
+def test_player_data_ingest_relocates_and_persists(
+    player_data_staging_tree: tuple[Path, Path], tmp_path: Path
+):
+    staging, archive = player_data_staging_tree
+    db_path = tmp_path / "test.sqlite3"
+
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
+    assert stats.errors == [], stats.errors
+    assert stats.tournaments == 1
+    assert stats.groups == 2
+    # 2 groups × 2 matches = 4 matches.
+    assert stats.matches == 4
+    # 4 matches × 2 sides × 5 rounds = 40 screenshots.
+    assert stats.screenshots == 40
+
+    canon = archive / "beta_season_29" / "promotion_tournament_player_data"
+    assert canon.is_dir()
+    assert (canon / "group_1" / "round_64" / "match_1" / "player_top" / "round_1.png").is_file()
+    assert (canon / "group_1" / "round_64" / "match_1" / "player_top" / "round_5.png").is_file()
+    assert (canon / "group_2" / "round_64" / "match_2" / "player_bottom" / "round_3.png").is_file()
+    # Coord-picker leftover must NOT have been copied.
+    assert not (
+        canon / "group_1" / "round_64" / "match_1" / "player_top"
+        / "round_1__10_20_30_40__crop.png"
+    ).exists()
+
+    engine = make_engine(db_path)
+    init_db(engine)
+    with Session(engine) as session:
+        t = session.exec(select(PromoTournament)).first()
+        assert t is not None
+        assert "promotion_tournament_player_data" in t.storage_root
+        shots = session.exec(select(PromoMatchScreenshot)).all()
+        # Option B: player_data screenshots share the player_loadout
+        # kind value with regular promo tournaments. Provenance lives
+        # in the tournament storage_root, not at the screenshot level.
+        kinds = {s.kind for s in shots}
+        assert kinds == {"player_loadout"}
+        # Every screenshot has a round_no (1..5).
+        round_nos = sorted({s.round_no for s in shots})
+        assert round_nos == [1, 2, 3, 4, 5]
+        # 4 matches × 2 sides × 5 rounds = 40 screenshots, balanced sides.
+        n_top = sum(1 for s in shots if s.side == "top")
+        n_bot = sum(1 for s in shots if s.side == "bottom")
+        assert n_top == 20 and n_bot == 20
+        matches = session.exec(select(PromoMatch)).all()
+        assert all(m.has_loadouts for m in matches)
+        assert all(m.round_label == "round_64" for m in matches)
+
+
+def test_player_data_ingest_idempotent(
+    player_data_staging_tree: tuple[Path, Path], tmp_path: Path
+):
+    """Re-running ingest must not duplicate rows for the player_data format."""
+    staging, archive = player_data_staging_tree
+    db_path = tmp_path / "test.sqlite3"
+
+    ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
+    stats = ingest_root(staging, archive_root=archive, db_path=db_path, ocr=False)
+    assert stats.errors == []
+    # Second pass: tournament/group/match/screenshot already present,
+    # so the *new-row* counters stay at 0.
+    assert stats.tournaments == 0
+    assert stats.groups == 0
+    assert stats.matches == 0
+    assert stats.screenshots == 0
+
+
+def test_tournament_format_distinguishes_player_data():
+    """``tournament_format`` must return the longer prefix for
+    ``promotion_tournament_player_data`` folders rather than falling
+    through to the bare ``promotion_tournament`` default.
+    """
+    from nikke_optimizer.roster.promo_tournament_ingest import (
+        FORMAT_PROMO,
+        FORMAT_PROMO_PLAYER_DATA,
+        tournament_format,
+    )
+
+    assert tournament_format(
+        "/captures/beta_season_29/promotion_tournament_player_data"
+    ) == FORMAT_PROMO_PLAYER_DATA
+    assert tournament_format(
+        "/captures/beta_season_29/promotion_tournament"
+    ) == FORMAT_PROMO
+
+
 def test_duel_and_promo_coexist(
     staging_tree: tuple[Path, Path],
     duel_staging_tree: tuple[Path, Path],
@@ -488,7 +603,7 @@ def test_recursive_discovery_picks_up_tournaments_under_season_subdirs(tmp_path)
     (s29 / "champions_duel_20260512_120000").mkdir(parents=True)
     (s28 / "league_20260423_120000").mkdir(parents=True)
 
-    # Folder that should be ignored (suffix breaks the staging regex).
+    # New player_data format — also picked up.
     (s29 / "promotion_tournament_player_data_20260507_120000").mkdir(parents=True)
 
     found = [p.name for p in _discover_staging(staging)]
@@ -496,6 +611,7 @@ def test_recursive_discovery_picks_up_tournaments_under_season_subdirs(tmp_path)
         "league_20260423_120000",
         "champions_duel_20260512_120000",
         "promotion_tournament_20260507_120000",
+        "promotion_tournament_player_data_20260507_120000",
     ]
 
 

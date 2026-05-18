@@ -47,8 +47,11 @@ _NUMBER_SLUG_RE = re.compile(
 )
 # HP percentage.
 _PERCENT_SLUG_RE = re.compile(r"^(left|right)\.char\d\.hp$")
-# Character name — fuzzy-match against Character DB.
-_CHAR_NAME_SLUG_RE = re.compile(r"^(left|right)\.char\d\.name$")
+# Character name — fuzzy-match against Character DB. Two shapes:
+#   * ``left.char{N}.name`` / ``right.char{N}.name`` — from results_duel
+#   * ``char{N}.name``                              — from player_loadout
+#     and player_data (Arena Info popup) cards
+_CHAR_NAME_SLUG_RE = re.compile(r"^(?:(?:left|right)\.)?char\d\.name$")
 # Round-result strip on overview — also derives a roundN_winner field.
 _ROUND_STRIP_SLUG_RE = re.compile(r"^round(\d)_strip$")
 

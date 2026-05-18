@@ -3509,5 +3509,429 @@ def lookup_players_cmd(
             console.print(f"  nikkeoptimizer fetch-shiftyspad {r['UID']}")
 
 
+def _resolve_player_data_targets(
+    target: str, engine, console_=None,
+) -> list[tuple[int, Path, int]]:
+    """Resolve a CLI ``target`` string into player_data tournaments.
+
+    The argument is interpreted as a beta season number first; if no
+    player_data tournaments belong to that season, falls back to
+    treating it as a ``PromoTournament.id``. Used by both
+    ``inspect-tournament-players`` and ``fetch-tournament-players``.
+    """
+    from ..data.models import PromoTournament
+    from ..data.seasons import parse_season_number
+    from ..roster.promo_tournament_ingest import (
+        FORMAT_PROMO_PLAYER_DATA,
+        tournament_format,
+    )
+
+    if not target.isdigit():
+        if console_:
+            console_.print(
+                f"[red]target must be a tournament id or season number, got {target!r}[/]"
+            )
+        raise typer.Exit(1)
+    target_n = int(target)
+
+    targets: list[tuple[int, Path, int]] = []
+    with get_session(engine) as session:
+        all_pd = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_PROMO_PLAYER_DATA
+        ]
+        for t in all_pd:
+            tn = parse_season_number(Path(t.storage_root).parent.name)
+            if tn == target_n:
+                targets.append((t.id, Path(t.storage_root), target_n))
+        if not targets:
+            t = session.get(PromoTournament, target_n)
+            if (
+                t is not None
+                and tournament_format(t.storage_root) == FORMAT_PROMO_PLAYER_DATA
+            ):
+                season_n = parse_season_number(Path(t.storage_root).parent.name)
+                targets.append((t.id, Path(t.storage_root), season_n or 0))
+    return targets
+
+
+@app.command("inspect-tournament-players")
+def inspect_tournament_players_cmd(
+    target: str = typer.Argument(
+        ...,
+        help="Tournament id (matches PromoTournament.id) OR beta season number.",
+    ),
+    show_all: bool = typer.Option(
+        False, "--all", "-a",
+        help="Show every raw record (top + bottom both visible) instead of "
+             "the deduped per-player view. Useful for spotting OCR disagreements "
+             "between the two sides of the same match.",
+    ),
+    low_confidence_only: bool = typer.Option(
+        False, "--low-confidence-only",
+        help="Filter to rows likely to be problematic: player_name OCR "
+             "confidence < 0.7 OR fewer than 5 character names matched.",
+    ),
+    player: Optional[str] = typer.Option(
+        None, "--player",
+        help="Filter to one player name (case-insensitive substring match).",
+    ),
+    as_json: bool = typer.Option(
+        False, "--json",
+        help="Dump the raw players_lookup.json sidecar contents.",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Inspect a player_data tournament's OCR output without touching the DB.
+
+    Reads the ``players_lookup.json`` + ``players_lookup_status.json``
+    sidecars and renders a per-player audit table — every header field
+    (name / level / team CP), every captured character, plus the scrape
+    status when ``fetch-tournament-players`` has already run.
+
+    Strictly read-only. The companion visual view is the
+    ``/promo/<tournament_id>`` page in the web UI.
+
+    Examples:
+
+      \b
+      nikkeoptimizer inspect-tournament-players 29
+      nikkeoptimizer inspect-tournament-players 29 --low-confidence-only
+      nikkeoptimizer inspect-tournament-players 29 --player BBB
+      nikkeoptimizer inspect-tournament-players 29 --all   # both top+bottom rows
+      nikkeoptimizer inspect-tournament-players 29 --json
+    """
+    import json as _json
+
+    from ..roster.promo_tournament_player_data import read_sidecar
+    from ..roster.promo_tournament_player_data_scrape import (
+        STATUS_FOUND,
+        STATUS_PRIVATE_BOTH,
+        StatusSidecar,
+        dedupe_by_player,
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+    targets = _resolve_player_data_targets(target, engine, console_=console)
+    if not targets:
+        console.print(
+            f"[yellow]no player_data tournaments matched target={target!r}[/]"
+        )
+        raise typer.Exit(0)
+
+    player_filter = player.strip().lower() if player else None
+
+    for tid, root, season_n in targets:
+        console.rule(
+            f"[bold]Tournament {tid}[/]  [dim]({root.name})[/]  season {season_n}"
+        )
+        sidecar = read_sidecar(root)
+        if sidecar is None:
+            console.print(
+                f"[yellow]no players_lookup.json at {root} — "
+                f"run `nikkeoptimizer ingest-tournaments` first[/]"
+            )
+            continue
+
+        # --json: dump and bail.
+        if as_json:
+            console.print(_json.dumps({
+                "season_number": sidecar.season_number,
+                "tournament_id": sidecar.tournament_id,
+                "storage_root": sidecar.storage_root,
+                "players": [
+                    {
+                        "group_no": p.group_no, "match_no": p.match_no,
+                        "side": p.side, "screenshot_id": p.screenshot_id,
+                        "player_name": p.player_name,
+                        "player_name_confidence": p.player_name_confidence,
+                        "player_level": p.player_level, "team_cp": p.team_cp,
+                        "chars": [
+                            {"slot": c.slot, "name": c.name, "name_raw": c.name_raw,
+                             "name_match_score": c.name_match_score,
+                             "cp": c.cp, "lb": c.lb, "core": c.core}
+                            for c in p.chars
+                        ],
+                    }
+                    for p in sidecar.players
+                ],
+            }, indent=2))
+            continue
+
+        status = StatusSidecar.load_or_init(
+            root, tournament_id=tid, season_number=season_n,
+        )
+
+        records = sidecar.players if show_all else dedupe_by_player(sidecar.players)
+        # Sort: deduped → by name; raw → by (group, match, side).
+        if show_all:
+            records.sort(key=lambda r: (r.group_no, r.match_no, r.side))
+        else:
+            records.sort(key=lambda r: (r.player_name or "").lower())
+
+        # Filters.
+        def _is_low_conf(r) -> bool:
+            if r.player_name_confidence is not None and r.player_name_confidence < 0.7:
+                return True
+            char_hits = sum(1 for c in r.chars if c.name is not None)
+            return char_hits < 5
+
+        if low_confidence_only:
+            records = [r for r in records if _is_low_conf(r)]
+        if player_filter:
+            records = [r for r in records if player_filter in (r.player_name or "").lower()]
+
+        # Summary line.
+        all_unique = {p.player_name for p in sidecar.players if p.player_name}
+        console.print(
+            f"[dim]Sidecar:[/] {root / 'players_lookup.json'}\n"
+            f"[dim]Raw rows:[/] {len(sidecar.players)}    "
+            f"[dim]Unique players:[/] {len(all_unique)}    "
+            f"[dim]Showing:[/] {len(records)}"
+            + ("  [dim](deduped)[/]" if not show_all else "  [dim](all rows)[/]")
+        )
+
+        if not records:
+            console.print("  [dim](no rows match the filters)[/]")
+            continue
+
+        table = Table(show_header=True, header_style="bold", padding=(0, 1))
+        table.add_column("Player", style="white", no_wrap=True)
+        table.add_column("Lv", justify="right")
+        table.add_column("Team CP", justify="right")
+        table.add_column("Chars (1..5)", style="dim")
+        table.add_column("Src", style="dim", no_wrap=True)
+        table.add_column("Scrape", no_wrap=True)
+        table.add_column("OCR", no_wrap=True)
+
+        for r in records:
+            name = r.player_name or "[red]?[/]"
+            conf = r.player_name_confidence
+            char_names = [c.name or f"[red]?{c.slot}[/]" for c in r.chars]
+            char_hits = sum(1 for c in r.chars if c.name is not None)
+
+            ocr_tag = "[green]ok[/]"
+            if conf is not None and conf < 0.7:
+                ocr_tag = f"[yellow]conf {conf:.2f}[/]"
+            if char_hits < 5:
+                ocr_tag = f"[yellow]chars {char_hits}/5[/]" if ocr_tag == "[green]ok[/]" else (
+                    ocr_tag + f" [yellow]{char_hits}/5[/]"
+                )
+
+            scrape_cell = "[dim]—[/]"
+            if r.player_name:
+                rec = status.players.get(r.player_name)
+                if rec is not None:
+                    if rec.status == STATUS_FOUND and rec.snapshot_id is not None:
+                        scrape_cell = f"[green]found[/] [dim]#{rec.snapshot_id}[/]"
+                    elif rec.status == STATUS_PRIVATE_BOTH:
+                        scrape_cell = f"[magenta]private_both[/]"
+                    else:
+                        scrape_cell = f"[yellow]{rec.status}[/]"
+
+            level_cell = str(r.player_level) if r.player_level is not None else "[red]?[/]"
+            cp_cell = f"{r.team_cp:,}" if r.team_cp is not None else "[red]?[/]"
+
+            table.add_row(
+                name,
+                level_cell,
+                cp_cell,
+                ", ".join(char_names),
+                f"g{r.group_no}/m{r.match_no}/{r.side[:3]}",
+                scrape_cell,
+                ocr_tag,
+            )
+        console.print(table)
+
+        # Issue rollup at the bottom — most-actionable signal first.
+        if not low_confidence_only and not player_filter:
+            issues: list[str] = []
+            no_name = [r for r in sidecar.players if not r.player_name]
+            no_level = [r for r in sidecar.players
+                        if r.player_name and r.player_level is None]
+            low_conf = [r for r in dedupe_by_player(sidecar.players)
+                        if r.player_name_confidence is not None
+                        and r.player_name_confidence < 0.7]
+            partial_chars = [
+                r for r in dedupe_by_player(sidecar.players)
+                if sum(1 for c in r.chars if c.name is not None) < 5
+            ]
+            if no_name:
+                issues.append(f"[red]{len(no_name)}[/] row(s) missing player_name (will be skipped by scrape)")
+            if no_level:
+                issues.append(f"[red]{len(no_level)}[/] player(s) missing level (will be skipped by scrape)")
+            if low_conf:
+                issues.append(
+                    f"[yellow]{len(low_conf)}[/] player(s) with OCR confidence < 0.7"
+                )
+            if partial_chars:
+                issues.append(
+                    f"[yellow]{len(partial_chars)}[/] player(s) with < 5 matched character names "
+                    f"(snapshot will be sparse)"
+                )
+            if issues:
+                console.print()
+                console.print("[bold]Issues:[/]")
+                for line in issues:
+                    console.print(f"  · {line}")
+
+
+@app.command("fetch-tournament-players")
+def fetch_tournament_players_cmd(
+    target: str = typer.Argument(
+        ...,
+        help="Tournament id (matches PromoTournament.id) OR beta season number. "
+             "When a season is given, every player_data tournament in that "
+             "season is processed in turn.",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Run BlablaLink lookups + write snapshots. Default is dry-run "
+             "(prints the plan without touching the network or DB).",
+    ),
+    only: Optional[str] = typer.Option(
+        None, "--only",
+        help="Comma-separated subset of player names (case-insensitive).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-run players whose status is already 'found' in the status sidecar.",
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-n",
+        help="Cap the work list at N players (post-sort, post-filter). Use as "
+             "a pilot run: `--apply --limit 5` exercises the full pipeline "
+             "(lookup + snapshot + /promo/players page) on a handful of "
+             "players before committing to the full bracket. Already-found "
+             "players still count toward N unless --force is also passed.",
+    ),
+    tolerance: int = typer.Option(
+        15, "--tolerance", "-t",
+        help="Level-match tolerance for the BlablaLink search.",
+    ),
+    max_minutes: float = typer.Option(
+        90.0, "--max-minutes",
+        help="Soft watchdog — abort after this many minutes (mid-run snapshot "
+             "writes are persisted; next run resumes).",
+    ),
+    show_browser: bool = typer.Option(
+        False, "--show-browser",
+        help="Open Chromium with a visible window (default: headless).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Scrape BlablaLink for the players in a player_data tournament's
+    sidecar and write per-player Champions Arena ``RosterSnapshot`` rows.
+
+    Requires a logged-in BlablaLink session — run ``shiftyspad-login``
+    first if you haven't. The ingest pass that produced the sidecar
+    must already have run (``nikkeoptimizer ingest-tournaments`` or the
+    auto-import daemon).
+
+    Examples:
+
+      \b
+      nikkeoptimizer fetch-tournament-players 29 --apply
+      nikkeoptimizer fetch-tournament-players 12 --only "BBB,ZTARMAN" --apply
+      nikkeoptimizer fetch-tournament-players 29 --force --apply
+    """
+    from ..roster.promo_tournament_player_data_scrape import (
+        STATUS_FOUND,
+        STATUS_PRIVATE_BOTH,
+        ScrapeProgress,
+        build_plan,
+        scrape_tournament_players,
+    )
+    from ..roster.promo_tournament_player_data import read_sidecar
+
+    only_set = (
+        {n.strip() for n in only.split(",") if n.strip()} if only else None
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+
+    targets = _resolve_player_data_targets(target, engine, console_=console)
+    if not targets:
+        console.print(
+            f"[yellow]no player_data tournaments matched target={target!r} "
+            f"(tried as season number, then as tournament id)[/]"
+        )
+        raise typer.Exit(0)
+
+    for tid, root, season_n in targets:
+        console.print(f"[cyan]tournament {tid}[/] [dim]({root.name})[/] season={season_n}")
+        sidecar = read_sidecar(root)
+        if sidecar is None:
+            console.print(
+                f"  [yellow]missing players_lookup.json — run ingest first[/]"
+            )
+            continue
+
+        def on_progress(p: ScrapeProgress) -> None:
+            if p.stage in {"searching", "fetching", "snapshotting"}:
+                console.print(
+                    f"  [{p.index+1:2d}/{p.total}] [dim]{p.name:<20s}[/] {p.stage}…"
+                )
+                return
+            colour = {
+                STATUS_FOUND: "green",
+                STATUS_PRIVATE_BOTH: "yellow",
+            }.get(p.stage, "red")
+            extra = ""
+            if p.record is not None and p.record.snapshot_id is not None:
+                extra = f" snapshot={p.record.snapshot_id}"
+            console.print(
+                f"  [{p.index+1:2d}/{p.total}] [bold]{p.name:<20s}[/] "
+                f"[{colour}]{p.stage}[/]{extra}"
+            )
+
+        if not apply:
+            from ..roster.promo_tournament_player_data_scrape import (
+                StatusSidecar,
+            )
+            status = StatusSidecar.load_or_init(
+                root, tournament_id=tid, season_number=season_n,
+            )
+            plan = build_plan(
+                sidecar, status, force=force, only=only_set, limit=limit,
+            )
+            cap_note = f" (capped at {limit})" if limit is not None else ""
+            console.print(f"  [bold]plan:[/] {len(plan)} player(s){cap_note}")
+            for entry in plan[:50]:
+                console.print(
+                    f"    [dim]Lv.{entry.expected_level:<4}[/] {entry.name:<20s} "
+                    f"chars={','.join(entry.char_names) or '∅'}"
+                )
+            if len(plan) > 50:
+                console.print(f"    [dim]…and {len(plan) - 50} more[/]")
+            console.print(
+                f"  [dim]pass --apply to fetch + snapshot ({len(plan)} player(s))[/]"
+            )
+            continue
+
+        status = scrape_tournament_players(
+            root,
+            season_number=season_n,
+            tournament_id=tid,
+            apply=True,
+            only=only_set,
+            force=force,
+            limit=limit,
+            tolerance=tolerance,
+            max_minutes=max_minutes,
+            headless=not show_browser,
+            db_path=db,
+            on_progress=on_progress,
+        )
+        # Per-status counts for the summary line.
+        counts: dict[str, int] = {}
+        for rec in status.players.values():
+            counts[rec.status] = counts.get(rec.status, 0) + 1
+        summary = "  ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+        console.print(f"  [bold]done[/] — {summary}")
+
+
 if __name__ == "__main__":
     app()

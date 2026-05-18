@@ -137,6 +137,52 @@ def test_format_audit_entry_with_wrong_size_files():
     assert "/x/bad2.png (1080×1920)" in out
 
 
+def test_format_audit_entry_renders_player_data_sidecars():
+    stats = _stats(player_data_sidecars=2)
+    out = format_audit_entry(
+        when=datetime(2026, 5, 16, 22, 45, 13, tzinfo=timezone.utc),
+        trigger="startup",
+        staging=Path("/staging/x"),
+        stats=stats,
+        duration_s=0.5,
+    )
+    assert "PlayerData sidecars: 2" in out
+
+
+def test_format_audit_entry_renders_scrape_summary():
+    stats = _stats(
+        scrape_attempted=1,
+        scrape_snapshots_written=14,
+        scrape_status_counts={"found": 14, "not_on_na": 8, "no_results": 6},
+    )
+    out = format_audit_entry(
+        when=datetime(2026, 5, 16, 22, 45, 13, tzinfo=timezone.utc),
+        trigger="startup",
+        staging=Path("/staging/x"),
+        stats=stats,
+        duration_s=600.0,
+    )
+    assert "Scrape:   tournaments=1 snapshots_written=14" in out
+    # status counts sorted alphabetically.
+    assert "found=14" in out
+    assert "not_on_na=8" in out
+    assert "no_results=6" in out
+
+
+def test_format_audit_entry_renders_scrape_skipped_reason():
+    stats = _stats(
+        scrape_skipped_reason="no BlablaLink cookies — run `nikkeoptimizer shiftyspad-login`",
+    )
+    out = format_audit_entry(
+        when=datetime(2026, 5, 16, 22, 45, 13, tzinfo=timezone.utc),
+        trigger="startup",
+        staging=Path("/staging/x"),
+        stats=stats,
+        duration_s=0.5,
+    )
+    assert "Scrape:   skipped — no BlablaLink cookies" in out
+
+
 def test_format_audit_entry_with_errors_truncates():
     stats = _stats(errors=[f"err {i}" for i in range(15)])
     out = format_audit_entry(

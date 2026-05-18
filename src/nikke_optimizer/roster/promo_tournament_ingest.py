@@ -47,8 +47,12 @@ log = logging.getLogger(__name__)
 REFERENCE_PNG_SIZE: tuple[int, int] = (1510, 2013)
 
 
+# NOTE: alternation order matters — ``promotion_tournament_player_data``
+# must come BEFORE the shorter ``promotion_tournament`` so the longer
+# prefix wins. The dispatch in ``tournament_format()`` makes the same
+# ordering choice for the format detection.
 _STAGING_NAME_RE = re.compile(
-    r"^(promotion_tournament|champions_duel|league)_(\d{8})_(\d{6})$"
+    r"^(promotion_tournament_player_data|promotion_tournament|champions_duel|league)_(\d{8})_(\d{6})$"
 )
 _GROUP_NAME_RE = re.compile(r"^group_(\d+)$")
 # Match folders use ``match_1`` in promotion_tournament but ``match1`` in
@@ -80,19 +84,26 @@ _PLAYER_DIR_RE = re.compile(r"^player_(\d+)$")
 
 # Format keys, mirrored in tournament_format(). Single source of truth.
 FORMAT_PROMO = "promotion_tournament"
+FORMAT_PROMO_PLAYER_DATA = "promotion_tournament_player_data"
 FORMAT_DUEL = "champions_duel"
 FORMAT_LEAGUE = "league"
 
 
 def tournament_format(storage_root: str) -> str:
     """Return the format key (``promotion_tournament`` /
-    ``champions_duel`` / ``league``) for a path.
+    ``promotion_tournament_player_data`` / ``champions_duel`` /
+    ``league``) for a path.
 
     The format is encoded in the archive folder name (e.g.
     ``<archive>/beta_season_29/champions_duel/...``). Cheaper than a DB
     column and impossible to drift from filesystem reality.
+
+    ``promotion_tournament_player_data`` must be checked BEFORE the
+    bare ``promotion_tournament`` prefix or it gets misclassified.
     """
     name = Path(storage_root).name
+    if name.startswith(FORMAT_PROMO_PLAYER_DATA):
+        return FORMAT_PROMO_PLAYER_DATA
     if name.startswith(FORMAT_DUEL):
         return FORMAT_DUEL
     if name.startswith(FORMAT_LEAGUE):
@@ -113,6 +124,12 @@ class IngestStats:
     ocr_screenshots: int = 0
     ocr_fields: int = 0
     ocr_skipped: int = 0
+    player_data_sidecars: int = 0
+    # Scrape pass — populated only when ingest_root(scrape_player_data=True).
+    scrape_attempted: int = 0          # tournaments where the scrape loop ran
+    scrape_snapshots_written: int = 0  # new RosterSnapshot rows landed
+    scrape_status_counts: dict[str, int] = field(default_factory=dict)
+    scrape_skipped_reason: Optional[str] = None  # set when scrape opted-out
     errors: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
@@ -151,6 +168,8 @@ def ingest_root(
     db_path: Optional[Path] = None,
     ocr: bool = True,
     force_ocr: bool = False,
+    scrape_player_data: bool = False,
+    max_scrape_minutes: float = 90.0,
 ) -> IngestStats:
     """Relocate every ``promotion_tournament_*`` / ``champions_duel_*``
     folder under ``staging_root`` into ``archive_root``, persist DB rows,
@@ -162,6 +181,13 @@ def ingest_root(
     ``force_ocr=True`` re-OCRs screenshots that already have extracted
     fields; otherwise the OCR pass is idempotent and only touches
     screenshots without prior extractions.
+
+    ``scrape_player_data=True`` runs the BlablaLink lookup + snapshot
+    scrape for every ingested player_data tournament after the OCR
+    sidecar lands. Default off — CLI ``ingest-tournaments`` should not
+    block on a 30-min Playwright session. The auto-import daemon opts
+    in (gated on a cookie-presence probe). ``max_scrape_minutes`` is a
+    soft watchdog per tournament.
     """
     staging_root = Path(staging_root).resolve()
     if archive_root is None:
@@ -251,6 +277,18 @@ def ingest_root(
     if ocr:
         _run_ocr_pass(engine, stats=stats, force=force_ocr)
         _run_league_leaderboard_pass(engine, stats=stats, force=force_ocr)
+        # Sidecar must run AFTER the OCR pass — it groups the freshly
+        # extracted fields into players_lookup.json.
+        _run_player_data_sidecar_pass(engine, stats=stats, force=force_ocr)
+
+    # Optional scrape pass — opt-in. Runs the BlablaLink lookup + writes
+    # RosterSnapshot rows. Long-running (~20-45 min/tournament) and
+    # network/cookie-dependent, so kept off by default; the auto-import
+    # daemon opts in when the user has logged in via shiftyspad-login.
+    if scrape_player_data:
+        _run_player_data_scrape_pass(
+            engine, stats=stats, max_scrape_minutes=max_scrape_minutes,
+        )
 
     return stats
 
@@ -281,6 +319,100 @@ def _run_league_leaderboard_pass(engine, *, stats: IngestStats, force: bool) -> 
             continue
         if out is not None:
             log.info("league leaderboard sidecar: %s", out)
+
+
+def _run_player_data_sidecar_pass(
+    engine, *, stats: IngestStats, force: bool
+) -> None:
+    """Walk every player_data tournament and write its
+    ``players_lookup.json`` sidecar.
+
+    Reads from ``PromoExtractedField`` rows populated by the prior OCR
+    pass; emits one sidecar per tournament root. Idempotent — existing
+    sidecars are left alone unless ``force=True``.
+    """
+    from ..data.seasons import parse_season_number
+    from .promo_tournament_player_data import process_player_data_tournament
+
+    with Session(engine) as session:
+        tournaments = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_PROMO_PLAYER_DATA
+        ]
+        for t in tournaments:
+            season_n = parse_season_number(Path(t.storage_root).parent.name)
+            try:
+                out = process_player_data_tournament(
+                    session, t, season_number=season_n, force=force,
+                )
+            except Exception as exc:  # noqa: BLE001
+                stats.errors.append(
+                    f"player_data sidecar failed for {t.storage_root}: {exc}"
+                )
+                continue
+            if out is not None:
+                stats.player_data_sidecars += 1
+                log.info("player_data sidecar: %s", out)
+
+
+def _run_player_data_scrape_pass(
+    engine, *, stats: IngestStats, max_scrape_minutes: float,
+) -> None:
+    """Run the BlablaLink lookup + snapshot scrape for every
+    player_data tournament with a sidecar present.
+
+    Tournaments without a ``players_lookup.json`` are silently skipped
+    — the sidecar pass that precedes us writes one whenever there's
+    OCR data to surface.
+    """
+    from ..data.seasons import parse_season_number
+    from .promo_tournament_player_data import sidecar_path as _pd_sidecar_path
+    from .promo_tournament_player_data_scrape import (
+        STATUS_FOUND,
+        STATUS_PRIVATE_BOTH,
+        scrape_tournament_players,
+    )
+
+    with Session(engine) as session:
+        tournaments = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_PROMO_PLAYER_DATA
+        ]
+
+    for t in tournaments:
+        root = Path(t.storage_root)
+        if not _pd_sidecar_path(root).is_file():
+            continue
+        season_n = parse_season_number(root.parent.name)
+        if season_n is None:
+            stats.errors.append(
+                f"scrape skipped (no season number derivable): {root}"
+            )
+            continue
+        stats.scrape_attempted += 1
+        try:
+            status = scrape_tournament_players(
+                root,
+                season_number=season_n,
+                tournament_id=t.id,
+                apply=True,
+                max_minutes=max_scrape_minutes,
+            )
+        except Exception as exc:  # noqa: BLE001
+            stats.errors.append(
+                f"player_data scrape failed for {root}: {exc}"
+            )
+            continue
+        # Fold per-player status counts into the cumulative dict.
+        new_snapshots = 0
+        for rec in status.players.values():
+            stats.scrape_status_counts[rec.status] = (
+                stats.scrape_status_counts.get(rec.status, 0) + 1
+            )
+            if rec.status in (STATUS_FOUND, STATUS_PRIVATE_BOTH):
+                if rec.snapshot_id is not None:
+                    new_snapshots += 1
+        stats.scrape_snapshots_written += new_snapshots
 
 
 def _run_ocr_pass(engine, *, stats: IngestStats, force: bool) -> None:
@@ -502,6 +634,9 @@ def _discover_archived(archive_root: Path) -> list[Path]:
             if not fmt_dir.is_dir():
                 continue
             if (
+                # NB: FORMAT_PROMO_PLAYER_DATA starts with FORMAT_PROMO,
+                # so the bare ``startswith(FORMAT_PROMO)`` check covers
+                # both. ``tournament_format()`` disambiguates the two.
                 fmt_dir.name.startswith(FORMAT_PROMO)
                 or fmt_dir.name.startswith(FORMAT_DUEL)
                 or fmt_dir.name.startswith(FORMAT_LEAGUE)
@@ -651,6 +786,27 @@ def _persist_tournament(
 
     fmt = tournament_format(str(storage_root))
     if fmt == FORMAT_PROMO:
+        for group_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
+            m = _GROUP_NAME_RE.match(group_dir.name)
+            if m is None:
+                continue
+            group_no = int(m.group(1))
+            group = _upsert_group(session, tournament.id, group_no, stats)
+            for round_dir in sorted(p for p in group_dir.iterdir() if p.is_dir()):
+                label = round_dir.name
+                if label not in _ROUND_LABELS_PROMO:
+                    continue
+                _persist_round(
+                    session, tournament.id, group.id, label, round_dir, stats
+                )
+    elif fmt == FORMAT_PROMO_PLAYER_DATA:
+        # Pre-bracket Arena Info popups. Structurally identical to a
+        # regular promo bracket (group_N/round_64/match_N/{player_top,
+        # player_bottom}/round_K.png) but with NO results/ subdirs ever
+        # present. Reuses the same loadout walker so OCR + UI tooling
+        # don't need to distinguish at the screenshot level — the
+        # "no results, pre-bracket" provenance lives in the tournament's
+        # storage_root and is exposed via tournament_format().
         for group_dir in sorted(p for p in storage_root.iterdir() if p.is_dir()):
             m = _GROUP_NAME_RE.match(group_dir.name)
             if m is None:

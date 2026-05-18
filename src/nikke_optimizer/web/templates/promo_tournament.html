@@ -1,6 +1,13 @@
 {% extends "_base.html" %}
-{% block title %}{% if format == "league" %}League{% elif format == "champions_duel" %}Champions Duel{% else %}Promotion Tournament{% endif %} {{ tournament.capture_date }} — NikkeOptimizer{% endblock %}
+{% block title %}{% if format == "league" %}League{% elif format == "champions_duel" %}Champions Duel{% elif format == "promotion_tournament_player_data" %}Player Data{% else %}Promotion Tournament{% endif %} {{ tournament.capture_date }} — NikkeOptimizer{% endblock %}
 {% block body %}
+{# Auto-refresh when a scrape is actively writing — the status sidecar
+   mtime within the last 60s is our "running" heuristic. Browsers
+   accept meta-refresh inside <body>; each refresh re-evaluates the
+   heuristic so the page stops reloading once the scrape idles. #}
+{% if scrape_progress and scrape_progress.currently_running %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
 
 <style>
 .crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
@@ -25,6 +32,132 @@
 .format-pill.promo { background: #1b1f29; color: #93c5fd; border: 1px solid #1e3a5f; }
 .format-pill.duel  { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
 .format-pill.league { background: #1c2419; color: #86efac; border: 1px solid #1e5f30; }
+.format-pill.player { background: #2a2419; color: #fbbf24; border: 1px solid #5f4a1e; }
+
+/* Player-data: per-player scrape-status table. */
+.pd-table {
+    width: 100%;
+    max-width: 920px;
+    margin-bottom: 16px;
+    border-collapse: collapse;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    font-size: 13px;
+}
+.pd-table th, .pd-table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid #1f2228;
+}
+.pd-table tr:last-child td { border-bottom: none; }
+.pd-table th {
+    font-size: 11px;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+    background: #181b21;
+}
+.pd-table td.name { color: #e5e7eb; font-weight: 600; }
+.pd-table td.num {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #d1d5db;
+    text-align: right;
+}
+.pd-table td.chars {
+    color: #9ca3af; font-size: 12px;
+}
+.pd-status {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 10px; font-family: "SF Mono", Menlo, monospace;
+    letter-spacing: 0.04em; text-transform: uppercase;
+}
+.pd-status.found        { background: #1c2419; color: #86efac; border: 1px solid #1e5f30; }
+.pd-status.private_both { background: #251b29; color: #c084fc; border: 1px solid #4a1e5f; }
+.pd-status.no_results,
+.pd-status.not_on_na,
+.pd-status.level_mismatch { background: #2a2419; color: #fbbf24; border: 1px solid #5f4a1e; }
+.pd-status.error        { background: #2a1a1f; color: #f87171; border: 1px solid #5f1e2e; }
+.pd-status.pending      { background: #1f2228; color: #9ca3af; border: 1px solid #2a2f3a; }
+.pd-summary { color: #9ca3af; font-size: 13px; margin: 14px 0; }
+.pd-summary a { color: #93c5fd; }
+
+/* Profile column: privacy chips, BL link, actual lv */
+.pd-chip {
+    display: inline-block; padding: 0 6px; border-radius: 3px;
+    font-size: 10px; font-family: "SF Mono", Menlo, monospace;
+    letter-spacing: 0.04em; margin-right: 4px;
+    border: 1px solid;
+}
+.pd-chip.pub  { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.pd-chip.priv { background: #251b29; color: #c084fc; border-color: #4a1e5f; }
+.pd-bl-link {
+    display: inline-block; margin-top: 4px;
+    font-size: 11px; color: #93c5fd; text-decoration: none;
+    border-bottom: 1px dotted #1e3a5f;
+}
+.pd-bl-link:hover { color: #bfdbfe; border-bottom-style: solid; }
+.pd-meta { font-size: 11px; color: #6b7280; margin-top: 2px; }
+.pd-meta .key { color: #9ca3af; }
+
+/* Scrape progress panel. */
+.scrape-panel {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px 14px;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-left-width: 4px;
+    border-radius: 6px;
+    margin-bottom: 18px;
+    font-size: 13px;
+    flex-wrap: wrap;
+}
+.scrape-panel.running {
+    border-left-color: #fbbf24;
+    background: linear-gradient(90deg, #1f1a0e 0%, #14161b 30%);
+}
+.scrape-panel.idle  { border-left-color: #4a4f5a; }
+.scrape-panel .live-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; background: #fbbf24;
+    margin-right: 6px;
+    animation: pulse 1.4s ease-in-out infinite;
+}
+.scrape-panel.idle .live-dot { background: #4a4f5a; animation: none; }
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+.scrape-panel .stat {
+    color: #e5e7eb; font-weight: 600;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.scrape-panel .stat .key { color: #9ca3af; font-weight: 400; margin-right: 4px; }
+.scrape-panel .pill-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.scrape-panel .meta { color: #6b7280; font-size: 12px; margin-left: auto; }
+
+/* Per-round team stack inside the Captured roster cell. */
+.pd-teams { display: flex; flex-direction: column; gap: 3px; }
+.pd-teams .team-row {
+    font-size: 11px; color: #d1d5db;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 460px;
+}
+.pd-teams .team-row .label {
+    color: #6b7280; font-family: "SF Mono", Menlo, monospace;
+    font-size: 10px; letter-spacing: 0.04em;
+    margin-right: 6px;
+}
+.pd-teams .team-row a {
+    color: #6b7280; text-decoration: none;
+    border-bottom: 1px dotted #2a2f3a;
+}
+.pd-teams .team-row a:hover { color: #93c5fd; }
 
 /* League leaderboard table. */
 .leaderboard {
@@ -210,6 +343,7 @@
         <h1>
             {% if format == "league" %}League
             {% elif format == "champions_duel" %}Champions Duel
+            {% elif format == "promotion_tournament_player_data" %}Player Data
             {% else %}Promotion Tournament{% endif %}
             — {{ tournament.capture_date }}
         </h1>
@@ -217,9 +351,14 @@
             Captured at <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
         </div>
     </div>
-    <span class="format-pill {% if format == 'champions_duel' %}duel{% elif format == 'league' %}league{% else %}promo{% endif %}">
+    <span class="format-pill
+        {% if format == 'champions_duel' %}duel
+        {% elif format == 'league' %}league
+        {% elif format == 'promotion_tournament_player_data' %}player
+        {% else %}promo{% endif %}">
         {% if format == "league" %}league
         {% elif format == "champions_duel" %}duel
+        {% elif format == "promotion_tournament_player_data" %}pre-bracket
         {% else %}promo{% endif %}
     </span>
 </div>
@@ -305,6 +444,149 @@
     </a>
     {% endfor %}
 </div>
+
+{% elif format == "promotion_tournament_player_data" %}
+{# Pre-bracket Arena Info popups. One row per unique player; status
+   column reflects the BlablaLink lookup + snapshot scrape. #}
+<div class="pd-summary">
+    {{ players|length }} unique player{{ "" if players|length == 1 else "s" }} captured.
+    {% if players_link %}
+    Snapshots land on the <a href="{{ players_link }}">season {{ players_season }} players page</a>
+    once <code>nikkeoptimizer fetch-tournament-players {{ players_season }} --apply</code> runs.
+    {% endif %}
+    Click any <span style="color:#9ca3af;border-bottom:1px dotted #3a4250;">g/m/side</span>
+    cell to open the side-by-side audit view (source PNG + per-region crops + OCR values).
+</div>
+
+{% if scrape_progress and scrape_progress.has_status %}
+<div class="scrape-panel {% if scrape_progress.currently_running %}running{% else %}idle{% endif %}">
+    <span><span class="live-dot"></span>
+    {% if scrape_progress.currently_running %}Scrape running{% else %}Scrape idle{% endif %}</span>
+    <span class="stat">
+        <span class="key">processed</span>{{ scrape_progress.processed }} / {{ scrape_progress.total }}
+    </span>
+    <span class="pill-row">
+    {% for status_key, count in scrape_progress.status_counts.items()|sort %}
+        <span class="pd-status {{ status_key }}">{{ status_key|replace("_", " ") }} {{ count }}</span>
+    {% endfor %}
+    </span>
+    <span class="meta">
+        {% if scrape_progress.last_update_seconds_ago is not none %}
+            {% set s = scrape_progress.last_update_seconds_ago %}
+            last update
+            {% if s < 60 %}{{ s }}s ago
+            {% elif s < 3600 %}{{ (s // 60)|int }}m ago
+            {% else %}{{ (s // 3600)|int }}h ago{% endif %}
+            {% if scrape_progress.currently_running %} · page auto-refreshes every 5s{% endif %}
+        {% endif %}
+    </span>
+</div>
+{% endif %}
+
+{% if players %}
+<table class="pd-table">
+    <thead>
+        <tr>
+            <th>Player</th>
+            <th style="text-align:right">Level</th>
+            <th style="text-align:right">Team CP</th>
+            <th>Source</th>
+            <th>Captured roster</th>
+            <th>Status</th>
+            <th>BlablaLink profile</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for p in players %}
+        <tr>
+            <td class="name">{{ p.name }}</td>
+            <td class="num">{% if p.level is not none %}{{ p.level }}{% else %}—{% endif %}</td>
+            <td class="num">{% if p.team_cp is not none %}{{ "{:,}".format(p.team_cp) }}{% else %}—{% endif %}</td>
+            <td class="num" style="text-align:left;color:#6b7280;font-size:11px;">
+                <a href="/promo/screenshots/{{ p.screenshot_id }}"
+                   title="View source image + per-region crops + OCR'd values"
+                   style="color:#9ca3af;text-decoration:none;border-bottom:1px dotted #3a4250;">
+                    g{{ p.group_no }} / m{{ p.match_no }} / {{ p.side }}
+                </a>
+            </td>
+            <td class="chars">
+                {% if p.teams %}
+                {# Per-round team stack — each row is a clickable "Team N: A, B, C, D, E"
+                   linking to the per-round source PNG audit view. #}
+                <div class="pd-teams">
+                    {% for t in p.teams %}
+                    <div class="team-row" title="{{ t.names|join(', ') }}">
+                        <a href="/promo/screenshots/{{ t.screenshot_id }}"
+                           title="View round {{ t.round_no }} source + crops + OCR values">
+                            <span class="label">Team {{ t.round_no }}:</span>
+                        </a>
+                        {{ t.names|join(", ") }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% elif p.char_names %}
+                {# Back-compat — sidecar pre-v3 had no teams[]. #}
+                {{ p.char_names|join(", ") }}
+                {% else %}
+                —
+                {% endif %}
+            </td>
+            <td>
+                {% if p.scrape_status %}
+                <span class="pd-status {{ p.scrape_status }}">{{ p.scrape_status|replace("_", " ") }}</span>
+                {% if p.snapshot_id %}
+                <a href="/promo/players/{{ players_season }}" style="font-size:11px;color:#86efac;margin-left:6px;">
+                    snap #{{ p.snapshot_id }}
+                </a>
+                {% endif %}
+                {% else %}
+                <span class="pd-status pending">pending</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if p.bl_url %}
+                {# Found on BlablaLink — render privacy chips + profile link. #}
+                <div>
+                    <span class="pd-chip {% if p.is_roster_private %}priv{% else %}pub{% endif %}"
+                          title="My Nikkes (roster) visibility on BlablaLink">
+                        Nikkes {% if p.is_roster_private %}private{% else %}public{% endif %}
+                    </span>
+                    <span class="pd-chip {% if p.is_outpost_private %}priv{% else %}pub{% endif %}"
+                          title="Outpost research visibility on BlablaLink">
+                        Outpost {% if p.is_outpost_private %}private{% else %}public{% endif %}
+                    </span>
+                </div>
+                <a class="pd-bl-link" href="{{ p.bl_url }}" target="_blank" rel="noopener">
+                    Open profile ↗
+                </a>
+                <div class="pd-meta">
+                    {% if p.actual_level is not none and p.actual_level != p.level %}
+                    <span class="key">actual lv</span> {{ p.actual_level }}
+                    {% endif %}
+                    {% if p.char_names_matched %}
+                    · <span class="key">fetched</span> {{ p.char_names_matched|length }}/{{ p.char_names|length }} chars
+                    {% endif %}
+                </div>
+                {% elif p.scrape_status %}
+                {# Not Found — show why succinctly. #}
+                <div class="pd-meta">
+                    {% if p.scrape_status == "no_results" %}no BlablaLink hits for this name
+                    {% elif p.scrape_status == "not_on_na" %}name matches on a non-NA server
+                    {% elif p.scrape_status == "level_mismatch" %}NA hits found, none within level tolerance
+                    {% elif p.scrape_status == "error" %}scrape error
+                    {% endif %}
+                </div>
+                {% else %}
+                <span style="color:#6b7280;font-size:11px;">—</span>
+                {% endif %}
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-section">No players_lookup.json sidecar found — re-run ingest with OCR enabled.</div>
+{% endif %}
 
 {% elif format == "champions_duel" %}
 {# Duel: three round sections (QF / SF / Final). Same layout as the

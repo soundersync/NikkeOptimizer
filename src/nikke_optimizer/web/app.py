@@ -45,6 +45,7 @@ from ..roster.promo_tournament_ingest import (
     FORMAT_DUEL,
     FORMAT_LEAGUE,
     FORMAT_PROMO,
+    FORMAT_PROMO_PLAYER_DATA,
     tournament_format,
 )
 from ..roster.promo_tournament_regions import (
@@ -2477,12 +2478,40 @@ def create_app(
                 season_n = parse_season_number(parent_name)
                 if season_n is None:
                     season_n = season_for_date(t.capture_date)
+                fmt = tournament_format(t.storage_root)
+                pd_total: Optional[int] = None
+                pd_found: Optional[int] = None
+                if fmt == FORMAT_PROMO_PLAYER_DATA:
+                    from ..roster.promo_tournament_player_data import (
+                        read_sidecar as _read_pd_sidecar,
+                    )
+                    from ..roster.promo_tournament_player_data_scrape import (
+                        STATUS_FOUND,
+                        STATUS_PRIVATE_BOTH,
+                        StatusSidecar,
+                    )
+                    pd = _read_pd_sidecar(Path(t.storage_root))
+                    pd_total = len({
+                        r.player_name for r in (pd.players if pd else [])
+                        if r.player_name
+                    })
+                    status = StatusSidecar.load_or_init(
+                        Path(t.storage_root),
+                        tournament_id=t.id,
+                        season_number=season_n,
+                    )
+                    pd_found = sum(
+                        1 for rec in status.players.values()
+                        if rec.status in (STATUS_FOUND, STATUS_PRIVATE_BOTH)
+                    )
                 t_meta.append({
                     "row": t,
-                    "format": tournament_format(t.storage_root),
+                    "format": fmt,
                     "n_matches": n_matches,
                     "n_groups": n_groups,
                     "season_n": season_n,
+                    "pd_total": pd_total,
+                    "pd_found": pd_found,
                 })
             by_season: dict[int, dict] = {}
             for m in t_meta:
@@ -2597,6 +2626,132 @@ def create_app(
                     )
                     group_meta.append({"row": g, "n_matches": n_matches})
                 ctx["groups"] = group_meta
+            elif fmt == FORMAT_PROMO_PLAYER_DATA:
+                # Pre-bracket Arena Info popups. The detail view is the
+                # players_lookup.json sidecar grouped by player + scrape
+                # status (when the scrape has run). Match/group rows
+                # exist in the DB for archival completeness but the
+                # natural UI unit is the unique player.
+                from ..data.seasons import parse_season_number
+                from ..roster.promo_tournament_player_data import (
+                    read_sidecar as _read_pd_sidecar,
+                )
+                from ..roster.promo_tournament_player_data_scrape import (
+                    StatusSidecar,
+                    dedupe_by_player,
+                )
+
+                pd_root = Path(tournament.storage_root)
+                pd = _read_pd_sidecar(pd_root)
+                season_n = parse_season_number(pd_root.parent.name)
+                status = StatusSidecar.load_or_init(
+                    pd_root,
+                    tournament_id=tournament_id,
+                    season_number=season_n,
+                )
+
+                # Scrape progress panel — derived from the status sidecar
+                # file's mtime + per-player rec counts. Heuristic: file
+                # touched within the last 60s = scrape "actively running"
+                # (good enough; the scrape writes after every player).
+                import time as _time
+                from ..roster.promo_tournament_player_data_scrape import (
+                    STATUS_SIDECAR_FILENAME,
+                )
+                status_path = pd_root / STATUS_SIDECAR_FILENAME
+                progress_status_counts: dict[str, int] = {}
+                for rec in status.players.values():
+                    progress_status_counts[rec.status] = (
+                        progress_status_counts.get(rec.status, 0) + 1
+                    )
+                if status_path.is_file():
+                    last_mtime = status_path.stat().st_mtime
+                    seconds_ago = int(max(0, _time.time() - last_mtime))
+                else:
+                    seconds_ago = None
+                # Total unique players in the sidecar (post-aggregation,
+                # one record per player). Used as the denominator in the
+                # "X / Y processed" panel.
+                total_unique = len(pd.players) if pd else 0
+                scrape_progress = {
+                    "has_status": bool(status.players),
+                    "processed": len(status.players),
+                    "total": total_unique,
+                    "status_counts": progress_status_counts,
+                    "last_update_seconds_ago": seconds_ago,
+                    "currently_running": (
+                        seconds_ago is not None and seconds_ago < 60
+                    ),
+                }
+                ctx["scrape_progress"] = scrape_progress
+
+                # URL builder for a player's BlablaLink ShiftyPad page —
+                # quoted base64 uid stored verbatim in the status sidecar.
+                from urllib.parse import quote as _urlquote
+
+                def _bl_url(uid_b64: Optional[str]) -> Optional[str]:
+                    if not uid_b64:
+                        return None
+                    q = _urlquote(uid_b64)
+                    return (
+                        f"https://www.blablalink.com/shiftyspad/home"
+                        f"?uid={q}&openid={q}"
+                    )
+
+                unique_players = dedupe_by_player(pd.players) if pd else []
+                # Stable sort: by player_name (case-insensitive).
+                unique_players.sort(key=lambda r: (r.player_name or "").lower())
+                player_rows = []
+                for rec in unique_players:
+                    scrape = status.players.get(rec.player_name)
+                    # Build per-team view-model rows (Team 1 / 2 / ...)
+                    # plus the deduped union for the scrape's --names
+                    # plumbing. Each team also gets its own audit link
+                    # via its source screenshot.
+                    teams_view = [
+                        {
+                            "round_no": t.round_no,
+                            "screenshot_id": t.screenshot_id,
+                            "names": [c.name or f"?{c.slot}" for c in t.chars],
+                        }
+                        for t in rec.teams
+                    ]
+                    player_rows.append({
+                        "name": rec.player_name,
+                        "level": rec.player_level,
+                        "team_cp": rec.team_cp,
+                        "group_no": rec.group_no,
+                        "match_no": rec.match_no,
+                        # Source screenshot id powers the audit-view link
+                        # to /promo/screenshots/{id} (image + per-region
+                        # crops + extracted values, side-by-side).
+                        "screenshot_id": rec.screenshot_id,
+                        "side": rec.side,
+                        "char_names": [c.name for c in rec.chars if c.name],
+                        "teams": teams_view,
+                        "scrape_status": scrape.status if scrape else None,
+                        "snapshot_id": scrape.snapshot_id if scrape else None,
+                        # Detail from the scrape's status sidecar — only
+                        # populated for Found rows.
+                        "actual_level": (
+                            scrape.actual_level if scrape else None
+                        ),
+                        "is_roster_private": (
+                            scrape.is_roster_private if scrape else None
+                        ),
+                        "is_outpost_private": (
+                            scrape.is_outpost_private if scrape else None
+                        ),
+                        "bl_url": _bl_url(scrape.uid) if scrape else None,
+                        "char_names_matched": (
+                            scrape.char_names_matched if scrape else []
+                        ),
+                    })
+                ctx["players"] = player_rows
+                ctx["players_season"] = season_n
+                ctx["players_link"] = (
+                    f"/promo/players/{season_n}" if season_n is not None else None
+                )
             elif fmt == FORMAT_LEAGUE:
                 # League: 4 player matches + a leaderboard sidecar.
                 from dataclasses import asdict

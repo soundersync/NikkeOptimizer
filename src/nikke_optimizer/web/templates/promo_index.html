@@ -99,10 +99,16 @@
             <div class="label">
                 {% if item.format == "champions_duel" %}Champions Duel
                 {% elif item.format == "league" %}League
+                {% elif item.format == "promotion_tournament_player_data" %}Player Data
                 {% else %}Promotion Tournament{% endif %}
-                <span class="format-pill {% if item.format == 'champions_duel' %}duel{% elif item.format == 'league' %}league{% else %}promo{% endif %}">
+                <span class="format-pill
+                    {% if item.format == 'champions_duel' %}duel
+                    {% elif item.format == 'league' %}league
+                    {% elif item.format == 'promotion_tournament_player_data' %}player
+                    {% else %}promo{% endif %}">
                     {% if item.format == "champions_duel" %}duel
                     {% elif item.format == "league" %}league
+                    {% elif item.format == "promotion_tournament_player_data" %}pre-bracket
                     {% else %}promo{% endif %}
                 </span>
             </div>
@@ -111,7 +117,14 @@
                 {% if item.format == "promotion_tournament" %}
                 <span><strong>{{ item.n_groups }}</strong> groups</span>
                 {% endif %}
+                {% if item.format == "promotion_tournament_player_data" %}
+                <span><strong>{{ item.pd_total }}</strong> players</span>
+                {% if item.pd_found is not none %}
+                <span><strong>{{ item.pd_found }}</strong> scraped</span>
+                {% endif %}
+                {% else %}
                 <span><strong>{{ item.n_matches }}</strong> {% if item.format == "league" %}players{% else %}matches{% endif %}</span>
+                {% endif %}
             </div>
         </a>
         {% endfor %}

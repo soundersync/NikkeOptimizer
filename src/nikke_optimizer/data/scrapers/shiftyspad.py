@@ -83,7 +83,13 @@ PRIVATE_NIKKE_INFO_CODE = 1301002
 DEFAULT_DETAIL_DELAY_RANGE: tuple[float, float] = (3.0, 7.0)
 
 # Per-page settle: post-DCL wait before considering the XHR captured.
-DEFAULT_SETTLE_MS = 2_500
+# Bumped from 2.5s → 4s after CHIGLETS / LUCARNE / NANA / BECHO / RUSTY
+# came back with missing GetUserCharacters captures in the season-29
+# scrape — the SPA's roster XHR sometimes fires after networkidle
+# triggers but before the settle window expires. The extra ~1.5s
+# catches the race; the per-player home_pacing_range already spaces
+# navigations far enough that the additional cost is amortized.
+DEFAULT_SETTLE_MS = 4_000
 
 
 @dataclass
@@ -129,6 +135,35 @@ def decode_uid(uid_b64: str) -> tuple[int, str]:
     if not openid:
         raise ValueError(f"invalid shiftyspad uid {uid_b64!r}: missing '-' separator")
     return int(area), openid
+
+
+def _derive_roster_state(
+    roster_response: Optional[dict[str, Any]],
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Decide ``(is_private, characters)`` from a captured
+    ``GetUserCharacters`` response.
+
+    Conservative — anything that isn't explicit, unambiguous "public"
+    evidence is treated as private:
+
+    * ``None`` (XHR never landed) → private.
+    * ``code == PRIVATE_NIKKE_INFO_CODE`` (1301002, explicit private) → private.
+    * ``code == 0`` with non-empty characters → public.
+    * ``code == 0`` with empty characters → private (active players
+      always own ≥ 1 NIKKE, so an empty list indicates the response
+      hydrated incompletely; flagging public on no data was the
+      original bug surfaced by CHIGLETS / LUCARNE / NANA).
+    * Any other code → private (unknown error, don't lie).
+    """
+    if roster_response is None:
+        return True, []
+    code = roster_response.get("code")
+    if code == PRIVATE_NIKKE_INFO_CODE:
+        return True, []
+    if code == 0:
+        characters = (roster_response.get("data") or {}).get("characters") or []
+        return (not characters), list(characters)
+    return True, []
 
 
 def _is_outpost_redacted(outpost_info: dict[str, Any]) -> bool:
@@ -286,9 +321,34 @@ class ShiftyPadFetcher:
         if elapsed < target:
             time.sleep(target - elapsed)
 
-    def fetch_home(self, uid_b64: str) -> HomePayload:
+    def fetch_home(self, uid_b64: str, *, max_retries: int = 1) -> HomePayload:
+        """Fetch the home page payload for a player.
+
+        ``max_retries`` controls how many times we'll re-navigate when
+        ``GetUserCharacters`` didn't land in ``_captured`` after the
+        first navigation. The retry only fires when the XHR is
+        genuinely absent — an explicit ``code == 1301002`` (private)
+        response DOES land in ``_captured`` and counts as "we have a
+        signal", so genuine private accounts are not retried.
+
+        Default is one retry, which empirically catches the slow-XHR
+        race that mis-tagged 5 players as "Nikkes public" in the
+        season-29 scrape.
+        """
         url = HOME_URL_TEMPLATE.format(uid=uid_b64, openid=uid_b64)
-        self._navigate(url)
+        for attempt in range(max_retries + 1):
+            self._navigate(url)
+            if self._captured.get("Game/GetUserCharacters") is not None:
+                break
+            if attempt < max_retries:
+                log.warning(
+                    "fetch_home: GetUserCharacters missing for uid=%s; "
+                    "re-navigating (attempt %d/%d)",
+                    uid_b64, attempt + 2, max_retries + 1,
+                )
+                # Small extra human-paced gap before the retry so the
+                # back-to-back navigation doesn't fingerprint as a bot.
+                time.sleep(self._rng.uniform(2.0, 3.5))
 
         payload = HomePayload(raw_responses=dict(self._captured))
 
@@ -296,20 +356,27 @@ class ShiftyPadFetcher:
         if basic and basic.get("code") == 0:
             payload.basic_info = (basic.get("data") or {}).get("basic_info")
 
+        # Outpost privacy detection — mirror of the conservative
+        # roster-privacy default (see _derive_roster_state). If the
+        # XHR didn't land, treat as private rather than silently
+        # claiming public.
         outpost = self._captured.get("Game/GetUserProfileOutpostInfo")
-        if outpost and outpost.get("code") == 0:
+        if outpost is None:
+            payload.is_outpost_private = True
+        elif outpost.get("code") == 0:
             payload.outpost_info = (outpost.get("data") or {}).get("outpost_info")
             if payload.outpost_info and _is_outpost_redacted(payload.outpost_info):
                 payload.is_outpost_private = True
+        else:
+            # Non-zero code from a captured response — unknown error,
+            # treat as private.
+            payload.is_outpost_private = True
 
-        roster = self._captured.get("Game/GetUserCharacters")
-        if roster:
-            if roster.get("code") == PRIVATE_NIKKE_INFO_CODE:
-                payload.is_roster_private = True
-            elif roster.get("code") == 0:
-                payload.characters = (
-                    (roster.get("data") or {}).get("characters") or []
-                )
+        is_private, characters = _derive_roster_state(
+            self._captured.get("Game/GetUserCharacters")
+        )
+        payload.is_roster_private = is_private
+        payload.characters = characters
         return payload
 
     def fetch_character_detail(

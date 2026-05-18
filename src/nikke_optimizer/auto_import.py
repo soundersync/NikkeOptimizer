@@ -46,6 +46,11 @@ LOG_ROTATE_BYTES = 5 * 1024 * 1024  # 5 MB
 DEBOUNCE_SECONDS = 5
 POLL_TIMEOUT_S = 60  # long-poll window held open by Syncthing
 
+# Per-tournament soft watchdog for the player_data scrape pass.
+# Mid-run snapshot writes persist to the status sidecar after each
+# player, so a watchdog abort still makes forward progress.
+DEFAULT_MAX_SCRAPE_MINUTES = 90.0
+
 
 # ---------------------------------------------------------------------------
 # Syncthing config parsing
@@ -234,6 +239,21 @@ def format_audit_entry(
             f"OCR:      processed={stats.ocr_screenshots} "
             f"fields={stats.ocr_fields} cached={stats.ocr_skipped}"
         )
+    if stats.player_data_sidecars:
+        lines.append(
+            f"PlayerData sidecars: {stats.player_data_sidecars}"
+        )
+    if stats.scrape_attempted:
+        counts = "  ".join(
+            f"{k}={v}" for k, v in sorted(stats.scrape_status_counts.items())
+        )
+        lines.append(
+            f"Scrape:   tournaments={stats.scrape_attempted} "
+            f"snapshots_written={stats.scrape_snapshots_written}"
+            + (f"  ({counts})" if counts else "")
+        )
+    elif stats.scrape_skipped_reason:
+        lines.append(f"Scrape:   skipped — {stats.scrape_skipped_reason}")
     if stats.errors:
         lines.append(f"Errors:   {len(stats.errors)}")
         for err in stats.errors[:10]:
@@ -294,20 +314,48 @@ def single_instance_lock(lock_path: Path) -> Iterator[None]:
         fp.close()
 
 
+def _blablalink_cookies_present() -> bool:
+    """Probe whether the persistent Playwright profile has a Cookies db.
+
+    Used by the daemon to opt into the player_data scrape pass only
+    when the user has run ``shiftyspad-login`` at least once. Doesn't
+    validate cookie freshness — expired cookies surface as per-player
+    "No Search Results" in the scrape, which lands in the audit stanza.
+    """
+    from .data.scrapers.blablalink import default_browser_profile_dir
+    return (default_browser_profile_dir() / "Default" / "Cookies").is_file()
+
+
 def run_ingest_and_log(
     staging: Path,
     *,
     trigger: str,
     log_path: Path,
+    max_scrape_minutes: float = DEFAULT_MAX_SCRAPE_MINUTES,
 ) -> IngestStats:
     """Run a single ingest pass and append an audit entry.
 
     Errors during ingest are caught and logged to the audit file so a
     failure doesn't kill the daemon.
+
+    The daemon opts into the player_data scrape pass when BlablaLink
+    cookies are present in the persistent Playwright profile (cheap
+    filesystem probe). When absent, the scrape is skipped and the audit
+    stanza calls out the missing login.
     """
     t0 = time.time()
+    cookies_ok = _blablalink_cookies_present()
     try:
-        stats = ingest_root(staging_root=staging, move=False)
+        stats = ingest_root(
+            staging_root=staging,
+            move=False,
+            scrape_player_data=cookies_ok,
+            max_scrape_minutes=max_scrape_minutes,
+        )
+        if not cookies_ok:
+            stats.scrape_skipped_reason = (
+                "no BlablaLink cookies — run `nikkeoptimizer shiftyspad-login`"
+            )
     except Exception as exc:  # noqa: BLE001
         log.exception("ingest_root raised: %s", exc)
         stats = IngestStats()

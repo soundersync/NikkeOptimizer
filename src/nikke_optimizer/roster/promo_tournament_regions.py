@@ -69,6 +69,23 @@ _PLAYER_CHAR_CP: tuple[Bbox, ...] = (
     (862, 1371, 1011, 1414),
     (1047, 1373, 1193, 1414),
 )
+# Small character name strip overlaid on the bottom-right of each card
+# (e.g. "Nero", "Bay", "Helm"). Coord-picked off
+# group_1/round_64/match_1/player_bottom.png and validated against the
+# narrower test crop the user confirmed as the practical right-edge
+# limit. Normalized to a uniform 113×23 box; x1 is 4px earlier than the
+# initial pick to give the leading letter a margin of clear pixels (some
+# long names were OCR'ing as "now White:" because the "S" was clipped).
+# The display window is animated for variant names ("Snow White: Heavy
+# Arms") and there's no way to widen the bbox to fit the full text —
+# the fuzzy character matcher handles the partial strings.
+_PLAYER_CHAR_NAME: tuple[Bbox, ...] = (
+    (361, 1329, 474, 1352),
+    (544, 1329, 657, 1352),
+    (724, 1329, 837, 1352),
+    (907, 1329, 1020, 1352),
+    (1087, 1329, 1200, 1352),
+)
 # Limit-Break stars (3 yellow when MLB, otherwise dark) + Core-level
 # badge ("01".."07/10") at the right edge. Same relative position
 # inside every portrait card — derived from _PLAYER_CHAR_PORTRAIT so
@@ -99,6 +116,7 @@ def _build_player_loadout() -> tuple[Region, ...]:
         rows.append(Region(f"{g}.portrait", f"Char {n} — Portrait", _PLAYER_CHAR_PORTRAIT[i], group=g))
         rows.append(Region(f"{g}.doll", f"Char {n} — Doll/Treasure", _PLAYER_CHAR_DOLL[i], group=g))
         rows.append(Region(f"{g}.lb_core", f"Char {n} — LB & Core", _PLAYER_CHAR_LB_CORE[i], group=g))
+        rows.append(Region(f"{g}.name", f"Char {n} — Name", _PLAYER_CHAR_NAME[i], group=g))
         rows.append(Region(f"{g}.cp", f"Char {n} — CP", _PLAYER_CHAR_CP[i], group=g))
     return tuple(rows)
 
@@ -265,8 +283,17 @@ DUEL: tuple[Region, ...] = _build_duel()
 # Public API
 # ---------------------------------------------------------------------------
 
-KINDS: tuple[str, ...] = ("player_loadout", "results_overview", "results_duel")
+KINDS: tuple[str, ...] = (
+    "player_loadout", "results_overview", "results_duel",
+)
 
+# ``player_loadout`` covers BOTH per-round popups from the
+# ``promotion_tournament_player_data`` capture (pre-bracket Arena Info
+# popups) AND the post-match per-round loadout history from regular
+# promotion_tournament / champions_duel captures. The two source folders
+# produce structurally identical PNGs; their provenance distinction
+# lives at the tournament level (``tournament_format(storage_root)``),
+# not at the screenshot level.
 _BY_KIND: dict[str, tuple[Region, ...]] = {
     "player_loadout": PLAYER_LOADOUT,
     "results_overview": OVERVIEW,
