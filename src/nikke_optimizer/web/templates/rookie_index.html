@@ -173,7 +173,7 @@
                 {% elif b.outcome == "loss" %}
                 <span class="outcome-pill loss" title="your team wiped (5/5 defeated)">L</span>
                 {% else %}
-                <span class="outcome-pill unknown" title="neither side wiped — timeout case, needs HP indicator (BACKLOG)">?</span>
+                <span class="outcome-pill unknown" title="couldn't read 5/5 DISCONNECTED on either side — OCR miss or results.png missing (rookie always resolves to a wipe)">!</span>
                 {% endif %}
                 <span class="precision-dot {% if b.has_opponent_png %}precise{% else %}estimated{% endif %}"
                       title="{% if b.has_opponent_png %}opponent.png captured — level precise{% else %}no opponent.png — level estimated from my level{% endif %}"></span>

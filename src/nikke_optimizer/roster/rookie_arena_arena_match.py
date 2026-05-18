@@ -172,9 +172,9 @@ class _RookieBattlePayload:
     # badge marks a Nikke as **defeated/wiped** (NOT network-
     # disconnected — confirmed with user 2026-05-18). "loss" iff
     # user side (left) shows 5/5 wiped, "win" iff opponent side
-    # (right) shows 5/5. Anything else stays None — that's the rare
-    # timeout case where neither side wiped; needs a separate
-    # indicator (BACKLOG).
+    # (right) shows 5/5. None means OCR data-quality issue —
+    # Rookie Arena has no ties and no observed timeouts, so every
+    # real match should resolve to win/loss.
     outcome: Optional[str] = None
     # Internal — surfaces the loadout's screenshot id + the canonical
     # per-slot team lists so upsert_arena_match can backfill the
@@ -227,14 +227,14 @@ def _outcome_from_disconnects(
     """Per-side wipe count → ArenaMatch.outcome.
 
     5/5 user-side wiped → ``"loss"``; 5/5 opp-side wiped → ``"win"``.
-    Anything else → None — that's the rare timeout case where neither
-    side wiped within the 5-min cap and we'd need a separate
-    HP-comparison / defender-wins-on-timeout signal to call it.
+    Anything else → None.
 
-    Note: every Nikke marked DISCONNECTED == defeated/wiped. Per the
-    user, Rookie Arena never resolves to a tie, so any None here just
-    means "we don't have the timeout-winner indicator yet" — see
-    BACKLOG.
+    **None means data-quality issue, not a valid outcome bucket.**
+    Per the user (2026-05-18), Rookie Arena resolves every match via
+    a 5/5 wipe — no ties, no observed timeouts. So if this returns
+    None on a real rookie ArenaMatch, it's an OCR miss (one of the
+    DISCONNECTED badges failed to read) or missing `results.png` —
+    something to flag, not a normal "we'll figure it out later" case.
     """
     if sum(my_dc) == 5 and sum(opp_dc) < 5:
         return "loss"
