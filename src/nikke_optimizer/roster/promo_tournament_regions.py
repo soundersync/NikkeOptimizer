@@ -157,12 +157,29 @@ OVERVIEW: tuple[Region, ...] = _build_overview()
 # ---------------------------------------------------------------------------
 
 # Field order per character (columns of the PDF spec).
+# `disconnect` is the "DISCONNECTED" overlay that replaces the HP%
+# column when a Nikke's player has dropped connection. OCR returns
+# text (target: "DISCONNECTED"); a non-empty match per side
+# determines `ArenaMatch.outcome` (5/5 disconnected = that side
+# forfeited).
 _DUEL_FIELDS: tuple[tuple[str, str], ...] = (
     ("name", "Name"),
     ("atk", "Attack Damage"),
     ("def", "Defense"),
     ("heal", "Heal"),
     ("hp", "Remaining HP %"),
+    ("disconnect", "Disconnected?"),
+)
+
+# Disconnect-label geometry — uniform across both sides and all
+# slots, per the user's "normalize position and size" convention.
+# 117×22 each; slot 1 y_top=647; stride 197px between slots.
+# Left x range: 337-454. Right x range: 1059-1176.
+_DUEL_DISCONNECT_LEFT: tuple[tuple[int, int, int, int], ...] = tuple(
+    (337, 647 + 197 * i, 454, 669 + 197 * i) for i in range(5)
+)
+_DUEL_DISCONNECT_RIGHT: tuple[tuple[int, int, int, int], ...] = tuple(
+    (1059, 647 + 197 * i, 1176, 669 + 197 * i) for i in range(5)
 )
 
 # Left side, indexed [char_idx][field_idx]. char_idx 0..4 ↔ Char 1..5.
@@ -257,19 +274,23 @@ _DUEL_RIGHT: tuple[tuple[Bbox, ...], ...] = (
 
 def _build_duel() -> tuple[Region, ...]:
     rows: list[Region] = []
-    for side, side_label, by_char in (
-        ("left", "Left", _DUEL_LEFT),
-        ("right", "Right", _DUEL_RIGHT),
+    for side, side_label, by_char, dc_table in (
+        ("left", "Left", _DUEL_LEFT, _DUEL_DISCONNECT_LEFT),
+        ("right", "Right", _DUEL_RIGHT, _DUEL_DISCONNECT_RIGHT),
     ):
         for char_idx, fields in enumerate(by_char):
             char_no = char_idx + 1
             group = f"{side}.char{char_no}"
+            # Original 5 stat fields land first; disconnect is a
+            # parallel 6th field sourced from the uniform-geometry
+            # table, not from per-char tuples.
+            per_slot_bboxes = (*fields, dc_table[char_idx])
             for field_idx, (field_slug, field_label) in enumerate(_DUEL_FIELDS):
                 rows.append(
                     Region(
                         slug=f"{side}.char{char_no}.{field_slug}",
                         label=f"{side_label} · Char {char_no} · {field_label}",
-                        bbox=fields[field_idx],
+                        bbox=per_slot_bboxes[field_idx],
                         group=group,
                     )
                 )

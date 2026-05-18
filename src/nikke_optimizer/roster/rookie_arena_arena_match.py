@@ -167,12 +167,62 @@ class _RookieBattlePayload:
     pre_battle_screenshot: Optional[str]
     battle_record_screenshot: Optional[str]
     capture_quality: dict
+    # Derived from the 10 `(left|right).char{N}.disconnect` OCR
+    # fields on the results_duel screenshot. "loss" iff user side
+    # (left) shows 5/5 DISCONNECTED, "win" iff opponent side (right)
+    # shows 5/5. Anything else stays None until we ship the
+    # win-indicator slice (BACKLOG: battle outcome extraction).
+    outcome: Optional[str] = None
     # Internal — surfaces the loadout's screenshot id + the canonical
     # per-slot team lists so upsert_arena_match can backfill the
     # loadout's char.name character_ids with the authoritative names.
     loadout_screenshot_id: Optional[int] = None
     canonical_my_team: list[Optional[str]] = field(default_factory=list)
     canonical_opp_team: list[Optional[str]] = field(default_factory=list)
+
+
+def _is_disconnect_text(text: Optional[str]) -> bool:
+    """Lenient substring check for the DISCONNECTED overlay text.
+
+    Anchors on the distinctive 5-char run "NNECT" — robust against
+    common OCR misreads of the boundary letters (I↔1, O↔0, D dropped
+    on first-char detection misses) while still rejecting unrelated
+    text that might leak into the bbox.
+    """
+    if not text:
+        return False
+    s = text.upper().replace("0", "O").replace("1", "I").replace("L", "I")
+    return "NNECT" in s
+
+
+def _disconnect_flags_from_results(
+    br_by_slug: dict, side: str,
+) -> list[bool]:
+    """Return 5 booleans — one per slot — True iff the
+    `(side).char{N}.disconnect` OCR text matches the DISCONNECTED
+    badge.
+    """
+    out: list[bool] = []
+    for n in range(1, 6):
+        slug = f"{side}.char{n}.disconnect"
+        f = br_by_slug.get(slug)
+        text = f.text if f else None
+        out.append(_is_disconnect_text(text))
+    return out
+
+
+def _outcome_from_disconnects(
+    my_dc: list[bool], opp_dc: list[bool],
+) -> Optional[str]:
+    """5/5 user-side disconnects = forfeit loss; 5/5 opponent-side
+    disconnects = forfeit win. Mixed / partial → None (the regular
+    win-by-HP indicator isn't extracted yet — that's the next slice).
+    """
+    if sum(my_dc) == 5 and sum(opp_dc) < 5:
+        return "loss"
+    if sum(opp_dc) == 5 and sum(my_dc) < 5:
+        return "win"
+    return None
 
 
 def build_payload(
@@ -236,6 +286,9 @@ def build_payload(
     # fallback for any slot the battle-records pass missed.
     opp_names_br: list[Optional[str]] = [None] * 5
     my_names_br: list[Optional[str]] = [None] * 5
+    my_disconnect: list[bool] = [False] * 5
+    opp_disconnect: list[bool] = [False] * 5
+    outcome: Optional[str] = None
     if results_shot is not None:
         br_by_slug = _fields_by_slug(session, results_shot.id)
         # NIKA (me) is on the LEFT, opponent on the RIGHT — matches
@@ -248,6 +301,9 @@ def build_payload(
         opp_names_br = _read_battle_records_names(
             br_by_slug, "right", char_name_by_id,
         )
+        my_disconnect = _disconnect_flags_from_results(br_by_slug, "left")
+        opp_disconnect = _disconnect_flags_from_results(br_by_slug, "right")
+        outcome = _outcome_from_disconnects(my_disconnect, opp_disconnect)
 
     opp_names, opp_name_sources = _merge_names(opp_names_br, opp_names_loadout)
     my_names, my_name_sources = _merge_names(my_names_br, my_names_loadout)
@@ -291,6 +347,12 @@ def build_payload(
         "my_player_level": my_level.level,
         "my_player_level_source": my_level.source.value,
         "my_player_level_source_label": my_level.source_battle_label,
+        # Per-slot disconnect flags from the results screen. Outcome is
+        # already on `payload.outcome` but the per-slot map is useful
+        # for debugging (e.g. partial disconnects when only some Nikkes
+        # forfeited but the match continued).
+        "user_team_disconnect": my_disconnect,
+        "opponent_team_disconnect": opp_disconnect,
     }
 
     return _RookieBattlePayload(
@@ -307,6 +369,7 @@ def build_payload(
             results_shot.file_path if results_shot else None
         ),
         capture_quality=capture_quality,
+        outcome=outcome,
         loadout_screenshot_id=loadout_shot.id,
         canonical_my_team=my_names,
         canonical_opp_team=opp_names,
@@ -399,6 +462,7 @@ def upsert_arena_match(
         "pre_battle_screenshot": payload.pre_battle_screenshot,
         "battle_record_screenshot": payload.battle_record_screenshot,
         "capture_quality": payload.capture_quality,
+        "outcome": payload.outcome,
         "session_id": sid,
         "session_label": (
             f"Rookie Arena {tournament.captured_at:%Y-%m-%d %H:%M} UTC"

@@ -221,26 +221,21 @@ The Rookie Arena flow shipped end-to-end (ingest → OCR → ArenaMatch
 → RookieArenaSnapshot, daemon-driven). Notes captured during the
 live first-run validation:
 
-- **Battle outcome extraction** — `ArenaMatch.outcome` is still
-  always `None` for rookie. The data is on `results.png` but we
-  haven't wired the per-row WIN / DISCONNECTED detection yet.
-  Need from the user before coding:
-    1. A sample results.png where BOTH sides played (today's all
-       had opponent disconnects — haven't seen what the actual WIN
-       indicator looks like). Probably a small icon/badge or a
-       cell-color shift.
-    2. Coord-pick on the win-indicator area for one row.
-    3. Coord-pick on the "DISCONNECTED" overlay area.
-    4. Tie-handling rule: 2-2 with one tie = `timeout`, `draw`,
-       or does the game pick a winner via some tiebreaker?
-  Once samples land: add `(left|right).rowN.outcome` to
-  `results_duel` (10 regions, uniform-y per side), classify as
-  "disconnected" (OCR text) OR "won" (visual check), aggregate
-  in `rookie_arena_arena_match.build_payload`, populate
-  `ArenaMatch.outcome` + `raw_battle_record` per-char stats
-  (atk/heal numbers we already OCR but ignore), surface W/L badge
-  on `/rookie` + per-battle page. Champions duels benefit too
-  since they share `results_duel`.
+- **Battle outcome extraction** — DISCONNECTED detection landed
+  2026-05-18 (10 new `(left|right).char{N}.disconnect` regions
+  on `results_duel`, uniform 117×22 with 197px y-stride; OCR
+  validated 99% confidence). 5/5 user-side dc → `outcome=loss`,
+  5/5 opp-side dc → `outcome=win`. W/L pill rendered on
+  `/rookie`. Open follow-ups (need user samples):
+    1. **Win-by-HP indicator** for the "no disconnect" case —
+       what visually distinguishes the winning side when both
+       teams played to the 5-min cap? Probably a victory icon /
+       cell-color shift / banner.
+    2. **Tie-handling rule**: 2-2 with one tie = `timeout`,
+       `draw`, or does the game pick a winner via some tiebreaker?
+    3. `raw_battle_record` per-char stats (atk/heal numbers we
+       already OCR but ignore) — would be useful for the
+       damage-formula validation in Phase 4.
 
 - ~~**Daemon stale-event-id reset on Syncthing restart**~~ (fixed
   2026-05-17). Original diagnosis was incomplete. Actual root

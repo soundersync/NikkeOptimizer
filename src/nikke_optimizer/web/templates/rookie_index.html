@@ -75,6 +75,19 @@
 .precision-dot.precise { background: #86efac; }
 .precision-dot.estimated { background: #fbbf24; }
 
+.outcome-pill {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 600;
+    border: 1px solid;
+}
+.outcome-pill.win  { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.outcome-pill.loss { background: #2a1a1f; color: #f87171; border-color: #5f1e2e; }
+.outcome-pill.unknown {
+    background: #1f2228; color: #6b7280; border-color: #2a2f3a;
+    font-weight: 400; font-style: italic;
+}
+
 .empty {
     color: #6b7280; padding: 40px 0; text-align: center;
     border: 1px dashed #1f2228; border-radius: 8px;
@@ -155,6 +168,13 @@
                     {% if b.opponent_name %}vs <strong>{{ b.opponent_name }}</strong>
                     {% else %}<span class="none-text">opponent not OCR'd</span>{% endif %}
                 </span>
+                {% if b.outcome == "win" %}
+                <span class="outcome-pill win" title="opponent forfeited (5/5 disconnected)">W</span>
+                {% elif b.outcome == "loss" %}
+                <span class="outcome-pill loss" title="you forfeited (5/5 disconnected)">L</span>
+                {% else %}
+                <span class="outcome-pill unknown" title="no forfeit detected — won/lost by HP TBD (BACKLOG)">?</span>
+                {% endif %}
                 <span class="precision-dot {% if b.has_opponent_png %}precise{% else %}estimated{% endif %}"
                       title="{% if b.has_opponent_png %}opponent.png captured — level precise{% else %}no opponent.png — level estimated from my level{% endif %}"></span>
             </a>

@@ -3219,6 +3219,18 @@ def create_app(
                         PromoMatch.round_label == "rookie",
                     ).order_by(PromoMatch.match_no)
                 ).all()
+                # Outcomes for the 5 battles — derived from the
+                # `(left|right).char{N}.disconnect` OCR fields. Loaded
+                # in one query keyed by round_index.
+                sid = f"rookie-run-{t.id}"
+                outcome_by_round = {
+                    am.round_index: am.outcome
+                    for am in session.exec(
+                        select(ArenaMatch).where(
+                            ArenaMatch.session_id == sid,
+                        )
+                    ).all()
+                }
                 battle_summaries = []
                 for m in matches:
                     shots = session.exec(
@@ -3246,6 +3258,7 @@ def create_app(
                         "match_no": m.match_no,
                         "opponent_name": opp_name,
                         "has_opponent_png": has_opp_png,
+                        "outcome": outcome_by_round.get(m.match_no),
                     })
 
                 # Scrape progress derived from the per-run status sidecar.

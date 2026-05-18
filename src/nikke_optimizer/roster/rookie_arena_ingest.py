@@ -148,10 +148,12 @@ def ingest_rookie_root(
     if ocr:
         from .promo_tournament_ingest import _run_ocr_pass
         _run_ocr_pass(engine, stats=stats, force=force_ocr)
-        # ArenaMatch population — runs AFTER OCR so the builder has the
-        # fields it needs. Idempotent via the (session_id, round_index)
-        # natural key. Also writes per-run players_lookup.json sidecars.
-        _build_arena_matches_for_all_rookie_runs(engine)
+    # ArenaMatch population — runs even with --no-ocr so consumers can
+    # refresh outcomes / capture_quality fields after a separate
+    # `backfill-extractions` pass that populated new region slugs (e.g.
+    # the disconnect detection slice). Idempotent via the
+    # (session_id, round_index) natural key.
+    _build_arena_matches_for_all_rookie_runs(engine)
 
     # Optional scrape pass — opt-in, gated on the daemon's cookie
     # probe. The scrape uses the freshly-built sidecars + cross-run
