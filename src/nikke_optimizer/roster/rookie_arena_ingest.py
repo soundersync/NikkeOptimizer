@@ -87,6 +87,7 @@ def ingest_rookie_root(
     only_run: Optional[str] = None,
     only_battle: Optional[int] = None,
     scrape_rookie_opponents: bool = False,
+    refresh_self_from_loadouts: bool = False,
     max_scrape_minutes: float = 90.0,
 ) -> IngestStats:
     """Ingest every ``<date_TS>/`` run found under ``staging_root``.
@@ -160,7 +161,75 @@ def ingest_rookie_root(
             engine, stats=stats, max_scrape_minutes=max_scrape_minutes,
         )
 
+    # Self-refresh pass — sparse fetch-shiftyspad for the user's own
+    # roster restricted to the chars they used in the just-ingested
+    # run(s). Gated on cookies AND a configured intl_openid. Skipped
+    # per-tournament via a state file so a daemon restart doesn't
+    # re-fetch the same run.
+    if refresh_self_from_loadouts:
+        _run_self_refresh_pass(engine, stats=stats, db_path=db_path)
+
     return stats
+
+
+def _run_self_refresh_pass(
+    engine, *, stats: IngestStats, db_path: Optional[Path],
+) -> None:
+    """Sparse OwnedCharacter refresh from rookie loadouts.
+
+    Walks every rookie tournament that hasn't yet been self-refreshed
+    (tracked via the per-tournament state file in
+    ``rookie_self_refresh``). For each, harvests the user's loadout
+    Nikkes and runs a targeted ShiftyPad fetch+sync against the
+    configured ``intl_openid``.
+    """
+    from ..data.config import get_self_intl_openid
+    from .promo_tournament_ingest import (
+        FORMAT_ROOKIE_ARENA, tournament_format,
+    )
+    from .rookie_self_refresh import (
+        already_refreshed,
+        refresh_self_from_rookie_tournament,
+    )
+
+    uid = get_self_intl_openid()
+    if not uid:
+        stats.self_refresh_skipped_reason = (
+            "no intl_openid configured — run "
+            "`nikkeoptimizer set-uid <base64-uid>`"
+        )
+        return
+
+    with Session(engine) as session:
+        tournaments = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_ROOKIE_ARENA
+            and not already_refreshed(t.id)
+        ]
+        for t in tournaments:
+            stats.self_refresh_attempted += 1
+            try:
+                report = refresh_self_from_rookie_tournament(
+                    session, t, intl_openid=uid, db_path=db_path,
+                )
+            except Exception as exc:  # noqa: BLE001
+                stats.errors.append(
+                    f"self-refresh failed for {t.storage_root}: {exc}"
+                )
+                continue
+            if report.error:
+                stats.errors.append(
+                    f"self-refresh error for {t.storage_root}: {report.error}"
+                )
+            stats.self_refresh_chars_updated += report.chars_updated
+            log.info(
+                "self-refresh %s: targeted=%d unmapped=%d updated=%d skipped=%s",
+                t.storage_root,
+                len(report.chars_targeted),
+                len(report.chars_unmapped),
+                report.chars_updated,
+                report.skipped_reason,
+            )
 
 
 def _run_rookie_scrape_pass(

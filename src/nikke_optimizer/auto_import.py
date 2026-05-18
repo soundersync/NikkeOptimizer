@@ -173,21 +173,35 @@ def poll_for_completion(
 
 
 def get_current_event_id(config: SyncthingConfig) -> int:
-    """Return the latest Syncthing event id without blocking.
+    """Return the latest FolderCompletion event id without blocking.
 
     Used at startup to skip the buffered backlog — the startup-ingest
     pass already covers anything that happened while the daemon was
     down.
+
+    **Why FolderCompletion-specific, not global**: Syncthing's event
+    ids are monotonic across ALL event types. Querying `since=0`
+    without a type filter returns the highest global id — but the
+    daemon polls *only* for FolderCompletion events, which can lag
+    the global counter by 10,000+ ids when other event types fire
+    rapidly (LocalIndexUpdated, RemoteDownloadProgress, ItemStarted).
+
+    Observed 2026-05-17: global max was 13785, latest FolderCompletion
+    was id 119. Daemon stored 13785, polled `events=FolderCompletion
+    &since=13785`, and never saw the existing id-119 event — the
+    rookie-run sync that emitted it sat unprocessed until the user
+    kickstart-ed the daemon.
+
+    Anchoring to FolderCompletion-specific ids fixes this: we know
+    the next FolderCompletion event will get an id > whatever our
+    type-filtered max is right now, so the `since=` filter always
+    catches it whenever Syncthing fires it.
     """
     url = (
         f"http://{config.address}/rest/events"
-        f"?since=0&timeout=1&limit=1"
+        f"?events=FolderCompletion&since=0&timeout=1"
     )
     events = _http_get(url, api_key=config.api_key, timeout=10)
-    if not events:
-        # Fall back: ask for the head of the buffer.
-        url = f"http://{config.address}/rest/events?since=0&timeout=0"
-        events = _http_get(url, api_key=config.api_key, timeout=10)
     return max((e.get("id", 0) for e in events), default=0)
 
 
@@ -255,6 +269,13 @@ def format_audit_entry(
         )
     elif stats.scrape_skipped_reason:
         lines.append(f"Scrape:   skipped — {stats.scrape_skipped_reason}")
+    if stats.self_refresh_attempted:
+        lines.append(
+            f"SelfRfsh: tournaments={stats.self_refresh_attempted} "
+            f"chars_updated={stats.self_refresh_chars_updated}"
+        )
+    elif stats.self_refresh_skipped_reason:
+        lines.append(f"SelfRfsh: skipped — {stats.self_refresh_skipped_reason}")
     if stats.errors:
         lines.append(f"Errors:   {len(stats.errors)}")
         for err in stats.errors[:10]:
@@ -351,6 +372,10 @@ def _merge_stats(into: IngestStats, other: IngestStats) -> None:
         into.scrape_status_counts[k] = into.scrape_status_counts.get(k, 0) + v
     if other.scrape_skipped_reason and not into.scrape_skipped_reason:
         into.scrape_skipped_reason = other.scrape_skipped_reason
+    into.self_refresh_attempted += other.self_refresh_attempted
+    into.self_refresh_chars_updated += other.self_refresh_chars_updated
+    if other.self_refresh_skipped_reason and not into.self_refresh_skipped_reason:
+        into.self_refresh_skipped_reason = other.self_refresh_skipped_reason
     into.errors.extend(other.errors)
 
 
@@ -399,6 +424,7 @@ def run_ingest_and_log(
                 staging_root=rookie_staging,
                 move=False,
                 scrape_rookie_opponents=cookies_ok,
+                refresh_self_from_loadouts=cookies_ok,
                 max_scrape_minutes=max_scrape_minutes,
             )
             _merge_stats(stats, rookie_stats)

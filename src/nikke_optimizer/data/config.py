@@ -71,6 +71,40 @@ def set_self_username(name: str) -> Path:
     return _config_path()
 
 
+def get_self_intl_openid() -> Optional[str]:
+    """Return the user's BlablaLink ``intl_openid`` (base64 uid), or
+    None if unconfigured.
+
+    Resolution order:
+      1. ``NIKKE_OPTIMIZER_UID`` env var
+      2. ``intl_openid`` key in ``<user_data_dir>/config.json``
+
+    Used by the daemon's post-rookie self-refresh pass (sparse
+    ShiftyPad fetch for the chars the user actually used in their
+    daily run) so ``OwnedCharacter`` rows stay fresh without manual
+    ``fetch-shiftyspad`` invocations.
+    """
+    env = os.environ.get("NIKKE_OPTIMIZER_UID", "").strip()
+    if env:
+        return env
+    cfg = _load()
+    uid = cfg.get("intl_openid")
+    if isinstance(uid, str) and uid.strip():
+        return uid.strip()
+    return None
+
+
+def set_self_intl_openid(uid: str) -> Path:
+    """Persist the user's BlablaLink ``intl_openid`` (base64 uid) to
+    the config file. Returns the path written to so the caller can
+    echo it.
+    """
+    cfg = _load()
+    cfg["intl_openid"] = uid.strip()
+    _save(cfg)
+    return _config_path()
+
+
 def detect_self_username(session) -> Optional[tuple[str, int]]:
     """Best-guess the user's in-game name from existing arena captures.
 

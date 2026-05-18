@@ -1118,18 +1118,49 @@ def set_username_cmd(
     console.print(f"[bold green]Saved username[/] {name!r} -> {path}")
 
 
+@app.command("set-uid")
+def set_uid_cmd(
+    uid: str = typer.Argument(
+        ..., help="Your base64-encoded BlablaLink intl_openid (the "
+                  "`?uid=...` param on a shiftyspad URL).",
+    ),
+) -> None:
+    """Persist your BlablaLink ``intl_openid`` so the daemon can run
+    sparse self-refreshes after each rookie run.
+
+    Equivalent to setting ``NIKKE_OPTIMIZER_UID`` permanently. Used
+    by the post-rookie-ingest self-refresh hook in ``auto-import``;
+    without it that hook is skipped with a one-line audit note.
+    """
+    from ..data.config import set_self_intl_openid
+
+    path = set_self_intl_openid(uid)
+    console.print(f"[bold green]Saved intl_openid[/] {uid!r} -> {path}")
+
+
 @app.command("show-config")
 def show_config_cmd() -> None:
-    """Show the resolved self-username (env var or config file)."""
-    from ..data.config import get_self_username
+    """Show the resolved self-username + intl_openid (env vars or
+    config file).
+    """
+    from ..data.config import get_self_intl_openid, get_self_username
 
     name = get_self_username()
     if name:
-        console.print(f"Self-username: [bold]{name}[/]")
+        console.print(f"Self-username:   [bold]{name}[/]")
     else:
         console.print(
             "[yellow]No self-username configured. "
             "Run [bold]nikkeoptimizer set-username <name>[/] to set one.[/]"
+        )
+    uid = get_self_intl_openid()
+    if uid:
+        console.print(f"Self-intl_openid: [bold]{uid}[/]")
+    else:
+        console.print(
+            "[yellow]No intl_openid configured. "
+            "Run [bold]nikkeoptimizer set-uid <base64-uid>[/] to enable "
+            "the rookie self-refresh.[/]"
         )
 
 
@@ -4211,6 +4242,106 @@ def fetch_rookie_opponents_cmd(
             counts[rec.status] = counts.get(rec.status, 0) + 1
         summary = "  ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
         console.print(f"  [bold]done[/] — {summary}")
+
+
+@app.command("refresh-self-from-rookie")
+def refresh_self_from_rookie_cmd(
+    target: Optional[str] = typer.Argument(
+        None,
+        help="Rookie tournament id (e.g. 7) to refresh from. Omit to "
+             "refresh every rookie tournament that hasn't been refreshed yet.",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-run even for tournaments already marked in the "
+             "self-refresh state file.",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Sparse ``OwnedCharacter`` refresh from rookie loadouts.
+
+    For each targeted rookie tournament, harvests the unique Nikke
+    names from your ``user_team`` across the 5 battles and runs a
+    sparse ShiftyPad fetch+sync against your configured
+    ``intl_openid``. Idempotent via the per-tournament cooldown
+    state file — re-running without ``--force`` is a no-op.
+
+    Equivalent to ``fetch-shiftyspad <uid> --names "<loadout>"
+    --apply`` but the loadout is auto-derived. This is the same
+    hook the daemon runs after each rookie ingest.
+    """
+    from ..data.config import get_self_intl_openid
+    from ..data.models import PromoTournament
+    from ..roster.promo_tournament_ingest import (
+        FORMAT_ROOKIE_ARENA, tournament_format,
+    )
+    from ..roster.rookie_self_refresh import (
+        already_refreshed,
+        refresh_self_from_rookie_tournament,
+    )
+
+    uid = get_self_intl_openid()
+    if not uid:
+        console.print(
+            "[red]no intl_openid configured[/]\n"
+            "Run [bold]nikkeoptimizer set-uid <base64-uid>[/] first."
+        )
+        raise typer.Exit(1)
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        all_rookie = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_ROOKIE_ARENA
+        ]
+        if target:
+            if not target.isdigit():
+                console.print(f"[red]target must be a tournament id[/]")
+                raise typer.Exit(1)
+            tid = int(target)
+            targets = [t for t in all_rookie if t.id == tid]
+            if not targets:
+                console.print(
+                    f"[yellow]no rookie tournament with id={tid}[/]"
+                )
+                raise typer.Exit(0)
+        else:
+            targets = [
+                t for t in all_rookie
+                if force or not already_refreshed(t.id)
+            ]
+            if not targets:
+                console.print(
+                    "[dim]every rookie tournament has already been "
+                    "self-refreshed — pass --force to re-run[/]"
+                )
+                raise typer.Exit(0)
+
+        for t in targets:
+            console.print(
+                f"[cyan]self-refresh[/] tournament={t.id} "
+                f"[dim]({Path(t.storage_root).name})[/]"
+            )
+            report = refresh_self_from_rookie_tournament(
+                session, t, intl_openid=uid, db_path=db, force=force,
+            )
+            if report.skipped_reason:
+                console.print(f"  [yellow]skipped:[/] {report.skipped_reason}")
+                continue
+            if report.error:
+                console.print(f"  [red]error:[/] {report.error}")
+                continue
+            console.print(
+                f"  targeted={len(report.chars_targeted)} "
+                f"unmapped={len(report.chars_unmapped)} "
+                f"matched={report.chars_matched_in_sync} "
+                f"updated={report.chars_updated}"
+            )
+            if report.chars_unmapped:
+                console.print(
+                    f"  [dim]unmapped names:[/] {report.chars_unmapped}"
+                )
 
 
 if __name__ == "__main__":

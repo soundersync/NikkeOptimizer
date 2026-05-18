@@ -137,7 +137,8 @@ on macOS (via `platformdirs.user_data_dir`). Three things live there:
 | `portraits/` | 335 labeled `.webp` images | Used by Vision matcher; auto-discovered at startup |
 | `screenshots/` | User's gameplay screenshots organized by mode | Champion_Arena/ Special_Arena/ Rookie_Arena/ Cubes/ loose/ |
 | `uploads/` | Files uploaded via the web drop-zone | Auto-routed to the right importer |
-| `config.json` | Persistent user settings | Currently just `{"username": "Nika"}` |
+| `config.json` | Persistent user settings | `{"username": "Nika", "intl_openid": "<base64-uid>"}` |
+| `state/rookie_self_refresh.json` | Per-tournament cooldown for the daemon's rookie self-refresh pass | `{"7": {"refreshed_at": "…", "n_chars": 9}}` — keeps a daemon restart from re-fetching the same run |
 | `blablalink/` | Mirrored BlablaLink character JSONs | `nikke_list_<lang>_v2.json` + `<lang>/roledata/<rid>-v2-<lang>.json` (~189 files, ~25MB) |
 
 Resolution order for the user's in-game name (used by CP cross-validation
@@ -150,6 +151,9 @@ Other env overrides:
 - `NIKKE_OPTIMIZER_DB` — DB path
 - `NIKKE_OPTIMIZER_PORTRAITS` — portrait library path
 - `NIKKE_OPTIMIZER_USERNAME` — see above (also persistable via `nikkeoptimizer set-username <name>`)
+- `NIKKE_OPTIMIZER_UID` — BlablaLink `intl_openid` (base64 uid) for the
+  daemon's post-rookie self-refresh hook (also persistable via
+  `nikkeoptimizer set-uid <base64-uid>`)
 
 ---
 
@@ -217,13 +221,25 @@ How it works:
 - Single-instance via `flock /tmp/nikke-autoimport.lock`. Last seen
   event id persisted to
   `~/Library/Application Support/NikkeOptimizer/state/syncthing_last_event_id.txt`
-  so a restart skips already-handled events.
+  so a restart skips already-handled events. The startup `since=`
+  anchor is queried with `events=FolderCompletion` so it's safe
+  against Syncthing's global event id leapfrogging the
+  FolderCompletion-specific id (which caused a hang on 2026-05-17).
 - **Copy-only** — never moves or deletes from `incoming-captures/`;
   staging stays Syncthing's domain.
 - Source PNGs are dimension-checked against
   `REFERENCE_PNG_SIZE = (1510, 2013)` in `promo_tournament_ingest.py`.
   Mismatches are warn + skip + listed in the audit stanza; never
   copied to the archive.
+- **Post-rookie self-refresh**: after `ingest_rookie_root`, when
+  BlablaLink cookies are present AND `intl_openid` is configured,
+  the daemon runs a sparse `fetch-shiftyspad` against the user's
+  own profile restricted to the ~5-15 unique Nikkes they used in
+  the just-ingested run. Keeps `OwnedCharacter` rows fresh on a
+  daily cadence. Per-tournament cooldown via
+  `state/rookie_self_refresh.json`; surfaces as a `SelfRfsh:` line
+  in the audit stanza. See [[rookie_self_refresh]] +
+  `nikkeoptimizer refresh-self-from-rookie` for manual triggers.
 
 ### ShiftyPad (BlablaLink player-profile scraper)
 

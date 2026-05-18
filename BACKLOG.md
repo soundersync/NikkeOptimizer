@@ -215,6 +215,72 @@ verbatim.
   outpost research (mostly public) still lands on the account-level
   fields. Simulator falls back to defaults for missing per-char data.
 
+## Phase 3 — Rookie Arena follow-ups (2026-05-17 end-of-session)
+
+The Rookie Arena flow shipped end-to-end (ingest → OCR → ArenaMatch
+→ RookieArenaSnapshot, daemon-driven). Notes captured during the
+live first-run validation:
+
+- **Battle outcome extraction** — `ArenaMatch.outcome` is still
+  always `None` for rookie. The data is on `results.png` but we
+  haven't wired the per-row WIN / DISCONNECTED detection yet.
+  Need from the user before coding:
+    1. A sample results.png where BOTH sides played (today's all
+       had opponent disconnects — haven't seen what the actual WIN
+       indicator looks like). Probably a small icon/badge or a
+       cell-color shift.
+    2. Coord-pick on the win-indicator area for one row.
+    3. Coord-pick on the "DISCONNECTED" overlay area.
+    4. Tie-handling rule: 2-2 with one tie = `timeout`, `draw`,
+       or does the game pick a winner via some tiebreaker?
+  Once samples land: add `(left|right).rowN.outcome` to
+  `results_duel` (10 regions, uniform-y per side), classify as
+  "disconnected" (OCR text) OR "won" (visual check), aggregate
+  in `rookie_arena_arena_match.build_payload`, populate
+  `ArenaMatch.outcome` + `raw_battle_record` per-char stats
+  (atk/heal numbers we already OCR but ignore), surface W/L badge
+  on `/rookie` + per-battle page. Champions duels benefit too
+  since they share `results_duel`.
+
+- ~~**Daemon stale-event-id reset on Syncthing restart**~~ (fixed
+  2026-05-17). Original diagnosis was incomplete. Actual root
+  cause: `get_current_event_id` queried Syncthing's GLOBAL event
+  id (any type) with `since=0&limit=1` → returned 13785. Daemon
+  then polled `events=FolderCompletion&since=13785` — but
+  FolderCompletion-specific ids only reached 119 (lots of
+  `LocalIndexUpdated`/`RemoteDownloadProgress` events between
+  each FolderCompletion bump the global counter without bumping
+  ours). Filter excluded every existing event AND any new event
+  whose id falls in the gap. Fix: query
+  `events=FolderCompletion&since=0&timeout=1` and take `max(id)`
+  — now we anchor `since=` to the type we actually subscribe to.
+  Self-heals across daemon restarts because `_save_last_event_id`
+  overwrites the stored value with the new (correct) FC-anchored
+  one each time the daemon starts.
+
+- ~~**My-roster auto-refresh from rookie loadouts**~~ (shipped
+  2026-05-17). New `roster/rookie_self_refresh.py` harvests the
+  union of `user_team` names across the 5 ArenaMatch rows of a
+  rookie tournament, maps them to BlablaLink name_codes, and runs
+  a sparse `ShiftyPadFetcher.fetch_home` + `fetch_character_details`
+  + `sync(apply=True)` against the configured `intl_openid`. Wired
+  into `ingest_rookie_root(refresh_self_from_loadouts=True)`; the
+  daemon opts in whenever cookies are present. Per-tournament
+  cooldown state at
+  `<user_data_dir>/state/rookie_self_refresh.json` so a daemon
+  restart never re-fetches an already-handled run. New
+  `IngestStats.self_refresh_*` counters surface in the audit log
+  as a `SelfRfsh:` line. CLI:
+  - `nikkeoptimizer set-uid <base64-uid>` (persists to config.json)
+  - `nikkeoptimizer refresh-self-from-rookie [<tid>] [--force]`
+
+- **Retire legacy `arena.py`** — proportional-coord arena
+  extractor from before the 1510×2013 era. New captures all
+  flow through the region-driven family
+  (`promo_tournament_regions` + `rookie_arena_regions`).
+  Safe to delete after confirming no historical captures still
+  rely on it.
+
 ## Done — kept here as forward-thinking notes
 
 - Phase 2 alpha: rookie / SP / Champions / counter / counter-sp / explain (shipped)

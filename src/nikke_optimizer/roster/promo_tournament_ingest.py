@@ -133,6 +133,12 @@ class IngestStats:
     scrape_snapshots_written: int = 0  # new RosterSnapshot rows landed
     scrape_status_counts: dict[str, int] = field(default_factory=dict)
     scrape_skipped_reason: Optional[str] = None  # set when scrape opted-out
+    # Self-refresh pass — populated only by the rookie-arena ingest's
+    # post-scrape self-refresh hook (sparse fetch-shiftyspad for the
+    # user's own roster restricted to the chars they used in the run).
+    self_refresh_attempted: int = 0     # tournaments where the hook ran
+    self_refresh_chars_updated: int = 0  # OwnedCharacter rows that changed
+    self_refresh_skipped_reason: Optional[str] = None
     errors: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
