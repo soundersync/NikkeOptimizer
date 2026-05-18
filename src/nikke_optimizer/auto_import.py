@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STAGING = _REPO_ROOT / "incoming-captures" / "champion_arena"
+DEFAULT_ROOKIE_STAGING = _REPO_ROOT / "incoming-captures" / "rookie_arena"
 DEFAULT_LOG_PATH = _REPO_ROOT / "logs" / "auto_import.log"
 DEFAULT_LOCK_PATH = Path("/tmp/nikke-autoimport.lock")
 SYNCTHING_CONFIG = Path.home() / "Library/Application Support/Syncthing/config.xml"
@@ -326,40 +327,90 @@ def _blablalink_cookies_present() -> bool:
     return (default_browser_profile_dir() / "Default" / "Cookies").is_file()
 
 
+def _merge_stats(into: IngestStats, other: IngestStats) -> None:
+    """Sum the counters of ``other`` into ``into`` so a single audit
+    stanza can cover ingests across multiple staging roots (champion +
+    rookie). String fields and lists are concatenated; status_counts
+    dicts are key-merged with addition.
+    """
+    into.tournaments += other.tournaments
+    into.groups += other.groups
+    into.matches += other.matches
+    into.screenshots += other.screenshots
+    into.files_copied += other.files_copied
+    into.files_skipped += other.files_skipped
+    into.files_moved_deleted += other.files_moved_deleted
+    into.files_wrong_size.extend(other.files_wrong_size)
+    into.ocr_screenshots += other.ocr_screenshots
+    into.ocr_fields += other.ocr_fields
+    into.ocr_skipped += other.ocr_skipped
+    into.player_data_sidecars += other.player_data_sidecars
+    into.scrape_attempted += other.scrape_attempted
+    into.scrape_snapshots_written += other.scrape_snapshots_written
+    for k, v in other.scrape_status_counts.items():
+        into.scrape_status_counts[k] = into.scrape_status_counts.get(k, 0) + v
+    if other.scrape_skipped_reason and not into.scrape_skipped_reason:
+        into.scrape_skipped_reason = other.scrape_skipped_reason
+    into.errors.extend(other.errors)
+
+
 def run_ingest_and_log(
     staging: Path,
     *,
     trigger: str,
     log_path: Path,
+    rookie_staging: Path = DEFAULT_ROOKIE_STAGING,
     max_scrape_minutes: float = DEFAULT_MAX_SCRAPE_MINUTES,
 ) -> IngestStats:
-    """Run a single ingest pass and append an audit entry.
+    """Run BOTH champion + rookie ingest passes and append a combined
+    audit entry.
 
-    Errors during ingest are caught and logged to the audit file so a
-    failure doesn't kill the daemon.
+    Errors during either ingest are caught and logged to the audit file
+    so a failure doesn't kill the daemon.
 
-    The daemon opts into the player_data scrape pass when BlablaLink
-    cookies are present in the persistent Playwright profile (cheap
-    filesystem probe). When absent, the scrape is skipped and the audit
-    stanza calls out the missing login.
+    The daemon opts into both BlablaLink scrape passes (player_data +
+    rookie opponents) when BlablaLink cookies are present in the
+    persistent Playwright profile. When absent, both scrapes are
+    skipped and the audit stanza calls out the missing login.
     """
+    from .roster.rookie_arena_ingest import ingest_rookie_root
+
     t0 = time.time()
     cookies_ok = _blablalink_cookies_present()
+    stats = IngestStats()
+    # Champion-family pass (promotion_tournament / champions_duel /
+    # league / promotion_tournament_player_data).
     try:
-        stats = ingest_root(
+        champion_stats = ingest_root(
             staging_root=staging,
             move=False,
             scrape_player_data=cookies_ok,
             max_scrape_minutes=max_scrape_minutes,
         )
-        if not cookies_ok:
-            stats.scrape_skipped_reason = (
-                "no BlablaLink cookies — run `nikkeoptimizer shiftyspad-login`"
-            )
+        _merge_stats(stats, champion_stats)
     except Exception as exc:  # noqa: BLE001
         log.exception("ingest_root raised: %s", exc)
-        stats = IngestStats()
         stats.errors.append(f"ingest_root raised: {exc!r}")
+
+    # Rookie-arena pass (incoming-captures/rookie_arena/<date_TS>/).
+    if rookie_staging.is_dir():
+        try:
+            rookie_stats = ingest_rookie_root(
+                staging_root=rookie_staging,
+                move=False,
+                scrape_rookie_opponents=cookies_ok,
+                max_scrape_minutes=max_scrape_minutes,
+            )
+            _merge_stats(stats, rookie_stats)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("ingest_rookie_root raised: %s", exc)
+            stats.errors.append(f"ingest_rookie_root raised: {exc!r}")
+
+    if not cookies_ok:
+        stats.scrape_skipped_reason = (
+            "no BlablaLink cookies — run `nikkeoptimizer shiftyspad-login`"
+        )
+
     duration = time.time() - t0
     append_audit_entry(
         log_path,

@@ -2459,6 +2459,17 @@ def create_app(
                     PromoTournament.captured_at.desc(),
                 )
             ).all()
+            # PromoTournament is reused by the rookie_arena ingest as
+            # a per-daily-run container. Filter those out — they have
+            # their own dedicated /rookie page and shouldn't appear
+            # twice in the UI.
+            from ..roster.promo_tournament_ingest import (
+                FORMAT_ROOKIE_ARENA as _FORMAT_ROOKIE,
+            )
+            tournaments = [
+                t for t in tournaments
+                if tournament_format(t.storage_root) != _FORMAT_ROOKIE
+            ]
             t_meta = []
             for t in tournaments:
                 n_matches = len(
@@ -3164,6 +3175,300 @@ def create_app(
                 "ref_h": ref_h,
                 "kinds": PROMO_KINDS,
                 "format": fmt,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Rookie Arena — daily run battles + opponent / loadout / results
+    # ------------------------------------------------------------------
+
+    @app.get("/rookie", response_class=HTMLResponse)
+    def rookie_index(request: Request) -> Response:
+        """Daily-run grid. Each card shows the 5 battles in a run with
+        opponent name + level-source precision chip, plus a per-run
+        scrape progress panel."""
+        import time as _time
+
+        from ..roster.promo_tournament_ingest import (
+            FORMAT_ROOKIE_ARENA,
+            tournament_format,
+        )
+        from ..roster.rookie_arena_scrape import (
+            STATUS_FOUND,
+            STATUS_PRIVATE_BOTH,
+            STATUS_SIDECAR_FILENAME as _ROOKIE_STATUS_SIDECAR,
+            RookieStatusSidecar,
+        )
+        from ..roster.rookie_arena_sidecar import read_sidecar as _read_rookie_sidecar
+
+        with get_session(engine) as session:
+            tournaments = [
+                t for t in session.exec(
+                    select(PromoTournament).order_by(
+                        PromoTournament.captured_at.desc()
+                    )
+                ).all()
+                if tournament_format(t.storage_root) == FORMAT_ROOKIE_ARENA
+            ]
+            runs = []
+            any_currently_running = False
+            for t in tournaments:
+                matches = session.exec(
+                    select(PromoMatch).where(
+                        PromoMatch.tournament_id == t.id,
+                        PromoMatch.round_label == "rookie",
+                    ).order_by(PromoMatch.match_no)
+                ).all()
+                battle_summaries = []
+                for m in matches:
+                    shots = session.exec(
+                        select(PromoMatchScreenshot).where(
+                            PromoMatchScreenshot.match_id == m.id,
+                        )
+                    ).all()
+                    shot_by_kind = {s.kind: s for s in shots}
+                    loadout = shot_by_kind.get("rookie_loadout")
+                    has_opp_png = "rookie_opponent" in shot_by_kind
+                    opp_name = None
+                    if loadout is not None:
+                        opp_field = session.exec(
+                            select(PromoExtractedField).where(
+                                PromoExtractedField.screenshot_id == loadout.id,
+                                PromoExtractedField.region_slug == "opponent_name",
+                            )
+                        ).first()
+                        opp_name = (
+                            opp_field.text.strip()
+                            if opp_field is not None and opp_field.text
+                            else None
+                        )
+                    battle_summaries.append({
+                        "match_no": m.match_no,
+                        "opponent_name": opp_name,
+                        "has_opponent_png": has_opp_png,
+                    })
+
+                # Scrape progress derived from the per-run status sidecar.
+                run_root = Path(t.storage_root)
+                sidecar = _read_rookie_sidecar(run_root)
+                total_unique = (
+                    len(sidecar.opponents) if sidecar is not None else 0
+                )
+                status_path = run_root / _ROOKIE_STATUS_SIDECAR
+                progress_counts: dict[str, int] = {}
+                seconds_ago: Optional[int] = None
+                processed = 0
+                if status_path.is_file():
+                    try:
+                        run_date_str = (
+                            t.capture_date.isoformat() if t.capture_date else ""
+                        )
+                        rookie_status = RookieStatusSidecar.load_or_init(
+                            run_root, run_id=t.id, run_date=run_date_str,
+                        )
+                        processed = len(rookie_status.players)
+                        for rec in rookie_status.players.values():
+                            progress_counts[rec.status] = (
+                                progress_counts.get(rec.status, 0) + 1
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    seconds_ago = int(
+                        max(0, _time.time() - status_path.stat().st_mtime)
+                    )
+                currently_running = (
+                    seconds_ago is not None and seconds_ago < 60
+                )
+                if currently_running:
+                    any_currently_running = True
+
+                n_snapshots_for_run = (
+                    progress_counts.get(STATUS_FOUND, 0)
+                    + progress_counts.get(STATUS_PRIVATE_BOTH, 0)
+                )
+
+                runs.append({
+                    "tournament": t,
+                    "battles": battle_summaries,
+                    "n_with_opp_png": sum(
+                        1 for b in battle_summaries if b["has_opponent_png"]
+                    ),
+                    "scrape": {
+                        "has_status": processed > 0,
+                        "processed": processed,
+                        "total": total_unique,
+                        "snapshots": n_snapshots_for_run,
+                        "status_counts": progress_counts,
+                        "last_update_seconds_ago": seconds_ago,
+                        "currently_running": currently_running,
+                    },
+                })
+
+        return templates.TemplateResponse(
+            request,
+            "rookie_index.html",
+            {
+                "runs": runs,
+                "any_currently_running": any_currently_running,
+            },
+        )
+
+    @app.get(
+        "/rookie/{tournament_id}/battle/{battle_no}",
+        response_class=HTMLResponse,
+    )
+    def rookie_battle(
+        request: Request, tournament_id: int, battle_no: int,
+    ) -> Response:
+        """Aggregated view of one rookie battle — opponent.png +
+        loadout.png + results.png with extraction summaries side-by-side,
+        plus the opponent-match decision and my-level resolution chips.
+
+        Each PNG is linked to the existing ``/promo/screenshots/<id>``
+        viewer for per-region crop + OCR inspection.
+        """
+        from ..roster.rookie_arena_match import (
+            LevelSource,
+            match_opponent_card,
+            opponent_level_source,
+            resolve_my_level,
+        )
+        from ..data.models import (
+            Character as _Character,
+            PromoExtractedField as _Field,
+        )
+
+        with get_session(engine) as session:
+            tournament = session.get(PromoTournament, tournament_id)
+            if tournament is None:
+                raise HTTPException(404, f"tournament {tournament_id} not found")
+            match = session.exec(
+                select(PromoMatch).where(
+                    PromoMatch.tournament_id == tournament_id,
+                    PromoMatch.match_no == battle_no,
+                    PromoMatch.round_label == "rookie",
+                )
+            ).first()
+            if match is None:
+                raise HTTPException(
+                    404, f"battle_{battle_no} not in tournament {tournament_id}"
+                )
+            shots = session.exec(
+                select(PromoMatchScreenshot).where(
+                    PromoMatchScreenshot.match_id == match.id,
+                )
+            ).all()
+            shot_by_kind: dict[str, PromoMatchScreenshot] = {
+                s.kind: s for s in shots
+            }
+
+            opp_shot = shot_by_kind.get("rookie_opponent")
+            loadout_shot = shot_by_kind.get("rookie_loadout")
+            results_shot = shot_by_kind.get("results_duel")
+
+            opp_match = None
+            if loadout_shot is not None:
+                opp_match = match_opponent_card(
+                    session,
+                    loadout_screenshot_id=loadout_shot.id,
+                    opponent_screenshot_id=opp_shot.id if opp_shot else None,
+                )
+
+            my_lv = resolve_my_level(
+                session,
+                battle_match_id=match.id,
+                this_opponent_screenshot_id=opp_shot.id if opp_shot else None,
+            )
+
+            # Build per-screenshot extraction summaries for the page.
+            # Each summary is (label, image_url, source_id, fields[])
+            # where fields is a list of (label, slug, text, normalized,
+            # matched_char_name, score) tuples.
+            char_ids: set[int] = set()
+            for shot in shots:
+                fields = session.exec(
+                    select(_Field).where(_Field.screenshot_id == shot.id)
+                ).all()
+                for f in fields:
+                    if f.character_id is not None:
+                        char_ids.add(f.character_id)
+            char_name_by_id: dict[int, str] = {}
+            if char_ids:
+                rows = session.exec(
+                    select(_Character.id, _Character.name).where(
+                        _Character.id.in_(char_ids)
+                    )
+                ).all()
+                char_name_by_id = {int(cid): str(name) for cid, name in rows}
+
+            def _summary_for(shot: Optional[PromoMatchScreenshot]) -> dict:
+                if shot is None:
+                    return {"present": False, "image_url": None, "fields": []}
+                fields = session.exec(
+                    select(_Field).where(_Field.screenshot_id == shot.id)
+                    .order_by(_Field.region_slug)
+                ).all()
+                rows = []
+                for f in fields:
+                    matched_char = (
+                        char_name_by_id.get(f.character_id)
+                        if f.character_id is not None
+                        else None
+                    )
+                    rows.append({
+                        "slug": f.region_slug,
+                        "text": f.text,
+                        "normalized": f.normalized,
+                        "confidence": f.confidence,
+                        "matched_char": matched_char,
+                        "match_score": f.character_match_score,
+                    })
+                return {
+                    "present": True,
+                    "screenshot_id": shot.id,
+                    "image_url": _promo_image_url(shot.file_path),
+                    "fields": rows,
+                }
+
+            opponent_summary = _summary_for(opp_shot)
+            loadout_summary = _summary_for(loadout_shot)
+            results_summary = _summary_for(results_shot)
+
+            # Chip classification for the opponent-level precision.
+            opp_level_chip = {
+                LevelSource.OPPONENT_PNG: ("matched", "green",
+                                            "matched on opponent.png"),
+                LevelSource.OPPONENT_PNG_FALLBACK: ("ambiguous", "yellow",
+                                                     "weak fuzzy match"),
+                LevelSource.ESTIMATED_FROM_MY_LEVEL: ("estimated", "yellow",
+                                                       "no opponent.png — estimated from my level"),
+                LevelSource.ACCOUNT_STATE: ("stale", "yellow",
+                                             "AccountState fallback"),
+                LevelSource.UNKNOWN: ("unknown", "red", "could not determine"),
+            }
+            opp_source = opponent_level_source(opp_match)
+            opp_chip_label, opp_chip_color, opp_chip_title = opp_level_chip[opp_source]
+            my_chip_label, my_chip_color, my_chip_title = opp_level_chip[my_lv.source]
+
+        return templates.TemplateResponse(
+            request,
+            "rookie_battle.html",
+            {
+                "tournament": tournament,
+                "match": match,
+                "battle_no": battle_no,
+                "opponent_summary": opponent_summary,
+                "loadout_summary": loadout_summary,
+                "results_summary": results_summary,
+                "opp_match": opp_match,
+                "opp_level_source": opp_source.value,
+                "opp_chip_label": opp_chip_label,
+                "opp_chip_color": opp_chip_color,
+                "opp_chip_title": opp_chip_title,
+                "my_level": my_lv,
+                "my_chip_label": my_chip_label,
+                "my_chip_color": my_chip_color,
+                "my_chip_title": my_chip_title,
             },
         )
 

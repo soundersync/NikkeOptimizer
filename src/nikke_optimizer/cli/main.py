@@ -3933,5 +3933,285 @@ def fetch_tournament_players_cmd(
         console.print(f"  [bold]done[/] — {summary}")
 
 
+@app.command("ingest-rookie-arena")
+def ingest_rookie_arena_cmd(
+    staging: Path = typer.Option(
+        Path("incoming-captures/rookie_arena"),
+        "--staging",
+        help="Staging dir holding <YYYY-MM-DD>_<HHMMSS>/battle_N/ runs.",
+    ),
+    archive: Optional[Path] = typer.Option(
+        None, "--archive",
+        help="Archive root. Defaults to <repo>/captures/.",
+    ),
+    move: bool = typer.Option(
+        False, "--move",
+        help="Delete staging files after a successful copy.",
+    ),
+    no_ocr: bool = typer.Option(
+        False, "--no-ocr",
+        help="Skip the OCR pass after relocation (useful when re-running "
+             "the file copy but extractions are already current).",
+    ),
+    force_ocr: bool = typer.Option(
+        False, "--force-ocr",
+        help="Re-OCR existing screenshots (bypasses the has_extractions skip).",
+    ),
+    only_run: Optional[str] = typer.Option(
+        None, "--only-run",
+        help="Filter to ONE staging-folder name, e.g. 2026-05-17_052345. "
+             "Phase 1 single-match validation uses this.",
+    ),
+    only_battle: Optional[int] = typer.Option(
+        None, "--only-battle",
+        help="Filter to one battle_N (1..5). Pair with --only-run for "
+             "a single-battle ingest.",
+    ),
+    scrape: bool = typer.Option(
+        False, "--scrape",
+        help="Run BlablaLink scrape for every rookie run after OCR + "
+             "ArenaMatch build. Default off — the daemon opts in when "
+             "cookies are present.",
+    ),
+    max_scrape_minutes: float = typer.Option(
+        90.0, "--max-scrape-minutes",
+        help="Per-tournament soft watchdog for the scrape pass (only "
+             "when --scrape is set).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Ingest Rookie Arena daily runs into the captures archive + DB.
+
+    Folder shape under ``--staging``:
+
+      \b
+      <YYYY-MM-DD>_<HHMMSS>/
+        battle_1/
+          opponent.png   (optional — older runs lack this)
+          loadout.png
+          results.png
+        battle_2/
+        ...battle_5/
+
+    Idempotent — natural keys are (tournament.storage_root,
+    match.match_no, screenshot.kind), so re-running on an unchanged
+    staging dir is a no-op modulo any newly-added files. The OCR pass
+    only touches screenshots that don't yet have extracted fields.
+
+    Examples:
+
+      \b
+      # Phase 1 single-battle validation:
+      nikkeoptimizer ingest-rookie-arena --only-run 2026-05-17_052345 --only-battle 1
+
+      # Full ingest of every run currently in staging:
+      nikkeoptimizer ingest-rookie-arena
+    """
+    from ..roster.rookie_arena_ingest import ingest_rookie_root
+
+    stats = ingest_rookie_root(
+        staging_root=staging,
+        archive_root=archive,
+        move=move,
+        db_path=db,
+        ocr=not no_ocr,
+        force_ocr=force_ocr,
+        only_run=only_run,
+        only_battle=only_battle,
+        scrape_rookie_opponents=scrape,
+        max_scrape_minutes=max_scrape_minutes,
+    )
+    console.print(f"[bold]Ingest complete:[/] {stats}")
+
+
+@app.command("fetch-rookie-opponents")
+def fetch_rookie_opponents_cmd(
+    target: str = typer.Argument(
+        ...,
+        help="Rookie run identifier. Accepts a PromoTournament.id (e.g. 7), "
+             "a date string (YYYY-MM-DD — runs all daily runs on that date), "
+             "or a staging-folder name (e.g. 2026-05-17_052345).",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Run BlablaLink lookups + write RookieArenaSnapshot rows. "
+             "Default is dry-run.",
+    ),
+    only: Optional[str] = typer.Option(
+        None, "--only",
+        help="Comma-separated subset of opponent names (case-insensitive).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Re-run opponents already marked 'found' in the status sidecar.",
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-n",
+        help="Cap the work list at N opponents. Use --apply --limit 1 for "
+             "a pilot smoke test.",
+    ),
+    max_minutes: float = typer.Option(
+        90.0, "--max-minutes",
+        help="Soft watchdog — abort after N minutes (mid-run snapshots persist).",
+    ),
+    show_browser: bool = typer.Option(
+        False, "--show-browser",
+        help="Open Chromium with a visible window (default: headless).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Scrape BlablaLink for the opponents in a Rookie Arena daily run
+    and write per-opponent ``RookieArenaSnapshot`` rows.
+
+    Requires ``shiftyspad-login``. Per-opponent fetch model: sparse —
+    only the 5 Nikkes from the opponent's loadout get their detail XHRs
+    pulled, not the full BlablaLink roster.
+
+    Tolerance is adaptive: ±5 when the opponent's level came from
+    opponent.png, ±20 when estimated from my level (older runs without
+    opponent.png).
+
+    Examples:
+
+      \b
+      nikkeoptimizer fetch-rookie-opponents 7 --apply --limit 1   # pilot today
+      nikkeoptimizer fetch-rookie-opponents 7 --apply             # full today
+      nikkeoptimizer fetch-rookie-opponents 2026-05-17 --apply    # all runs that date
+      nikkeoptimizer fetch-rookie-opponents 2026-05-15_121041 --apply  # by folder name
+    """
+    from datetime import date as _date_cls
+    from pathlib import Path as _P
+
+    from ..data.models import PromoTournament
+    from ..roster.promo_tournament_ingest import (
+        FORMAT_ROOKIE_ARENA,
+        tournament_format,
+    )
+    from ..roster.rookie_arena_scrape import (
+        STATUS_FOUND,
+        STATUS_PRIVATE_BOTH,
+        ScrapeProgress,
+        build_plan,
+        load_actual_level_cache,
+        scrape_rookie_run,
+        RookieStatusSidecar,
+    )
+    from ..roster.rookie_arena_sidecar import read_sidecar
+
+    only_set = (
+        {n.strip() for n in only.split(",") if n.strip()} if only else None
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+
+    # Resolve target → list of rookie tournaments.
+    targets: list[PromoTournament] = []
+    with get_session(engine) as session:
+        all_pd = [
+            t for t in session.exec(select(PromoTournament)).all()
+            if tournament_format(t.storage_root) == FORMAT_ROOKIE_ARENA
+        ]
+        if target.isdigit():
+            tid = int(target)
+            t = session.get(PromoTournament, tid)
+            if t is not None and tournament_format(t.storage_root) == FORMAT_ROOKIE_ARENA:
+                targets.append(t)
+        else:
+            # Try as date (YYYY-MM-DD) or as staging-folder name.
+            try:
+                d = _date_cls.fromisoformat(target)
+                targets.extend(
+                    t for t in all_pd if t.capture_date == d
+                )
+            except ValueError:
+                # Try matching the storage folder's basename.
+                targets.extend(
+                    t for t in all_pd if _P(t.storage_root).name == target
+                )
+
+    if not targets:
+        console.print(
+            f"[yellow]no rookie runs matched target={target!r} "
+            f"(tried as tournament id, date, and folder name)[/]"
+        )
+        raise typer.Exit(0)
+
+    for tournament in targets:
+        root = Path(tournament.storage_root)
+        console.print(
+            f"[cyan]rookie run {tournament.id}[/] "
+            f"[dim]({root.name})[/] date={tournament.capture_date}"
+        )
+        sidecar = read_sidecar(root)
+        if sidecar is None:
+            console.print(
+                f"  [yellow]missing players_lookup.json — run "
+                f"ingest-rookie-arena first[/]"
+            )
+            continue
+
+        def on_progress(p: ScrapeProgress) -> None:
+            if p.stage in {"searching", "fetching", "snapshotting"}:
+                console.print(
+                    f"  [{p.index+1:2d}/{p.total}] [dim]{p.name:<14s}[/] {p.stage}…"
+                )
+                return
+            colour = {
+                STATUS_FOUND: "green",
+                STATUS_PRIVATE_BOTH: "yellow",
+            }.get(p.stage, "red")
+            extra = ""
+            if p.record is not None and p.record.snapshot_id is not None:
+                extra = f" snap=#{p.record.snapshot_id}"
+            console.print(
+                f"  [{p.index+1:2d}/{p.total}] [bold]{p.name:<14s}[/] "
+                f"[{colour}]{p.stage}[/]{extra}"
+            )
+
+        if not apply:
+            status = RookieStatusSidecar.load_or_init(
+                root, run_id=tournament.id,
+                run_date=tournament.capture_date.isoformat() if tournament.capture_date else "",
+            )
+            cache = load_actual_level_cache(root)
+            plan = build_plan(
+                sidecar, status,
+                force=force, only=only_set, limit=limit,
+                actual_level_cache=cache,
+            )
+            cap = f" (capped at {limit})" if limit is not None else ""
+            console.print(
+                f"  [bold]plan:[/] {len(plan)} opponent(s){cap}  "
+                f"[dim]cache: {len(cache)} prior-found level(s)[/]"
+            )
+            for e in plan[:50]:
+                console.print(
+                    f"    [dim]Lv.{e.expected_level:<4}[/] ±{e.tolerance:<2} "
+                    f"[dim]src={e.level_source:25s}[/] {e.name:<14s} "
+                    f"team={','.join(e.char_names) or '∅'}"
+                )
+            console.print(f"  [dim]pass --apply to scrape ({len(plan)} opponent(s))[/]")
+            continue
+
+        status = scrape_rookie_run(
+            root,
+            tournament=tournament,
+            apply=True,
+            only=only_set,
+            force=force,
+            limit=limit,
+            max_minutes=max_minutes,
+            headless=not show_browser,
+            db_path=db,
+            on_progress=on_progress,
+        )
+        counts: dict[str, int] = {}
+        for rec in status.players.values():
+            counts[rec.status] = counts.get(rec.status, 0) + 1
+        summary = "  ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+        console.print(f"  [bold]done[/] — {summary}")
+
+
 if __name__ == "__main__":
     app()

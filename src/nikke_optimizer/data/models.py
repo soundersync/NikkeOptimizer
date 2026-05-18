@@ -825,3 +825,107 @@ class RosterSnapshotCharacter(SQLModel, table=True):
     snapshot_id: int = Field(foreign_key="roster_snapshot.id", index=True)
     character_id: int = Field(foreign_key="character.id", index=True)
     data: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+# ---------------------------------------------------------------------------
+# Rookie Arena snapshots — date-keyed point-in-time captures
+# ---------------------------------------------------------------------------
+
+
+class RookieArenaSnapshot(SQLModel, table=True):
+    """Date-keyed snapshot of one opponent's BlablaLink-derived state
+    as it was on a specific Rookie Arena run.
+
+    Distinct from ``RosterSnapshot`` (which is season-keyed for the
+    season-locked Champions Arena format): Rookie rosters drift daily
+    and we want to preserve that history across days. One row per
+    ``(date, player_username)`` — if the same opponent comes back on
+    a different day, a new snapshot lands without disturbing the prior.
+
+    Mirrors ``RosterSnapshot``'s outpost research fields so the
+    simulator can build a CharacterView without depending on the live
+    AccountState.
+
+    The sparse fetch model: per-character detail rows are written for
+    the 5 Nikkes the opponent fielded in the battle (their visible
+    loadout), not their entire BlablaLink roster — this keeps each
+    scrape to ~5 detail XHRs rather than 25-180.
+    """
+
+    __tablename__ = "rookie_arena_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_date", "player_username",
+            name="uq_rookie_arena_snapshot_date_player",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_date: date = Field(
+        index=True,
+        description="The daily-run date this snapshot was captured for (UTC)",
+    )
+    player_username: str = Field(
+        index=True,
+        description="Opponent's in-game name (from loadout OCR + BlablaLink verify)",
+    )
+    captured_at: datetime = Field(default_factory=_utcnow)
+    label: Optional[str] = Field(default=None, description="Optional human-readable note")
+
+    # BlablaLink identity. Stored so we can re-fetch on demand.
+    intl_openid: Optional[str] = Field(
+        default=None,
+        description="BlablaLink internal opaque id (decoded base64 uid)",
+    )
+    blablalink_nickname: Optional[str] = Field(
+        default=None,
+        description="The player's BlablaLink nickname (may differ from in-game name)",
+    )
+
+    # Source linkage — which rookie run + which loadout PNG drove this snapshot.
+    source_run_id: Optional[int] = Field(
+        default=None, foreign_key="promo_tournament.id", index=True,
+        description="The PromoTournament row representing the daily run",
+    )
+
+    # Player-level + outpost research (mirrors RosterSnapshot).
+    synchro_level: int = Field(default=1)
+    general_research_level: int = Field(default=0)
+    class_attacker_level: int = Field(default=0)
+    class_defender_level: int = Field(default=0)
+    class_supporter_level: int = Field(default=0)
+    mfr_pilgrim_level: int = Field(default=0)
+    mfr_elysion_level: int = Field(default=0)
+    mfr_tetra_level: int = Field(default=0)
+    mfr_missilis_level: int = Field(default=0)
+    mfr_abnormal_level: int = Field(default=0)
+
+    # Privacy flags from BlablaLink (mirrors the values stored in the
+    # status sidecar). True = "we couldn't see it"; for roster-private
+    # opponents the per-character rows will be empty.
+    is_roster_private: bool = Field(default=False)
+    is_outpost_private: bool = Field(default=False)
+
+
+class RookieArenaSnapshotCharacter(SQLModel, table=True):
+    """One row per character in a rookie snapshot.
+
+    Same serialization shape as ``RosterSnapshotCharacter`` — ``data``
+    is a JSON dict of the OwnedCharacter-equivalent fields so the
+    simulator can reuse the existing CharacterView builder.
+    """
+
+    __tablename__ = "rookie_arena_snapshot_character"
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id", "character_id",
+            name="uq_rookie_arena_snapshot_character",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    snapshot_id: int = Field(
+        foreign_key="rookie_arena_snapshot.id", index=True,
+    )
+    character_id: int = Field(foreign_key="character.id", index=True)
+    data: dict = Field(default_factory=dict, sa_column=Column(JSON))

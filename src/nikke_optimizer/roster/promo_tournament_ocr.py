@@ -34,24 +34,55 @@ log = logging.getLogger(__name__)
 # Slug classification
 # ---------------------------------------------------------------------------
 
-# Image-only regions — no OCR.
+# Image-only regions — no OCR. Includes both per-Champion-loadout char
+# portrait/doll AND rookie arena portrait/doll (also image-only).
 _SKIP_SLUGS = frozenset(
     {f"char{i}.{kind}" for i in range(1, 6) for kind in ("portrait", "doll")}
+    | {
+        f"{side}.char{i}.{kind}"
+        for side in ("opp", "my")
+        for i in range(1, 6)
+        for kind in ("portrait", "doll")
+    }
 )
 # LB stars + Core badge — color-based star count + targeted badge OCR
-# handled by promo_tournament_lb_core.detect_lb_core.
-_LB_CORE_SLUG_RE = re.compile(r"^char\d\.lb_core$")
-# CP / damage / heal / synchro level — store digits-only canonical form.
+# handled by promo_tournament_lb_core.detect_lb_core. Now matches both
+# the Champion popup slug shape and the rookie arena `(opp|my).charN.lb_core`.
+_LB_CORE_SLUG_RE = re.compile(r"^(?:(?:opp|my)\.)?char\d\.lb_core$")
+# Comma-formatted / multi-digit numeric fields with thousand separators
+# — CPs, sums in the multi-thousands. Keep this strict; the new
+# integer-level slug below handles small (1-3 digit) values that
+# shouldn't be confused for these.
 _NUMBER_SLUG_RE = re.compile(
-    r"^(team_cp|player_level|char\d\.cp|(left|right)\.char\d\.(atk|def|heal))$"
+    r"^(team_cp|player_level|char\d\.cp|"
+    r"(left|right)\.char\d\.(atk|def|heal)|"
+    r"(?:opponent|my)_team_cp"
+    r")$"
+)
+# Small integer level — 1-3 digit; used for:
+#   * Rookie arena per-Nikke level under each tile: `(opp|my).charN.level`
+#   * Rookie opponent.png my_player_level + 3 candidate cards' level
+# Normalized to digits-only by the same helper as `number` but routes
+# through a tighter token filter (single digit run, ignore stray noise).
+_LEVEL_SLUG_RE = re.compile(
+    r"^(my_player_level|opp\d\.level|(?:opp|my)\.char\d\.level)$"
 )
 # HP percentage.
 _PERCENT_SLUG_RE = re.compile(r"^(left|right)\.char\d\.hp$")
-# Character name — fuzzy-match against Character DB. Two shapes:
+# Character name — fuzzy-match against Character DB. Three shapes:
 #   * ``left.char{N}.name`` / ``right.char{N}.name`` — from results_duel
-#   * ``char{N}.name``                              — from player_loadout
-#     and player_data (Arena Info popup) cards
-_CHAR_NAME_SLUG_RE = re.compile(r"^(?:(?:left|right)\.)?char\d\.name$")
+#   * ``char{N}.name``                              — from player_loadout /
+#     player_data (Arena Info popup) cards
+#   * ``(opp|my).char{N}.name``                      — from rookie_loadout
+_CHAR_NAME_SLUG_RE = re.compile(
+    r"^(?:(?:left|right|opp|my)\.)?char\d\.name$"
+)
+# Plain text — no normalization, no DB match. Rookie opponent.png
+# `oppN.name` lands here (player names, not Nikke character names) plus
+# the existing `player_name` / `opponent_name` / `my_name` fields.
+_PLAIN_NAME_SLUG_RE = re.compile(
+    r"^(?:player_name|opponent_name|my_name|opp\d\.name)$"
+)
 # Round-result strip on overview — also derives a roundN_winner field.
 _ROUND_STRIP_SLUG_RE = re.compile(r"^round(\d)_strip$")
 
@@ -61,7 +92,10 @@ def classify_slug(slug: str) -> str:
 
     * ``"skip"`` — image-only, no OCR
     * ``"lb_core"`` — color star count + targeted badge OCR
-    * ``"number"`` — digits-only canonical form
+    * ``"number"`` — digits-only canonical form (large multi-digit
+      values like CP)
+    * ``"level"`` — small 1-3 digit integer (per-Nikke level, player
+      level). Same normalizer as number but tighter expectations.
     * ``"percent"`` — percentage canonical form
     * ``"char_name"`` — fuzzy-match against Character DB
     * ``"round_strip"`` — overview round result (derives winner side)
@@ -73,10 +107,14 @@ def classify_slug(slug: str) -> str:
         return "lb_core"
     if _NUMBER_SLUG_RE.match(slug):
         return "number"
+    if _LEVEL_SLUG_RE.match(slug):
+        return "level"
     if _PERCENT_SLUG_RE.match(slug):
         return "percent"
     if _CHAR_NAME_SLUG_RE.match(slug):
         return "char_name"
+    if _PLAIN_NAME_SLUG_RE.match(slug):
+        return "text"
     if _ROUND_STRIP_SLUG_RE.match(slug):
         return "round_strip"
     return "text"
@@ -374,6 +412,15 @@ def extract_region(image, region: Region, *, char_index: CharIndex) -> list[Fiel
             )
         ]
 
+    # Level crops are small (44×50 in rookie arena) and PaddleOCR's
+    # text DETECTOR sometimes misses them entirely — returning [] even
+    # though the digits are clearly visible. Upscaling 3× before OCR
+    # fixes detection without changing the high-confidence reads on
+    # crops that already worked (verified: slots 1-5 all read "656"
+    # at 0.99 confidence after 3× upscale).
+    if classification == "level":
+        crop = crop.resize((crop.width * 3, crop.height * 3))
+
     items = ocr_crop(crop)
     raw_text, conf = _flatten_text(items)
     text = raw_text or None
@@ -382,6 +429,21 @@ def extract_region(image, region: Region, *, char_index: CharIndex) -> list[Fiel
     out: list[FieldExtraction] = []
 
     if classification == "number":
+        out.append(
+            FieldExtraction(
+                slug=region.slug,
+                text=text,
+                normalized=normalize_number(text),
+                character_id=None,
+                character_match_score=None,
+                confidence=confidence,
+            )
+        )
+    elif classification == "level":
+        # Same digits-only normalization as `number`, but for small
+        # 1-3 digit values (per-Nikke / player level). A separate
+        # bucket lets future audits distinguish "expected big" from
+        # "expected small" without changing the storage shape.
         out.append(
             FieldExtraction(
                 slug=region.slug,
@@ -405,6 +467,18 @@ def extract_region(image, region: Region, *, char_index: CharIndex) -> list[Fiel
         )
     elif classification == "char_name":
         match = match_character(text, char_index)
+        if match is None and items:
+            # Low-confidence noise tokens sometimes garble the start of
+            # a name ("1OWA White:" — "1OWA" at conf 0.74 is noise,
+            # "White:" at conf 0.997 is clean). The flattened-text
+            # score falls below threshold but the high-confidence
+            # subset alone matches. Retry once with only tokens at
+            # conf >= 0.85; if that resolves, use the retry result.
+            high_conf_text = " ".join(
+                t for (_b, t, c) in items if c >= 0.85 and t
+            ).strip()
+            if high_conf_text and high_conf_text != text:
+                match = match_character(high_conf_text, char_index)
         cid, _matched, score = match if match else (None, None, None)
         out.append(
             FieldExtraction(

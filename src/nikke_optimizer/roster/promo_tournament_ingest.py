@@ -87,27 +87,30 @@ FORMAT_PROMO = "promotion_tournament"
 FORMAT_PROMO_PLAYER_DATA = "promotion_tournament_player_data"
 FORMAT_DUEL = "champions_duel"
 FORMAT_LEAGUE = "league"
+FORMAT_ROOKIE_ARENA = "rookie_arena"
 
 
 def tournament_format(storage_root: str) -> str:
-    """Return the format key (``promotion_tournament`` /
-    ``promotion_tournament_player_data`` / ``champions_duel`` /
-    ``league``) for a path.
+    """Return the format key for a path.
 
-    The format is encoded in the archive folder name (e.g.
-    ``<archive>/beta_season_29/champions_duel/...``). Cheaper than a DB
-    column and impossible to drift from filesystem reality.
-
-    ``promotion_tournament_player_data`` must be checked BEFORE the
-    bare ``promotion_tournament`` prefix or it gets misclassified.
+    Champion-family formats are encoded in the archive folder's own
+    name (e.g. ``<archive>/beta_season_29/champions_duel/``); the
+    Rookie Arena format uses a PARENT-directory convention
+    (``<archive>/rookie_arena/<date_TS>/``) since rookie isn't season-
+    locked. ``promotion_tournament_player_data`` must be checked
+    BEFORE the bare ``promotion_tournament`` prefix or it gets
+    misclassified.
     """
-    name = Path(storage_root).name
+    p = Path(storage_root)
+    name = p.name
     if name.startswith(FORMAT_PROMO_PLAYER_DATA):
         return FORMAT_PROMO_PLAYER_DATA
     if name.startswith(FORMAT_DUEL):
         return FORMAT_DUEL
     if name.startswith(FORMAT_LEAGUE):
         return FORMAT_LEAGUE
+    if p.parent.name == FORMAT_ROOKIE_ARENA:
+        return FORMAT_ROOKIE_ARENA
     return FORMAT_PROMO
 
 

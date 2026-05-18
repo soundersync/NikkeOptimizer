@@ -1,0 +1,188 @@
+{% extends "_base.html" %}
+{% block title %}Rookie Arena — NikkeOptimizer{% endblock %}
+{% block body %}
+{# Auto-refresh while any run's status sidecar was touched in the last
+   60s — same heuristic the player_data scrape page uses. #}
+{% if any_currently_running %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+
+<style>
+.ra-page h1 { margin-bottom: 4px; }
+.ra-page .lead { color: #9ca3af; margin-bottom: 24px; font-size: 13px; }
+.runs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 16px;
+}
+.run-card {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    padding: 14px 16px;
+}
+.run-card .run-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 10px;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.run-card h2 {
+    margin: 0; font-size: 15px; color: #e5e7eb;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.run-card .meta { font-size: 11px; color: #6b7280; }
+.run-card .opp-png-badge {
+    font-size: 10px; padding: 1px 8px; border-radius: 999px;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid;
+}
+.opp-png-badge.full   { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.opp-png-badge.partial { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.opp-png-badge.none   { background: #1f2228; color: #9ca3af; border-color: #2a2f3a; }
+
+.battle-list {
+    display: flex; flex-direction: column; gap: 4px;
+}
+.battle-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 8px; border-radius: 4px;
+    background: #181b21;
+    text-decoration: none;
+    color: inherit;
+    transition: background 0.1s ease;
+}
+.battle-row:hover { background: #1d2128; }
+.battle-row .num {
+    font-family: "SF Mono", Menlo, monospace;
+    color: #f87171; font-weight: 600;
+    width: 22px; text-align: right;
+}
+.battle-row .opp {
+    flex: 1;
+    color: #e5e7eb;
+    font-size: 13px;
+}
+.battle-row .opp .none-text {
+    color: #6b7280; font-style: italic;
+}
+.precision-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+.precision-dot.precise { background: #86efac; }
+.precision-dot.estimated { background: #fbbf24; }
+
+.empty {
+    color: #6b7280; padding: 40px 0; text-align: center;
+    border: 1px dashed #1f2228; border-radius: 8px;
+}
+
+/* Per-run scrape progress strip. */
+.scrape-strip {
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    background: #181b21;
+    border-left: 3px solid #4a4f5a;
+    font-size: 11px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.scrape-strip.running {
+    border-left-color: #fbbf24;
+    background: linear-gradient(90deg, #1f1a0e 0%, #181b21 30%);
+}
+.scrape-strip.idle  { border-left-color: #4a4f5a; }
+.scrape-strip.empty { display: none; }
+.scrape-strip .live-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #4a4f5a; display: inline-block;
+}
+.scrape-strip.running .live-dot {
+    background: #fbbf24; animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:0.35;} }
+.scrape-strip .processed {
+    font-family: "SF Mono", Menlo, monospace; color: #e5e7eb;
+}
+.scrape-strip .status-pill {
+    padding: 0 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid;
+}
+.scrape-strip .pill-found        { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.scrape-strip .pill-private_both { background: #251b29; color: #c084fc; border-color: #4a1e5f; }
+.scrape-strip .pill-not_on_na,
+.scrape-strip .pill-no_results,
+.scrape-strip .pill-level_mismatch { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.scrape-strip .pill-error        { background: #2a1a1f; color: #f87171; border-color: #5f1e2e; }
+.scrape-strip .meta { margin-left: auto; color: #6b7280; }
+</style>
+
+<div class="ra-page">
+<h1>Rookie Arena</h1>
+<p class="lead">
+    {{ runs|length }} daily run{{ "" if runs|length == 1 else "s" }} captured.
+    Each run = 5 1v1 matches. Green dot = opponent.png present (precise level OCR); yellow = level estimated from my level.
+</p>
+
+{% if not runs %}
+<div class="empty">
+    No rookie runs captured yet. Drop daily-run folders under
+    <code>incoming-captures/rookie_arena/&lt;date&gt;_&lt;time&gt;/</code>
+    or run <code>nikkeoptimizer ingest-rookie-arena</code>.
+</div>
+{% else %}
+<div class="runs-grid">
+    {% for run in runs %}
+    <div class="run-card">
+        <div class="run-head">
+            <h2>{{ run.tournament.captured_at.strftime("%Y-%m-%d %H:%M") }} UTC</h2>
+            <span class="opp-png-badge
+                {% if run.n_with_opp_png == 5 %}full
+                {% elif run.n_with_opp_png == 0 %}none
+                {% else %}partial{% endif %}">
+                opp.png {{ run.n_with_opp_png }}/5
+            </span>
+        </div>
+        <div class="battle-list">
+            {% for b in run.battles %}
+            <a class="battle-row" href="/rookie/{{ run.tournament.id }}/battle/{{ b.match_no }}">
+                <span class="num">#{{ b.match_no }}</span>
+                <span class="opp">
+                    {% if b.opponent_name %}vs <strong>{{ b.opponent_name }}</strong>
+                    {% else %}<span class="none-text">opponent not OCR'd</span>{% endif %}
+                </span>
+                <span class="precision-dot {% if b.has_opponent_png %}precise{% else %}estimated{% endif %}"
+                      title="{% if b.has_opponent_png %}opponent.png captured — level precise{% else %}no opponent.png — level estimated from my level{% endif %}"></span>
+            </a>
+            {% endfor %}
+        </div>
+
+        {% if run.scrape.has_status %}
+        <div class="scrape-strip {% if run.scrape.currently_running %}running{% else %}idle{% endif %}">
+            <span class="live-dot"></span>
+            <span class="processed">scrape {{ run.scrape.processed }}/{{ run.scrape.total }}</span>
+            {% for status_key, count in run.scrape.status_counts.items()|sort %}
+            <span class="status-pill pill-{{ status_key }}">{{ status_key|replace("_", " ") }} {{ count }}</span>
+            {% endfor %}
+            <span class="meta">
+                {% if run.scrape.last_update_seconds_ago is not none %}
+                    {% set s = run.scrape.last_update_seconds_ago %}
+                    {% if s < 60 %}{{ s }}s ago
+                    {% elif s < 3600 %}{{ (s // 60)|int }}m ago
+                    {% elif s < 86400 %}{{ (s // 3600)|int }}h ago
+                    {% else %}{{ (s // 86400)|int }}d ago{% endif %}
+                {% endif %}
+            </span>
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+</div>
+
+{% endblock %}

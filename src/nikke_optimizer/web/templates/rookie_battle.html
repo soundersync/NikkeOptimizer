@@ -1,0 +1,237 @@
+{% extends "_base.html" %}
+{% block title %}Rookie Arena — {{ tournament.capture_date }} battle {{ battle_no }} — NikkeOptimizer{% endblock %}
+{% block body %}
+
+<style>
+.crumb { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+.crumb a { color: #9ca3af; }
+.ra-header {
+    margin-bottom: 18px;
+    display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+}
+.ra-header h1 { margin: 0; font-size: 22px; }
+.ra-header .meta { font-size: 13px; color: #9ca3af; }
+
+/* Decision panel — opponent match + my-level resolution */
+.decision-panel {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 22px;
+}
+.decision-card {
+    flex: 1 1 360px;
+    padding: 14px 16px;
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+}
+.decision-card h3 {
+    margin: 0 0 8px;
+    font-size: 12px; font-weight: 600;
+    color: #9ca3af; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.decision-card .primary {
+    font-size: 18px; font-weight: 600;
+    color: #e5e7eb;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.decision-card .sub {
+    font-size: 12px; color: #6b7280; margin-top: 4px;
+}
+.chip {
+    display: inline-block; padding: 2px 8px;
+    border-radius: 999px; font-size: 10px;
+    font-family: "SF Mono", Menlo, monospace;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    margin-left: 6px;
+    border: 1px solid;
+    cursor: help;
+}
+.chip.green  { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.chip.yellow { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.chip.red    { background: #2a1a1f; color: #f87171; border-color: #5f1e2e; }
+
+/* 3-up screenshot grid */
+.screenshots-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+.screenshot-card {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+}
+.screenshot-card .header {
+    padding: 10px 14px;
+    border-bottom: 1px solid #1f2228;
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 10px;
+}
+.screenshot-card .header .label {
+    font-size: 13px; font-weight: 600; color: #e5e7eb;
+}
+.screenshot-card .header .audit-link {
+    font-size: 11px; color: #93c5fd; text-decoration: none;
+    border-bottom: 1px dotted #1e3a5f;
+}
+.screenshot-card .header .audit-link:hover { color: #bfdbfe; border-bottom-style: solid; }
+.screenshot-card .thumb {
+    background: #0a0b0e;
+    text-align: center;
+    padding: 10px;
+    border-bottom: 1px solid #1f2228;
+}
+.screenshot-card .thumb img {
+    max-width: 100%; max-height: 460px;
+    height: auto; width: auto;
+    border-radius: 3px;
+}
+.screenshot-card .missing-thumb {
+    padding: 60px 10px;
+    color: #6b7280; font-style: italic; font-size: 12px;
+}
+.field-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.field-table th, .field-table td {
+    padding: 4px 10px;
+    text-align: left;
+    border-bottom: 1px solid #1a1d23;
+}
+.field-table th {
+    color: #6b7280; font-weight: 500;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.field-table td.slug {
+    color: #9ca3af; font-family: "SF Mono", Menlo, monospace; font-size: 11px;
+}
+.field-table td.val { color: #e5e7eb; }
+.field-table td.matched { color: #86efac; font-size: 11px; }
+.field-table tr:last-child td { border-bottom: none; }
+.empty-fields { padding: 14px; color: #6b7280; font-style: italic; font-size: 12px; }
+</style>
+
+<div class="crumb">
+    <a href="/">Dashboard</a> /
+    Rookie Arena /
+    {{ tournament.capture_date }} {{ tournament.captured_at.strftime("%H:%M:%S") }} UTC
+    / battle {{ battle_no }}
+</div>
+
+<div class="ra-header">
+    <h1>Rookie Arena · Battle {{ battle_no }}</h1>
+    <span class="meta">
+        Captured <code>{{ tournament.captured_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</code>
+    </span>
+</div>
+
+<div class="decision-panel">
+    <div class="decision-card">
+        <h3>Opponent</h3>
+        {% if opp_match %}
+        <div class="primary">
+            {{ opp_match.name_on_card }}
+            {% if opp_match.level is not none %}
+                · Lv. {{ opp_match.level }}
+            {% endif %}
+            <span class="chip {{ opp_chip_color }}" title="{{ opp_chip_title }}">{{ opp_chip_label }}</span>
+        </div>
+        <div class="sub">
+            matched card {{ opp_match.card_index + 1 }} of 3 ·
+            fuzzy score {{ "%.1f"|format(opp_match.score) }}/100
+        </div>
+        {% else %}
+        <div class="primary">
+            (no opponent.png)
+            <span class="chip {{ opp_chip_color }}" title="{{ opp_chip_title }}">{{ opp_chip_label }}</span>
+        </div>
+        <div class="sub">
+            opponent name from loadout.png is the source-of-truth;
+            level is estimated from my level (matchmade)
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="decision-card">
+        <h3>My player level</h3>
+        <div class="primary">
+            {% if my_level.level is not none %}Lv. {{ my_level.level }}{% else %}—{% endif %}
+            <span class="chip {{ my_chip_color }}" title="{{ my_chip_title }}">{{ my_chip_label }}</span>
+        </div>
+        <div class="sub">
+            source: {{ my_level.source_battle_label or my_level.source.value }}
+        </div>
+    </div>
+</div>
+
+<div class="screenshots-grid">
+    {% for label, key, summary in [
+        ("Opponent (Arena Group)", "opponent", opponent_summary),
+        ("Loadout (pre-battle)",   "loadout",  loadout_summary),
+        ("Battle Records",          "results",  results_summary),
+    ] %}
+    <div class="screenshot-card">
+        <div class="header">
+            <span class="label">{{ label }}</span>
+            {% if summary.present %}
+            <a class="audit-link"
+               href="/promo/screenshots/{{ summary.screenshot_id }}">
+                view source + crops ↗
+            </a>
+            {% endif %}
+        </div>
+        {% if summary.present and summary.image_url %}
+        <div class="thumb">
+            <a href="{{ summary.image_url }}" target="_blank" rel="noopener">
+                <img src="{{ summary.image_url }}" alt="{{ label }}">
+            </a>
+        </div>
+        {% else %}
+        <div class="missing-thumb">
+            {% if not summary.present %}
+                no {{ key }}.png captured for this battle
+            {% else %}
+                image missing on disk
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% if summary.fields %}
+        <table class="field-table">
+            <thead>
+                <tr><th>Region</th><th>OCR'd value</th><th>Matched character</th></tr>
+            </thead>
+            <tbody>
+            {% for f in summary.fields %}
+                <tr>
+                    <td class="slug">{{ f.slug }}</td>
+                    <td class="val">
+                        {% if f.normalized %}<strong>{{ f.normalized }}</strong>{% endif %}
+                        {% if f.text and f.text != f.normalized %}
+                            <span style="color:#6b7280">{{ f.text }}</span>
+                        {% endif %}
+                        {% if not f.text and not f.normalized %}<span style="color:#6b7280">—</span>{% endif %}
+                    </td>
+                    <td class="matched">
+                        {% if f.matched_char %}
+                            {{ f.matched_char }}
+                            {% if f.match_score %}<span style="color:#6b7280">({{ "%.0f"|format(f.match_score) }}%)</span>{% endif %}
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% elif summary.present %}
+        <div class="empty-fields">No OCR fields extracted (or screenshot not yet processed)</div>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+{% endblock %}

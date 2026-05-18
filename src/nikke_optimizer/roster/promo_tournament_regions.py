@@ -285,6 +285,7 @@ DUEL: tuple[Region, ...] = _build_duel()
 
 KINDS: tuple[str, ...] = (
     "player_loadout", "results_overview", "results_duel",
+    "rookie_opponent", "rookie_loadout",
 )
 
 # ``player_loadout`` covers BOTH per-round popups from the
@@ -294,15 +295,36 @@ KINDS: tuple[str, ...] = (
 # produce structurally identical PNGs; their provenance distinction
 # lives at the tournament level (``tournament_format(storage_root)``),
 # not at the screenshot level.
+#
 _BY_KIND: dict[str, tuple[Region, ...]] = {
     "player_loadout": PLAYER_LOADOUT,
     "results_overview": OVERVIEW,
+    # ``results_duel`` covers BOTH Champion duel results AND Rookie
+    # Arena results.png — same in-game Battle Records screen, same
+    # pixel layout, identical 50-region schema. The rookie_arena
+    # ingest registers results.png as kind="results_duel".
     "results_duel": DUEL,
+    # ``rookie_opponent`` + ``rookie_loadout`` populated lazily below
+    # to dodge a circular-import (rookie_arena_regions imports Region
+    # from this module).
 }
+
+
+def _ensure_rookie_kinds_registered() -> None:
+    """Lazy-populate the rookie kinds the first time someone asks for
+    them. Safe to call multiple times — the population is idempotent
+    via dict overwrite."""
+    if "rookie_opponent" in _BY_KIND and "rookie_loadout" in _BY_KIND:
+        return
+    from . import rookie_arena_regions as _rar
+    _BY_KIND[_rar.ROOKIE_OPPONENT_KIND] = _rar.ROOKIE_OPPONENT
+    _BY_KIND[_rar.ROOKIE_LOADOUT_KIND] = _rar.ROOKIE_LOADOUT
 
 
 def regions_for_kind(kind: str) -> tuple[Region, ...]:
     """Return the regions tuple for a screenshot kind, in display order."""
+    if kind in ("rookie_opponent", "rookie_loadout"):
+        _ensure_rookie_kinds_registered()
     try:
         return _BY_KIND[kind]
     except KeyError as exc:
