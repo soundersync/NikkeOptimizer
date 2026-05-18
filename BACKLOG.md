@@ -221,19 +221,23 @@ The Rookie Arena flow shipped end-to-end (ingest → OCR → ArenaMatch
 → RookieArenaSnapshot, daemon-driven). Notes captured during the
 live first-run validation:
 
-- **Battle outcome extraction** — DISCONNECTED detection landed
+- **Battle outcome extraction** — wipe detection landed
   2026-05-18 (10 new `(left|right).char{N}.disconnect` regions
   on `results_duel`, uniform 117×22 with 197px y-stride; OCR
-  validated 99% confidence). 5/5 user-side dc → `outcome=loss`,
-  5/5 opp-side dc → `outcome=win`. W/L pill rendered on
-  `/rookie`. Open follow-ups (need user samples):
-    1. **Win-by-HP indicator** for the "no disconnect" case —
-       what visually distinguishes the winning side when both
-       teams played to the 5-min cap? Probably a victory icon /
-       cell-color shift / banner.
-    2. **Tie-handling rule**: 2-2 with one tie = `timeout`,
-       `draw`, or does the game pick a winner via some tiebreaker?
-    3. `raw_battle_record` per-char stats (atk/heal numbers we
+  validated 99% confidence). The "DISCONNECTED" badge in NIKKE's
+  UI means **defeated/wiped** (not network-disconnected — user
+  confirmed). 5/5 wiped on a side → that side lost.
+  All 30 historical rookie matches resolved this way (26 W / 4 L).
+  Open follow-ups (only matter for the rare timeout case where
+  neither side wipes — none observed yet in the dataset):
+    1. **Timeout-winner indicator** for the no-wipe case — needs
+       a user-supplied sample of a `results.png` from a 5-min
+       timeout. Probably a victory icon / cell-color shift /
+       banner on the winning team's side, OR fall back to
+       comparing the per-Nikke HP% column (`(side).char{N}.hp`
+       fields are already extracted; just sum and pick the
+       higher side).
+    2. `raw_battle_record` per-char stats (atk/heal numbers we
        already OCR but ignore) — would be useful for the
        damage-formula validation in Phase 4.
 

@@ -168,10 +168,13 @@ class _RookieBattlePayload:
     battle_record_screenshot: Optional[str]
     capture_quality: dict
     # Derived from the 10 `(left|right).char{N}.disconnect` OCR
-    # fields on the results_duel screenshot. "loss" iff user side
-    # (left) shows 5/5 DISCONNECTED, "win" iff opponent side (right)
-    # shows 5/5. Anything else stays None until we ship the
-    # win-indicator slice (BACKLOG: battle outcome extraction).
+    # fields on the results_duel screenshot. The "DISCONNECTED"
+    # badge marks a Nikke as **defeated/wiped** (NOT network-
+    # disconnected — confirmed with user 2026-05-18). "loss" iff
+    # user side (left) shows 5/5 wiped, "win" iff opponent side
+    # (right) shows 5/5. Anything else stays None — that's the rare
+    # timeout case where neither side wiped; needs a separate
+    # indicator (BACKLOG).
     outcome: Optional[str] = None
     # Internal — surfaces the loadout's screenshot id + the canonical
     # per-slot team lists so upsert_arena_match can backfill the
@@ -183,6 +186,13 @@ class _RookieBattlePayload:
 
 def _is_disconnect_text(text: Optional[str]) -> bool:
     """Lenient substring check for the DISCONNECTED overlay text.
+
+    **Naming note**: the badge says literally "DISCONNECTED" but in
+    NIKKE's UI semantics it means **"this Nikke was defeated/wiped"**,
+    NOT "the player lost their network connection." Slug/function
+    names match the literal badge text the OCR sees; the per-side
+    aggregator (`_outcome_from_disconnects`) treats 5/5 as "team
+    wiped → that side lost."
 
     Anchors on the distinctive 5-char run "NNECT" — robust against
     common OCR misreads of the boundary letters (I↔1, O↔0, D dropped
@@ -200,7 +210,7 @@ def _disconnect_flags_from_results(
 ) -> list[bool]:
     """Return 5 booleans — one per slot — True iff the
     `(side).char{N}.disconnect` OCR text matches the DISCONNECTED
-    badge.
+    badge (i.e. that Nikke was defeated in the match).
     """
     out: list[bool] = []
     for n in range(1, 6):
@@ -214,9 +224,17 @@ def _disconnect_flags_from_results(
 def _outcome_from_disconnects(
     my_dc: list[bool], opp_dc: list[bool],
 ) -> Optional[str]:
-    """5/5 user-side disconnects = forfeit loss; 5/5 opponent-side
-    disconnects = forfeit win. Mixed / partial → None (the regular
-    win-by-HP indicator isn't extracted yet — that's the next slice).
+    """Per-side wipe count → ArenaMatch.outcome.
+
+    5/5 user-side wiped → ``"loss"``; 5/5 opp-side wiped → ``"win"``.
+    Anything else → None — that's the rare timeout case where neither
+    side wiped within the 5-min cap and we'd need a separate
+    HP-comparison / defender-wins-on-timeout signal to call it.
+
+    Note: every Nikke marked DISCONNECTED == defeated/wiped. Per the
+    user, Rookie Arena never resolves to a tie, so any None here just
+    means "we don't have the timeout-winner indicator yet" — see
+    BACKLOG.
     """
     if sum(my_dc) == 5 and sum(opp_dc) < 5:
         return "loss"
