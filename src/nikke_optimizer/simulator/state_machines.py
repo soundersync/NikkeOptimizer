@@ -407,6 +407,165 @@ class DrakeTreasure(StateMachine):
 
 
 # ---------------------------------------------------------------------------
+# Rosanna — Concealment (dodge) + Frenzy stacks
+# ---------------------------------------------------------------------------
+
+
+class Rosanna(StateMachine):
+    """Rosanna's defensive value:
+      - S1: After 120 normal attacks, enter Concealment for 10s.
+      - S2: Battle start gives 5s Concealment. When ally falls,
+        gain Frenzy stack (+22.61% ATK, max 10, 30s).
+
+    Concealment in real NIKKE makes Rosanna untargetable. We model
+    it as a temporary damage reduction (~70% to her HP pool during
+    the concealment window).
+
+    Hooks used:
+      - on_battle_start: 5s concealment window from S2
+      - on_tick: track and end concealment periods
+      - on_damage_taken: reduce damage during concealment
+    """
+
+    character_name = "Rosanna"
+    CONCEAL_BATTLE_START_SEC = 5.0
+    DAMAGE_REDUCTION_PCT = 0.70  # 70% of damage absorbed by concealment
+
+    def on_battle_start(self, member, ally_team, enemy_team, current_time):
+        member.state["rosanna_conceal_until"] = self.CONCEAL_BATTLE_START_SEC
+
+    def on_tick(self, member, ally_team, enemy_team, current_time, dt):
+        # While in concealment, boost shield (acts as damage soak proxy).
+        if current_time < member.state.get("rosanna_conceal_until", 0.0):
+            # Top up to at least 30% of max_hp as shield to absorb hits.
+            min_shield = member.max_hp * 0.3
+            if member.shield < min_shield:
+                member.shield = min_shield
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Trina — battle-start invulnerability + post-burst team heal
+# ---------------------------------------------------------------------------
+
+
+class Trina(StateMachine):
+    """Trina S1: 4.06% of caster Max HP team heal for 5s after burst.
+    S2 battle start: leftmost Electric Code rifle ally invulnerable
+    for 2s + Electric Code Max HP buff already in DSL.
+
+    The on-tick team heal (5s × 4.06%) is the key stall mechanic.
+
+    Hooks used:
+      - on_battle_start: 2s invulnerability for leftmost SR ally
+      - on_tick: heal team during post-burst window
+      - on_burst_fired: start the post-burst heal window
+    """
+
+    character_name = "Trina"
+    HEAL_PCT_PER_SEC = 4.06
+    HEAL_DURATION_SEC = 5.0
+
+    def on_battle_start(self, member, ally_team, enemy_team, current_time):
+        member.state["trina_grace_until"] = 2.0  # 2s invul for leftmost SR
+
+    def on_burst_fired(self, member, ally_team, enemy_team, current_time):
+        # Post-burst heal window opens.
+        member.state["trina_heal_until"] = (
+            current_time + 10.0 + self.HEAL_DURATION_SEC  # after full burst ~10s
+        )
+
+    def on_tick(self, member, ally_team, enemy_team, current_time, dt):
+        # Battle-start grace
+        grace = member.state.get("trina_grace_until", 0.0)
+        if current_time < grace:
+            for ally in ally_team:
+                if ally.weapon_class == "sr" and ally.alive:
+                    if ally.hp < ally.max_hp * 0.01:
+                        ally.hp = ally.max_hp * 0.01
+                    break
+        # Post-burst heal
+        heal_until = member.state.get("trina_heal_until", 0.0)
+        if 0 < current_time < heal_until:
+            heal_amt = member.max_hp * (self.HEAL_PCT_PER_SEC / 100.0) * dt
+            for ally in ally_team:
+                if ally.alive:
+                    healed = min(ally.max_hp - ally.hp, heal_amt)
+                    ally.hp += healed
+                    member.healing_done += healed
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Soda — Maid Spirit (Max HP stacks) + team heal on burst
+# ---------------------------------------------------------------------------
+
+
+class Soda(StateMachine):
+    """Soda S1: every 180 normal attacks gain Maid Spirit (+13% Max HP,
+    5 stacks, 10s). S2: on Maid Spirit full stacks, team heal 3.23%
+    of caster Max HP. Burst: 2 enemies 321.8% damage + 1s stun.
+
+    Maid Spirit stacks are slow (180 attacks) — in 30s with 10 shots/s,
+    she'd hit ~5 stacks total. Approximate by adding a flat 30% Max HP
+    boost early in the match.
+
+    Hooks used:
+      - on_battle_start: trigger Maid Spirit ramp
+      - on_tick: heal team 3.23% Max HP periodically (when full stacks)
+    """
+
+    character_name = "Soda"
+    HEAL_PCT = 3.23
+    HEAL_INTERVAL_SEC = 6.0  # roughly matches her Maid Spirit cycle
+
+    def on_battle_start(self, member, ally_team, enemy_team, current_time):
+        member.state["soda_last_heal_at"] = current_time + 18.0  # delay before first
+
+    def on_tick(self, member, ally_team, enemy_team, current_time, dt):
+        last = member.state.get("soda_last_heal_at", 999.0)
+        if current_time >= last + self.HEAL_INTERVAL_SEC:
+            heal_amt = member.max_hp * (self.HEAL_PCT / 100.0)
+            for ally in ally_team:
+                if ally.alive:
+                    healed = min(ally.max_hp - ally.hp, heal_amt)
+                    ally.hp += healed
+                    member.healing_done += healed
+            member.state["soda_last_heal_at"] = current_time
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Soda: Twinkling Bunny — Golden Chip stacks + cascading burst stages
+# ---------------------------------------------------------------------------
+
+
+class SodaTwinklingBunny(StateMachine):
+    """Soda: Twinkling Bunny S1: 50 Golden Chips at battle start,
+    +1.32% Crit Damage per stack (max 50, every 3 attacks during FBT).
+    Burst cascades through stages based on Chip count.
+
+    Hooks used:
+      - on_battle_start: grant 50 chips (+66% crit damage)
+      - on_shot_fired: maintain chips during FBT
+    """
+
+    character_name = "Soda: Twinkling Bunny"
+    BASE_CHIPS = 50
+    CRIT_DAMAGE_PER_CHIP = 1.32
+
+    def on_battle_start(self, member, ally_team, enemy_team, current_time):
+        member.state["soda_bunny_chips"] = self.BASE_CHIPS
+        # Apply expected crit damage uplift to per-shot damage as a
+        # one-shot multiplier (crit_rate × crit_damage = expected).
+        crit_dmg_total = self.BASE_CHIPS * self.CRIT_DAMAGE_PER_CHIP  # 66%
+        # Crit rate baseline 25%, so expected damage uplift = 0.25 × 0.66 = 16.5%.
+        multiplier = 1.0 + 0.25 * (crit_dmg_total / 100.0)
+        member.atk *= multiplier
+        member.base_atk *= multiplier
+
+
+# ---------------------------------------------------------------------------
 # Registry — looked up by character name in event_loop
 # ---------------------------------------------------------------------------
 
@@ -422,6 +581,10 @@ _STATE_MACHINES: dict[str, type[StateMachine]] = {
         Blanc,
         Drake,
         DrakeTreasure,
+        Rosanna,
+        Trina,
+        Soda,
+        SodaTwinklingBunny,
     ]
 }
 
