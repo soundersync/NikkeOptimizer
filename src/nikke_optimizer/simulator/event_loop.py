@@ -885,6 +885,11 @@ def simulate_event_loop(
                 for m in chain:
                     m.burst_ready_at = t + m.burst_cooldown_sec
                     m.heal_window_until = t + 10.0  # heal during burst window
+                    # F1 — per-character on_burst_fired hook.
+                    idx = a_team.index(m)
+                    sm = a_machines[idx]
+                    if sm:
+                        sm.on_burst_fired(m, a_team, d_team, t)
                 if not a_first_burst_at:
                     a_first_burst_at = t
                 a_chain_starts.append(t)
@@ -901,6 +906,10 @@ def simulate_event_loop(
                 for m in chain:
                     m.burst_ready_at = t + m.burst_cooldown_sec
                     m.heal_window_until = t + 10.0
+                    idx = d_team.index(m)
+                    sm = d_machines[idx]
+                    if sm:
+                        sm.on_burst_fired(m, d_team, a_team, t)
                 if not d_first_burst_at:
                     d_first_burst_at = t
                 d_chain_starts.append(t)

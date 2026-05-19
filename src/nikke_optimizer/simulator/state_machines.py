@@ -257,6 +257,156 @@ class SnowWhiteHeavyArms(StateMachine):
 
 
 # ---------------------------------------------------------------------------
+# Liberalio — Raging Current state machine (self-only +231% attack damage)
+# ---------------------------------------------------------------------------
+
+
+class Liberalio(StateMachine):
+    """Liberalio's S2: Full Charge hit on stage target gives self
+    Attack Damage +231% continuously (Raging Current state).
+
+    Generic CONDITIONAL handler in event_loop applies this as a
+    team-wide buff scaled down. This handler models it correctly as
+    a self-only buff by directly boosting her per-shot damage once
+    the state activates.
+
+    Hooks used:
+      - on_shot_fired: first shot triggers entry into Raging Current,
+        then her base_atk is permanently boosted by some fraction
+        (still less than 231% because real PvP fights end before all
+        the buff value is realized).
+    """
+
+    character_name = "Liberalio"
+    # Real magnitude is +231% attack damage = 3.31× multiplier on her
+    # attack channel. In a typical 30s PvP match with her charging
+    # cadence, she lands ~5-8 full-charge shots — but Raging Current
+    # only activates after the FIRST one. Realized duty cycle: ~50%.
+    DUTY_CYCLE = 0.50
+    MAGNITUDE_PCT = 231.0
+
+    def on_shot_fired(self, member, ally_team, enemy_team, current_time):
+        if not member.state.get("liberalio_raging_current"):
+            # First shot triggers it.
+            member.state["liberalio_raging_current"] = True
+            multiplier = 1.0 + (self.MAGNITUDE_PCT / 100.0) * self.DUTY_CYCLE
+            member.atk *= multiplier
+            member.base_atk *= multiplier
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Blanc — Indomitability + team heal on burst
+# ---------------------------------------------------------------------------
+
+
+class Blanc(StateMachine):
+    """Blanc's burst grants the team Indomitability (1s no-death) +
+    HP recovery 5% per sec for 5s.
+
+    Indomitability is the key stall mechanic: during the 1s window
+    after Blanc's burst, no ally can die. Models by giving all
+    allies a small HP top-off + temporary invulnerability proxy
+    (raise HP to at least 1% on each tick during the window).
+
+    Hooks used:
+      - on_burst_fired: trigger team heal + grace window
+      - on_tick: during grace window, prevent allies from dying
+    """
+
+    character_name = "Blanc"
+    HEAL_PCT_PER_SEC = 5.0
+    HEAL_DURATION_SEC = 5.0
+    GRACE_DURATION_SEC = 1.0  # Indomitability
+
+    def on_burst_fired(self, member, ally_team, enemy_team, current_time):
+        member.state["blanc_heal_until"] = current_time + self.HEAL_DURATION_SEC
+        member.state["blanc_grace_until"] = current_time + self.GRACE_DURATION_SEC
+
+    def on_tick(self, member, ally_team, enemy_team, current_time, dt):
+        heal_until = member.state.get("blanc_heal_until", 0.0)
+        grace_until = member.state.get("blanc_grace_until", 0.0)
+        if current_time < heal_until:
+            # Heal 5% of caster max HP / sec to all allies.
+            heal_amt = member.max_hp * (self.HEAL_PCT_PER_SEC / 100.0) * dt
+            for ally in ally_team:
+                if ally.alive:
+                    healed = min(ally.max_hp - ally.hp, heal_amt)
+                    ally.hp += healed
+                    member.healing_done += healed
+        if current_time < grace_until:
+            # Indomitability: prevent allies from dying. Top off at 1%.
+            for ally in ally_team:
+                if ally.hp < ally.max_hp * 0.01:
+                    ally.hp = ally.max_hp * 0.01
+                    ally.alive = True
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Drake — S2 periodic damage every 10 hits
+# ---------------------------------------------------------------------------
+
+
+class Drake(StateMachine):
+    """Drake S2: every 10 normal attacks, 3 lowest-HP enemies take
+    98.55% of ATK damage.
+
+    Hooks used:
+      - on_shot_fired: every 10th shot, deal AOE bonus to 3 targets
+    """
+
+    character_name = "Drake"
+    MAGNITUDE_PCT = 98.55
+    EVERY_N_HITS = 10
+    N_TARGETS = 3
+
+    def on_shot_fired(self, member, ally_team, enemy_team, current_time):
+        shots = member.state.get("drake_shots", 0) + 1
+        member.state["drake_shots"] = shots
+        if shots % self.EVERY_N_HITS == 0:
+            return (
+                member.base_atk * (self.MAGNITUDE_PCT / 100.0)
+                * self.N_TARGETS
+            )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Drake (Treasure) — same S2 + additional 5-hit secondary
+# ---------------------------------------------------------------------------
+
+
+class DrakeTreasure(StateMachine):
+    """Drake (Treasure) S2: same 10-hit AOE plus an extra 5-hit
+    single-target hit (201.6% to 1 enemy).
+
+    Hooks used:
+      - on_shot_fired: every 10th shot, AOE bonus; every 5th, ST bonus
+    """
+
+    character_name = "Drake (Treasure)"
+    AOE_MAGNITUDE_PCT = 98.55
+    AOE_EVERY = 10
+    AOE_TARGETS = 3
+    ST_MAGNITUDE_PCT = 201.6
+    ST_EVERY = 5
+
+    def on_shot_fired(self, member, ally_team, enemy_team, current_time):
+        shots = member.state.get("drake_t_shots", 0) + 1
+        member.state["drake_t_shots"] = shots
+        bonus = 0.0
+        if shots % self.AOE_EVERY == 0:
+            bonus += (
+                member.base_atk * (self.AOE_MAGNITUDE_PCT / 100.0)
+                * self.AOE_TARGETS
+            )
+        if shots % self.ST_EVERY == 0:
+            bonus += member.base_atk * (self.ST_MAGNITUDE_PCT / 100.0)
+        return bonus if bonus > 0 else None
+
+
+# ---------------------------------------------------------------------------
 # Registry — looked up by character name in event_loop
 # ---------------------------------------------------------------------------
 
@@ -268,6 +418,10 @@ _STATE_MACHINES: dict[str, type[StateMachine]] = {
         Centi,
         Scarlet,
         SnowWhiteHeavyArms,
+        Liberalio,
+        Blanc,
+        Drake,
+        DrakeTreasure,
     ]
 }
 
