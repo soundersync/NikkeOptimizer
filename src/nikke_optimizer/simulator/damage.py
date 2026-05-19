@@ -540,7 +540,7 @@ def resolve(
     # Continuous shields (Centi-style, < 30s duration ALWAYS triggers):
     # use per-second absorption rate × match_active (with a cap so a
     # single small shield doesn't soak unlimited damage).
-    shield_refresh_cap = min(2, bursts_in_match)
+    shield_refresh_cap = min(3, bursts_in_match)
     defender_shield_total = sum(
         m.shield_value * shield_refresh_cap for m in defender.members
     )
@@ -559,7 +559,7 @@ def resolve(
     # (which only credits a single source — multi-healer comps were
     # under-counted before). Each healer's window × refresh_cap
     # gives total heal absorbed. Cap=2 mirrors the shield model.
-    heal_refresh_cap = min(2, bursts_in_match)
+    heal_refresh_cap = min(3, bursts_in_match)
     defender_heal_total = 0.0
     for m in defender.members:
         if m.heal_emit_per_second <= 0:
