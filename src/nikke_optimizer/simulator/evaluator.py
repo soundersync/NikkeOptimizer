@@ -958,8 +958,28 @@ def evaluate_by_names(
             for base, routed in zip(name_list, routed_names)
             if base in base_stats
         }
+    else:
+        # Caller-supplied per_name_stats: re-key from base → routed
+        # name so Treasure-routed members find their stats. Without
+        # this, ``Moran (Treasure)`` lookup fails when stats are
+        # keyed on ``Moran`` and falls back to base_atk=100,000
+        # default — under-predicting by 5-10×.
+        base_stats = kwargs["per_name_stats"]
+        kwargs["per_name_stats"] = {
+            routed: base_stats[base]
+            for base, routed in zip(name_list, routed_names)
+            if base in base_stats
+        }
     if "per_name_gear_buffs" not in kwargs:
         base_gear = _load_owned_gear_buffs(name_list)
+        kwargs["per_name_gear_buffs"] = {
+            routed: base_gear[base]
+            for base, routed in zip(name_list, routed_names)
+            if base in base_gear
+        }
+    else:
+        # Same re-key for gear buffs.
+        base_gear = kwargs["per_name_gear_buffs"]
         kwargs["per_name_gear_buffs"] = {
             routed: base_gear[base]
             for base, routed in zip(name_list, routed_names)
