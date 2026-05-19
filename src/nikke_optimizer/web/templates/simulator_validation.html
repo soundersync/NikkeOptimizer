@@ -376,10 +376,12 @@
                                 <th class="name" style="text-align:left">Nikke</th>
                                 <th>sim dmg dealt</th>
                                 {% if row.has_actuals %}<th>actual dmg dealt</th><th>Δ</th>{% endif %}
+                                <th>sim dmg taken</th>
                                 {% if row.has_actuals %}<th>actual dmg taken</th>{% endif %}
                                 <th>sim heal</th>
                                 {% if row.has_actuals %}<th>actual heal</th>{% endif %}
-                                {% if p.mode == 'champion' %}<th>HP %</th>{% endif %}
+                                <th>sim HP %</th>
+                                {% if p.mode == 'champion' %}<th>actual HP %</th>{% endif %}
                             </tr>
                         </thead>
                         <tbody>
@@ -408,6 +410,11 @@
                                         {% if diff >= 0 %}+{% endif %}{{ "{:,.0f}".format(diff) }}
                                     {% else %}—{% endif %}
                                 </td>
+                                {% endif %}
+                                <td class="sim">
+                                    {% if cell.sim %}{{ "{:,.0f}".format(cell.sim.estimated_damage_taken) }}{% else %}—{% endif %}
+                                </td>
+                                {% if row.has_actuals %}
                                 <td class="actual">
                                     {% if cell.actual and cell.actual.damage_taken is not none %}{{ "{:,d}".format(cell.actual.damage_taken) }}{% else %}—{% endif %}
                                 </td>
@@ -420,6 +427,9 @@
                                     {% if cell.actual and cell.actual.heal_performed is not none %}{{ "{:,d}".format(cell.actual.heal_performed) }}{% else %}—{% endif %}
                                 </td>
                                 {% endif %}
+                                <td class="hp {% if cell.sim %}{% if cell.sim.estimated_hp_remaining_pct > 0 %}alive{% else %}dead{% endif %}{% endif %}">
+                                    {% if cell.sim %}{{ "%.0f"|format(cell.sim.estimated_hp_remaining_pct) }}%{% else %}—{% endif %}
+                                </td>
                                 {% if p.mode == 'champion' %}
                                 <td class="hp {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{% if cell.actual.hp_remaining_pct > 0 %}alive{% else %}dead{% endif %}{% endif %}">
                                     {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{{ "%.0f"|format(cell.actual.hp_remaining_pct) }}%{% else %}—{% endif %}

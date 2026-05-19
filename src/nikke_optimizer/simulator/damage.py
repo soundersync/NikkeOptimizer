@@ -225,6 +225,8 @@ class MemberContribution:
     heal_per_second: float = 0.0
     heal_duration: float = 0.0
     estimated_heal_performed: float = 0.0   # heal_per_second × heal_active_seconds
+    estimated_damage_taken: float = 0.0     # share of team incoming, minus shield/heal
+    estimated_hp_remaining_pct: float = 100.0  # 0-100 after damage_taken applied
 
     # Identity (for joining against captured names)
     weapon_class: Optional[str] = None
@@ -655,7 +657,28 @@ def resolve(
     # Defender per-member rows: HP / shield / heal contribution. The
     # validation page joins these with the captured per-Nikke heal
     # ground truth from the Champion duel screen.
+    #
+    # Per-defender estimated_damage_taken: distribute team incoming
+    # damage evenly across 5 defenders, then subtract per-Nikke
+    # shield + share of team heal. Even-split is a known
+    # approximation — real NIKKE uses position-based targeting (per
+    # nikke-pvp-mechanics memory) which isn't modeled yet.
+    attacker_total_damage = sum(
+        c.estimated_damage_dealt for c in out.attacker_per_member
+    )
+    n_defenders = max(1, len(defender.members))
+    per_defender_damage_in = attacker_total_damage / n_defenders
+    per_defender_heal_share = defender_heal_total / n_defenders
     for d in defender.members:
+        max_hp = d.base_hp + d.flat_hp_bonus
+        net_damage_taken = max(
+            0.0,
+            per_defender_damage_in - d.shield_value - per_defender_heal_share,
+        )
+        hp_remaining_pct = (
+            max(0.0, min(100.0, (max_hp - net_damage_taken) / max_hp * 100.0))
+            if max_hp > 0 else 0.0
+        )
         contrib = MemberContribution(
             name=d.name,
             weapon_class=d.weapon_class,
@@ -669,6 +692,8 @@ def resolve(
                 d.heal_per_second
                 * min(MATCH_LENGTH_SEC, d.heal_duration * bursts_in_match)
             ),
+            estimated_damage_taken=per_defender_damage_in,
+            estimated_hp_remaining_pct=hp_remaining_pct,
         )
         out.defender_per_member.append(contrib)
 

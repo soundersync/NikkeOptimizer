@@ -81,13 +81,16 @@ class PerMemberView:
 
     One row per Nikke on the side. ``estimated_damage_dealt`` comes
     from this side's attacker-role contribution; ``estimated_heal_performed``
-    + HP / shield come from this side's defender-role contribution.
+    + HP / shield + damage_taken + hp_remaining_pct come from this
+    side's defender-role contribution.
     """
     name: str
     weapon_class: Optional[str] = None
     element: Optional[str] = None
     estimated_damage_dealt: float = 0.0
     estimated_heal_performed: float = 0.0
+    estimated_damage_taken: float = 0.0
+    estimated_hp_remaining_pct: float = 100.0
     base_hp: float = 0.0
     shield_value: float = 0.0
 
@@ -421,6 +424,8 @@ def _merge_member_views(attacker_view, defender_view) -> list[PerMemberView]:
             element=c.element,
         )
         row.estimated_heal_performed = c.estimated_heal_performed
+        row.estimated_damage_taken = c.estimated_damage_taken
+        row.estimated_hp_remaining_pct = c.estimated_hp_remaining_pct
         row.base_hp = c.base_hp + c.flat_hp_bonus
         row.shield_value = c.shield_value
         rows[c.name] = row
