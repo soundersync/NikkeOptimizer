@@ -60,13 +60,17 @@ class TeamFeed:
         kw: dict = {}
         if self.per_name_stats is not None:
             kw["per_name_stats"] = self.per_name_stats
-            # Suppress auto-loads that would otherwise hit OwnedCharacter
-            # for an opponent we don't own. Identities still auto-load
-            # from the Character table (good — element/weapon/role come
-            # from there).
-            kw["per_name_gear_buffs"] = {}
-            kw["per_name_doll_buffs"] = {}
-            kw["per_name_treasure_buffs"] = {}
+            # Don't stub gear/doll/treasure auto-loaders here.
+            # `_load_owned_gear_buffs` etc. naturally return {} for any
+            # name not in OwnedCharacter, so opponent-side chars (which
+            # we don't own) get the right empty value. User-side chars
+            # (which we do own) get their actual gear/doll/treasure
+            # buffs from the live table — this is more accurate than
+            # the snapshot, which currently doesn't carry decoded
+            # gear data. Trade-off: if the user's gear has changed
+            # between the match and now, the buffs will reflect today's
+            # state, not the snapshot date's state. For day-scale
+            # baselines that's fine.
         return kw
 
 
@@ -212,16 +216,37 @@ def _predict_for_names(
 def _find_rookie_opponent_snapshot(
     session: Session, match: ArenaMatch
 ) -> Optional[RookieArenaSnapshot]:
+    """Opponent snapshot for the run date, requiring ≥1 char row
+    (excludes private/empty snapshots)."""
     opp = (match.opponent_username or "").strip().upper()
     if not opp or match.captured_at is None:
         return None
+    return _find_rookie_snapshot_with_chars(
+        session, match.captured_at.date(), opp,
+    )
+
+
+def _find_rookie_user_snapshot(
+    session: Session, match: ArenaMatch, username: str
+) -> Optional[RookieArenaSnapshot]:
+    """User-side snapshot for the run date, requiring ≥1 char row."""
+    if not username or match.captured_at is None:
+        return None
+    return _find_rookie_snapshot_with_chars(
+        session, match.captured_at.date(), username.strip().upper(),
+    )
+
+
+def _find_rookie_snapshot_with_chars(
+    session: Session, run_date, player_username_upper: str,
+) -> Optional[RookieArenaSnapshot]:
     rows = session.exec(
         select(RookieArenaSnapshot).where(
-            RookieArenaSnapshot.run_date == match.captured_at.date()
+            RookieArenaSnapshot.run_date == run_date
         )
     ).all()
     for r in rows:
-        if (r.player_username or "").strip().upper() == opp:
+        if (r.player_username or "").strip().upper() == player_username_upper:
             has = session.exec(
                 select(RookieArenaSnapshotCharacter).where(
                     RookieArenaSnapshotCharacter.snapshot_id == r.id
@@ -246,8 +271,19 @@ def _build_team_feed(
 
     if match.mode == "rookie":
         if side == "user":
-            # Live OwnedCharacter — auto-loaded by evaluate_by_names.
-            return TeamFeed(names=names, per_name_stats=None)
+            from ..data.config import get_self_username
+            username = get_self_username()
+            snap = _find_rookie_user_snapshot(session, match, username or "")
+            if snap is None:
+                # No user snapshot for this run — fall back to live
+                # OwnedCharacter (today's roster). Caller can detect
+                # the snapshot-less state via the iter_snapshot_both
+                # filter if they only want truly anchored data.
+                return TeamFeed(names=names, per_name_stats=None)
+            stats = _per_name_stats_from_rookie_snapshot(session, snap, names)
+            if not stats:
+                return TeamFeed(names=names, per_name_stats=None)
+            return TeamFeed(names=names, per_name_stats=stats)
         snap = _find_rookie_opponent_snapshot(session, match)
         if snap is None:
             return None
@@ -353,8 +389,17 @@ def iter_snapshot_both_matches(session: Session) -> list[ArenaMatch]:
                 continue
             out.append(m)
         elif m.mode == "rookie":
-            if _find_rookie_opponent_snapshot(session, m) is not None:
-                out.append(m)
+            # Strict snapshot=both: require BOTH user-side and opp-side
+            # RookieArenaSnapshot rows (each with ≥1 char). This is the
+            # scope the /simulator/validation page consumes — only matches
+            # where we have an anchored roster for both players.
+            from ..data.config import get_self_username
+            username = get_self_username() or ""
+            if _find_rookie_opponent_snapshot(session, m) is None:
+                continue
+            if _find_rookie_user_snapshot(session, m, username) is None:
+                continue
+            out.append(m)
     return out
 
 

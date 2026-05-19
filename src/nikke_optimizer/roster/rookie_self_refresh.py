@@ -28,7 +28,15 @@ from typing import Optional
 from platformdirs import user_data_dir
 from sqlmodel import Session, select
 
-from ..data.models import ArenaMatch, PromoTournament
+from ..data.models import (
+    AccountState,
+    ArenaMatch,
+    Character,
+    OwnedCharacter,
+    PromoTournament,
+    RookieArenaSnapshot,
+    RookieArenaSnapshotCharacter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +55,152 @@ class SelfRefreshReport:
     profile_lookup_failed: bool = False
     error: Optional[str] = None
     skipped_reason: Optional[str] = None
+    # User-side snapshot — populated when write_user_snapshot_for_tournament
+    # is invoked (either by the live daemon hook after sync, or directly by
+    # the manual backfill CLI).
+    user_snapshot_id: Optional[int] = None
+    user_snapshot_chars: int = 0
+
+
+@dataclass
+class UserSnapshotReport:
+    tournament_id: int
+    username: str
+    snapshot_id: Optional[int] = None
+    chars_written: int = 0
+    chars_missing_owned: list[str] = field(default_factory=list)
+    replaced_existing: bool = False
+    skipped_reason: Optional[str] = None
+
+
+def _build_owned_snapshot_payload(owned: OwnedCharacter) -> dict:
+    """Render a minimal RookieArenaSnapshotCharacter.data dict from a
+    live OwnedCharacter row.
+
+    Only fields the simulator's stat predictor needs (and a couple of
+    convenience keys for the validation UI). Marked with
+    ``source="owned_backfill"`` so the validation page can distinguish
+    a backfilled-from-OwnedCharacter snapshot from a live shiftyspad
+    fetch (which carries richer fields like ol_gear and cube tids).
+    """
+    return {
+        "sync_level": owned.sync_level,
+        "core": owned.core,
+        "limit_break": owned.limit_break,
+        "skill1_level": owned.skill1_level,
+        "skill2_level": owned.skill2_level,
+        "burst_skill_level": owned.burst_skill_level,
+        "power": owned.power,
+        "bond_rank": owned.bond_rank,
+        "arena_combat": owned.power,  # closest available proxy
+        "source": "owned_backfill",
+    }
+
+
+def write_user_snapshot_for_tournament(
+    session: Session,
+    tournament: PromoTournament,
+    *,
+    username: str,
+    intl_openid: Optional[str] = None,
+) -> UserSnapshotReport:
+    """Write (or replace) a ``RookieArenaSnapshot`` for the user side
+    of a rookie tournament, sourced from current ``OwnedCharacter``.
+
+    Idempotent: if a snapshot already exists for
+    ``(run_date, username)`` the existing row is updated in-place and
+    its per-character rows are replaced.
+
+    Used by both the daemon hook (called after the
+    OwnedCharacter sync completes) and the manual backfill CLI.
+    """
+    report = UserSnapshotReport(
+        tournament_id=tournament.id, username=username,
+    )
+    names = collect_self_loadout_names(session, tournament)
+    if not names:
+        report.skipped_reason = "no-loadout-names"
+        return report
+
+    acct = session.exec(select(AccountState)).first()
+
+    existing = session.exec(
+        select(RookieArenaSnapshot).where(
+            RookieArenaSnapshot.run_date == tournament.capture_date,
+            RookieArenaSnapshot.player_username == username,
+        )
+    ).first()
+    if existing is None:
+        snap = RookieArenaSnapshot(
+            run_date=tournament.capture_date,
+            player_username=username,
+            captured_at=datetime.now(timezone.utc),
+            intl_openid=intl_openid,
+            source_run_id=tournament.id,
+            synchro_level=acct.synchro_level if acct else 1,
+            general_research_level=acct.general_research_level if acct else 0,
+            class_attacker_level=acct.class_attacker_level if acct else 0,
+            class_defender_level=acct.class_defender_level if acct else 0,
+            class_supporter_level=acct.class_supporter_level if acct else 0,
+            mfr_pilgrim_level=acct.mfr_pilgrim_level if acct else 0,
+            mfr_elysion_level=acct.mfr_elysion_level if acct else 0,
+            mfr_tetra_level=acct.mfr_tetra_level if acct else 0,
+            mfr_missilis_level=acct.mfr_missilis_level if acct else 0,
+            mfr_abnormal_level=acct.mfr_abnormal_level if acct else 0,
+            is_roster_private=False,
+            is_outpost_private=False,
+        )
+        session.add(snap)
+        session.flush()
+    else:
+        snap = existing
+        snap.captured_at = datetime.now(timezone.utc)
+        snap.source_run_id = tournament.id
+        if intl_openid:
+            snap.intl_openid = intl_openid
+        if acct is not None:
+            snap.synchro_level = acct.synchro_level
+            snap.general_research_level = acct.general_research_level
+            snap.class_attacker_level = acct.class_attacker_level
+            snap.class_defender_level = acct.class_defender_level
+            snap.class_supporter_level = acct.class_supporter_level
+            snap.mfr_pilgrim_level = acct.mfr_pilgrim_level
+            snap.mfr_elysion_level = acct.mfr_elysion_level
+            snap.mfr_tetra_level = acct.mfr_tetra_level
+            snap.mfr_missilis_level = acct.mfr_missilis_level
+            snap.mfr_abnormal_level = acct.mfr_abnormal_level
+        session.add(snap)
+        report.replaced_existing = True
+        # Drop existing per-char rows; we'll rewrite below.
+        old = session.exec(
+            select(RookieArenaSnapshotCharacter).where(
+                RookieArenaSnapshotCharacter.snapshot_id == snap.id
+            )
+        ).all()
+        for row in old:
+            session.delete(row)
+        session.flush()
+
+    for name in names:
+        row = session.exec(
+            select(OwnedCharacter, Character)
+            .where(OwnedCharacter.character_id == Character.id)
+            .where(Character.name == name)
+        ).first()
+        if row is None:
+            report.chars_missing_owned.append(name)
+            continue
+        owned, char = row
+        session.add(RookieArenaSnapshotCharacter(
+            snapshot_id=snap.id,
+            character_id=char.id,
+            data=_build_owned_snapshot_payload(owned),
+        ))
+        report.chars_written += 1
+
+    session.commit()
+    report.snapshot_id = snap.id
+    return report
 
 
 def collect_self_loadout_names(
@@ -197,5 +351,33 @@ def refresh_self_from_rookie_tournament(
     report.chars_updated = sum(
         1 for d in sync_report.diffs if d.changes or d.is_new
     )
+
+    # After OwnedCharacter is fresh from the BlablaLink fetch, write a
+    # user-side RookieArenaSnapshot anchored to this tournament's date
+    # — symmetric to the opponent snapshots we already write at ingest.
+    # Sourced from OwnedCharacter (now just-refreshed in the same call)
+    # so historical match-replay has accurate user roster state.
+    from ..data.config import get_self_username
+
+    username = get_self_username()
+    if username:
+        try:
+            snap_report = write_user_snapshot_for_tournament(
+                session, tournament,
+                username=username, intl_openid=intl_openid,
+            )
+            report.user_snapshot_id = snap_report.snapshot_id
+            report.user_snapshot_chars = snap_report.chars_written
+        except Exception as exc:  # noqa: BLE001
+            log.exception("user snapshot write failed: %s", exc)
+            # Don't fail the whole refresh — OwnedCharacter is already
+            # written; surface the error in the report.
+            report.error = (report.error or "") + f"  user-snap: {exc!r}"
+    else:
+        log.info(
+            "skipping user-snapshot write for tournament %s: no username configured",
+            tournament.id,
+        )
+
     _mark_refreshed(tournament.id, n_chars=len(target_codes))
     return report
