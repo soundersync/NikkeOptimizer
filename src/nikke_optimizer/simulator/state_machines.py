@@ -2,32 +2,97 @@
 
 The DSL handles most NIKKE skills declaratively, but certain
 characters have multi-stage state mechanics that the generic DSL
-can't represent cleanly:
+can't represent cleanly. This module provides a base
+``StateMachine`` class with lifecycle hooks the event loop calls
+at appropriate points. Each registered character handler
+implements the hooks it needs; defaults are no-op.
 
-  - Centi (Treasure): periodic shield refresh every 5s (S2 ALWAYS
-    trigger with internal cooldown)
-  - Scarlet: HP-threshold conditional buffs (S1 30%-chance damage-
-    response, S2 HP<60% crit damage)
-  - Snow White: Heavy Arms: Lock-On target set + Auto-Fire +
-    Seven Dwarves Fully Active multi-state
-  - Crown: Relax stack-of-20 → invulnerability + team buff
-  - Liberalio: Raging Current state on full-charge hit
-  - Drake: Hostile counter true-damage on hits
+Usage from event_loop.simulate_event_loop:
 
-This module provides a base ``StateMachine`` class with lifecycle
-hooks the event loop calls at appropriate points. Each registered
-character handler implements the hooks it needs; defaults are no-op.
+    a_machines = [state_machine_for(m.name) for m in a_team]
+    for member, sm in zip(a_team, a_machines):
+        if sm: sm.on_battle_start(member, a_team, d_team, 0.0)
+    # then per-tick on_tick(), per-shot on_shot_fired(), on_burst_fired().
 
-Usage:
+Currently encoded (12 handlers):
+  * Defenders/stall: Centi, Centi (Treasure), Trina, Soda, Blanc,
+    Rosanna, Soda: Twinkling Bunny
+  * Attackers: Scarlet, Liberalio, Snow White: Heavy Arms, Drake,
+    Drake (Treasure)
 
-    machines = create_state_machines_for_team(members)
-    for m, sm in zip(team, machines):
-        sm.on_battle_start(m, team, enemy_team, current_time=0.0)
-    ...
-    # per-shot:
-    sm.on_shot_fired(member, ally_team, enemy_team, current_time)
-    # per-tick:
-    sm.on_tick(member, ally_team, enemy_team, current_time, dt)
+==============================================================
+NEXT-STEP STATE MACHINES TO ENCODE (priority order)
+==============================================================
+
+Each handler is ~30-50 LOC. Returns are diminishing on the current
+14-match corpus but pay off as the corpus grows and new chars enter.
+
+**Tier 1 — high-impact missing mechanics that already appear in
+matches we can't W/L-predict correctly:**
+
+  - **Crown** — Relax 20-stack cycle. In long matches (60s+) Crown
+    fully stacks Relax → 7s of team ATK damage +20.99%. Should be
+    modeled as an on_tick state machine: stack_count increments
+    every 43 shots, at 20 grant team buff + invul. Currently the
+    static evaluator silently drops her ON_HIT trigger; in
+    Champion matches this under-credits Crown comps by 15-25%
+    sustained DPS.
+  - **Cinderella** — High-damage glass-cannon burst. Currently
+    treated as a generic burst but has unique "high-roll" mechanics
+    (Doll/Treasure scaling, lower-HP modifier). Big in m351's miss.
+  - **Helm / Helm (Treasure)** — Charge Damage stacking on full
+    charge hits. SR-specific. Helm Treasure burst 8237% is huge but
+    only fires once per cycle; the per-shot state machine should
+    track full-charge buildup.
+  - **Red Hood** — Multi-stage burst (Beast Cage → Last Howl →
+    Red Wolf). Each stage has different damage/buff structure.
+
+**Tier 2 — common chars with simpler mechanics:**
+
+  - **Noah** — Shield-on-burst defender. Her S2 grants team
+    "Indestructible" (similar to Blanc Indomitability). Worth a
+    handler for the m31-m35 user-side defense modeling.
+  - **Biscuit** — Heal-on-burst + class-buff. Common rookie support.
+  - **Moran (Treasure)** — Defender with taunt + shield. Slot 1
+    position-based mechanic.
+  - **Noir** — HP>70% ATK buff (not "Hostile counter" as I
+    initially misremembered). Threshold-based ATK boost.
+  - **Jackal** — Combo trigger + drone damage. Drone deals
+    continuous on-tick damage during burst window.
+  - **Anis: Star** — Pierce-damage stacker. Pierce shots through
+    cover scale her damage massively.
+
+**Tier 3 — niche / boss-PvE focused (low PvP priority):**
+
+  - SW:HA Seven Dwarves Fully Active stage (multi-cycle)
+  - Maxwell / Alice charge mechanics
+  - Cinderella's burst damage variance from Doll phase
+  - Snow White (regular) — multi-hit burst spread
+
+**Patterns for adding new handlers:**
+
+  1. Read the source description from the character's library file
+  2. Identify which lifecycle hook fits (on_tick for periodic,
+     on_shot_fired for count-based, on_burst_fired for burst-state,
+     on_damage_taken for HP-threshold and counter)
+  3. Use ``member.state`` dict with a unique key prefix per
+     character (e.g. ``state["crown_relax_count"]``) to avoid
+     collisions
+  4. Apply buffs as ``member.atk *= multiplier`` for self-only,
+     or modify ``ally.shield`` / ``ally.hp`` for team effects
+  5. Register the class in ``_STATE_MACHINES`` dict
+  6. Run ``baseline-sim --event-loop`` to measure impact
+
+**Calibration tips:**
+
+  - Cap activation reliability at ~50% (state machines don't fire
+    every cycle in real fights — see Liberalio's DUTY_CYCLE=0.50)
+  - SELF buffs should NOT cascade team-wide. Use member.atk
+    directly, not active_buffs list
+  - Heals add to ally.hp via min(max_hp - hp, heal_amt); track
+    member.healing_done for validation
+  - Shields add to ally.shield with a cap (2× the value) to
+    prevent runaway accumulation
 """
 
 from __future__ import annotations
