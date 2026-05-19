@@ -4370,6 +4370,75 @@ def arena_matches_cmd(
         shown += 1
 
 
+@app.command("baseline-sim")
+def baseline_sim_cmd(
+    mode: Optional[str] = typer.Option(
+        None, "--mode", help="Filter to 'rookie' or 'champion'.",
+    ),
+    show_misses: bool = typer.Option(
+        False, "--misses",
+        help="Only print the mispredicted matches (for triage).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Predicted vs actual winner across snapshot=both ArenaMatch rows.
+
+    Runs ``damage.resolve`` over every match where we have snapshot
+    data for both sides (Champions: ``RosterSnapshot`` FK; Rookie:
+    opponent ``RookieArenaSnapshot`` + live ``OwnedCharacter`` for
+    user). The shorter ``seconds_to_clear_defender`` side is the
+    predicted winner; verdict is compared to the recorded outcome.
+    """
+    from ..simulator.baseline import run_baseline
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        report = run_baseline(session)
+
+    preds = report.predictions
+    if mode in ("rookie", "champion"):
+        preds = [p for p in preds if p.mode == mode]
+
+    n_scored = sum(1 for p in preds if p.correct is not None)
+    n_right = sum(1 for p in preds if p.correct is True)
+    pct = (n_right / n_scored) if n_scored else 0.0
+    console.print(
+        f"[bold]Baseline:[/] {n_right}/{n_scored} = "
+        f"[bold green]{pct:.1%}[/]   "
+        f"[dim]({len(preds)} total predictions; "
+        f"{len(preds) - n_scored} skipped: no outcome / tie)[/]"
+    )
+    for m, (c, t) in sorted(report.by_mode().items()):
+        if mode and m != mode:
+            continue
+        console.print(f"  {m:8s} {c}/{t} = {c/t:.1%}")
+    console.print()
+
+    rows = [
+        p for p in sorted(preds, key=lambda p: (p.mode, p.match_id))
+        if (not show_misses) or (p.correct is False)
+    ]
+    for p in rows:
+        if p.correct is True:
+            mark = "[green]✓[/]"
+        elif p.correct is False:
+            mark = "[red]✗[/]"
+        else:
+            mark = "[dim]?[/]"
+        margin = abs(p.user_clear_sec - p.opp_clear_sec)
+        console.print(
+            f"  {mark} m{p.match_id:4d} {p.mode:8s} "
+            f"r{p.round_index or '-'}  "
+            f"actual=[bold]{p.actual_outcome or '?':4s}[/]  "
+            f"pred=[bold]{p.predicted_winner or 'tie':4s}[/]  "
+            f"u_clear={p.user_clear_sec:6.1f}s  "
+            f"opp_clear={p.opp_clear_sec:6.1f}s  "
+            f"Δ={margin:5.1f}s  "
+            f"[dim]u_dps={p.user_team_dps:>11,.0f}  opp_dps={p.opp_team_dps:>11,.0f}[/]"
+        )
+
+
 @app.command("refresh-self-from-rookie")
 def refresh_self_from_rookie_cmd(
     target: Optional[str] = typer.Argument(
