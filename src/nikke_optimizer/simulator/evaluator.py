@@ -63,7 +63,7 @@ HEAL_RATE_CEILING = 0.05  # 5% of caster max HP per second
 # Calibrated against tournament observed match lengths: most resolved
 # PvP duels (rookie + champion) finish in 20-40s before the 5-min
 # timeout. Picked the midpoint as the typical sustained window.
-PVP_AVG_MATCH_LENGTH_SEC = 20.0
+PVP_AVG_MATCH_LENGTH_SEC = 30.0
 
 
 def _duty_cycle_factor(duration_seconds: Optional[float]) -> float:

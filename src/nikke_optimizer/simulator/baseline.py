@@ -323,7 +323,7 @@ def _predict_for_names(
         snap_power = data.get("power") or data.get("arena_combat")
         scale = 1.0
         if snap_power and p_power and p_power > 0:
-            scale = max(1.0, min(3.5, snap_power / p_power))
+            scale = max(1.0, min(2.5, snap_power / p_power))
         stats: dict[str, int] = {}
         if p_atk:
             stats["base_atk"] = int(p_atk * scale)
