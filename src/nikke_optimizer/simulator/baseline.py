@@ -56,22 +56,18 @@ class TeamFeed:
 
     names: list[str]
     per_name_stats: Optional[dict[str, dict[str, int]]] = None  # None → auto-load
+    # D4 — per-Nikke gear buff %s extracted from snapshot ol_gear when
+    # available (Champion/Rookie opp snapshots from ShiftyPad have
+    # this data). For owned chars, evaluator auto-loads from
+    # OwnedCharacter.ol_gear instead.
+    per_name_gear_buffs: Optional[dict[str, dict[str, float]]] = None
 
     def as_kwargs(self) -> dict:
         kw: dict = {}
         if self.per_name_stats is not None:
             kw["per_name_stats"] = self.per_name_stats
-            # Don't stub gear/doll/treasure auto-loaders here.
-            # `_load_owned_gear_buffs` etc. naturally return {} for any
-            # name not in OwnedCharacter, so opponent-side chars (which
-            # we don't own) get the right empty value. User-side chars
-            # (which we do own) get their actual gear/doll/treasure
-            # buffs from the live table — this is more accurate than
-            # the snapshot, which currently doesn't carry decoded
-            # gear data. Trade-off: if the user's gear has changed
-            # between the match and now, the buffs will reflect today's
-            # state, not the snapshot date's state. For day-scale
-            # baselines that's fine.
+        if self.per_name_gear_buffs is not None:
+            kw["per_name_gear_buffs"] = self.per_name_gear_buffs
         return kw
 
 
@@ -157,14 +153,90 @@ def _account_state_from_snapshot(snapshot) -> AccountState:
     )
 
 
+_OL_BONUS_PATTERNS: list[tuple[str, str]] = [
+    # (substring in description, OLBonusType.name)
+    ("Element Damage", "ELEMENT_DAMAGE"),
+    ("Max Ammunition Capacity", "MAX_AMMUNITION_CAPACITY"),
+    ("Ammunition Capacity", "AMMUNITION_CAPACITY"),
+    ("Charge Speed", "CHARGE_SPEED"),
+    ("Charge Damage", "CHARGE_DAMAGE"),
+    ("Hit Rate", "HIT_RATE"),
+    ("Critical Rate", "CRITICAL_RATE"),
+    ("Critical Damage", "CRITICAL_DAMAGE"),
+    ("Defense", "DEFENSE"),
+    ("Increase ATK", "ATK"),
+    ("Increase HP", "HP"),
+]
+
+
+def _parse_ol_bonus_str(text: str) -> Optional[tuple[str, float]]:
+    """Parse 'Increase ATK 11.11%' → ('ATK', 11.11). Returns None if no match."""
+    import re as _re
+    match = _re.search(r"([\d.]+)\s*%", text or "")
+    if not match:
+        return None
+    pct = float(match.group(1))
+    for needle, bonus_type in _OL_BONUS_PATTERNS:
+        if needle in text:
+            return bonus_type, pct
+    return None
+
+
+_BONUS_TYPE_DESC_TO_KEY: dict[str, str] = {
+    "Element Damage Dealt": "ELEMENT_DAMAGE",
+    "Max Ammunition Capacity": "MAX_AMMUNITION_CAPACITY",
+    "Ammunition Capacity": "AMMUNITION_CAPACITY",
+    "Charge Speed": "CHARGE_SPEED",
+    "Charge Damage": "CHARGE_DAMAGE",
+    "Hit Rate": "HIT_RATE",
+    "Critical Rate": "CRITICAL_RATE",
+    "Critical Damage": "CRITICAL_DAMAGE",
+    "Defense": "DEFENSE",
+    "ATK": "ATK",
+    "HP": "HP",
+}
+
+
+def _gear_buffs_from_snapshot_data(data: dict) -> dict[str, float]:
+    """Extract per-OLBonusType % from snapshot's ol_gear pieces.
+
+    Handles two formats:
+      * Champion/Rookie shiftyspad snapshots: bonuses are dicts with
+        ``bonus_type``, ``percent``, ``highlighted`` keys.
+      * Older roster-import snapshots: bonuses are strings like
+        "Increase ATK 11.11%".
+    """
+    out: dict[str, float] = {}
+    gear = data.get("ol_gear") or []
+    for piece in gear:
+        bonuses = piece.get("bonuses") if isinstance(piece, dict) else None
+        if not bonuses:
+            continue
+        for b in bonuses:
+            if isinstance(b, dict):
+                # Only highlighted (active) bonuses count.
+                if b.get("highlighted") is False:
+                    continue
+                bt = _BONUS_TYPE_DESC_TO_KEY.get(b.get("bonus_type") or "")
+                pct = b.get("percent")
+                if bt and isinstance(pct, (int, float)):
+                    out[bt] = out.get(bt, 0.0) + float(pct)
+            elif isinstance(b, str):
+                parsed = _parse_ol_bonus_str(b)
+                if parsed:
+                    bt, pct = parsed
+                    out[bt] = out.get(bt, 0.0) + pct
+    return out
+
+
 def _per_name_stats_from_roster_snapshot(
     session: Session,
     snapshot: RosterSnapshot,
     names: list[str],
     *,
     clamp_level_to: Optional[int],
-) -> dict[str, dict[str, int]]:
-    """Predict base ATK/HP/DEF per named char from a Champions snapshot."""
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, float]]]:
+    """Predict base ATK/HP/DEF + gear buffs per named char from a Champions snapshot."""
     rows = session.exec(
         select(RosterSnapshotCharacter, Character).where(
             RosterSnapshotCharacter.snapshot_id == snapshot.id,
@@ -173,15 +245,24 @@ def _per_name_stats_from_roster_snapshot(
     ).all()
     by_name = {ch.name: (snap_ch, ch) for snap_ch, ch in rows}
     account_state = _account_state_from_snapshot(snapshot)
-    return _predict_for_names(by_name, names, account_state, clamp_level_to)
+    stats = _predict_for_names(by_name, names, account_state, clamp_level_to)
+    gear_buffs: dict[str, dict[str, float]] = {}
+    for name in names:
+        pair = by_name.get(name)
+        if pair is None:
+            continue
+        gb = _gear_buffs_from_snapshot_data(pair[0].data or {})
+        if gb:
+            gear_buffs[name] = gb
+    return stats, gear_buffs
 
 
 def _per_name_stats_from_rookie_snapshot(
     session: Session,
     snapshot: RookieArenaSnapshot,
     names: list[str],
-) -> dict[str, dict[str, int]]:
-    """Predict base stats from a Rookie opponent snapshot (no level cap)."""
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, float]]]:
+    """Predict base stats + gear buffs from a Rookie opponent snapshot."""
     rows = session.exec(
         select(RookieArenaSnapshotCharacter, Character).where(
             RookieArenaSnapshotCharacter.snapshot_id == snapshot.id,
@@ -190,7 +271,16 @@ def _per_name_stats_from_rookie_snapshot(
     ).all()
     by_name = {ch.name: (snap_ch, ch) for snap_ch, ch in rows}
     account_state = _account_state_from_snapshot(snapshot)
-    return _predict_for_names(by_name, names, account_state, None)
+    stats = _predict_for_names(by_name, names, account_state, None)
+    gear_buffs: dict[str, dict[str, float]] = {}
+    for name in names:
+        pair = by_name.get(name)
+        if pair is None:
+            continue
+        gb = _gear_buffs_from_snapshot_data(pair[0].data or {})
+        if gb:
+            gear_buffs[name] = gb
+    return stats, gear_buffs
 
 
 def _predict_for_names(
@@ -206,7 +296,8 @@ def _predict_for_names(
             continue
         snap_ch, char = pair
         data = snap_ch.data or {}
-        level = data.get("sync_level") or 1
+        actual_level = data.get("sync_level") or 1
+        level = actual_level
         if clamp_level_to is not None:
             level = min(level, clamp_level_to)
         core = data.get("core") or 0
@@ -225,18 +316,14 @@ def _predict_for_names(
             char_class=_lookup_char_class(char.name),
             manufacturer=char.manufacturer.value if char.manufacturer else None,
         )
-        # D4 gear estimate from snapshot power. _predict_base_stats
-        # returns level/grade/core-only stats (no gear/cube/treasure
-        # bonuses since we lack that data for unowned chars). The
-        # snapshot's ``power`` field is the in-game combat power
-        # which DOES include gear. Use the ratio to scale up base
-        # stats — assumes ATK/HP/DEF scale roughly together with
-        # power. Falls back to no-scaling when power is missing.
+        # D4 gear estimate from snapshot power. Snapshot's ``power`` is
+        # in-game combat power (includes gear) at the ACTUAL sync level
+        # in the data. To use it as gear ratio, compare to predicted at
+        # the ACTUAL sync level — not the clamped level. This way the
+        # scale captures gear contribution independent of the clamp.
         snap_power = data.get("power") or data.get("arena_combat")
         scale = 1.0
         if snap_power and p_power and p_power > 0:
-            # Cap the scale at 4x as a sanity bound; tournament chars
-            # are typically 2-3x level-only power.
             scale = max(1.0, min(4.0, snap_power / p_power))
         stats: dict[str, int] = {}
         if p_atk:
@@ -322,17 +409,23 @@ def _build_team_feed(
                 # the snapshot-less state via the iter_snapshot_both
                 # filter if they only want truly anchored data.
                 return TeamFeed(names=names, per_name_stats=None)
-            stats = _per_name_stats_from_rookie_snapshot(session, snap, names)
+            stats, gear = _per_name_stats_from_rookie_snapshot(session, snap, names)
             if not stats:
                 return TeamFeed(names=names, per_name_stats=None)
-            return TeamFeed(names=names, per_name_stats=stats)
+            return TeamFeed(
+                names=names, per_name_stats=stats,
+                per_name_gear_buffs=gear or None,
+            )
         snap = _find_rookie_opponent_snapshot(session, match)
         if snap is None:
             return None
-        stats = _per_name_stats_from_rookie_snapshot(session, snap, names)
+        stats, gear = _per_name_stats_from_rookie_snapshot(session, snap, names)
         if not stats:
             return None
-        return TeamFeed(names=names, per_name_stats=stats)
+        return TeamFeed(
+            names=names, per_name_stats=stats,
+            per_name_gear_buffs=gear or None,
+        )
 
     if match.mode == "champion":
         snap_id = (
@@ -343,12 +436,15 @@ def _build_team_feed(
         snapshot = session.get(RosterSnapshot, snap_id)
         if snapshot is None:
             return None
-        stats = _per_name_stats_from_roster_snapshot(
+        stats, gear = _per_name_stats_from_roster_snapshot(
             session, snapshot, names, clamp_level_to=CHAMPIONS_LEVEL_CAP
         )
         if not stats:
             return None
-        return TeamFeed(names=names, per_name_stats=stats)
+        return TeamFeed(
+            names=names, per_name_stats=stats,
+            per_name_gear_buffs=gear or None,
+        )
 
     return None
 
