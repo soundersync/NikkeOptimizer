@@ -117,7 +117,27 @@ def write_user_snapshot_for_tournament(
     report = UserSnapshotReport(
         tournament_id=tournament.id, username=username,
     )
-    names = collect_self_loadout_names(session, tournament)
+    # Collect names from THIS tournament AND any other tournaments on
+    # the same date. Multiple rookie runs can happen the same day; the
+    # snapshot is keyed on (date, username) so merging avoids one
+    # tournament's loadout names overwriting another's.
+    from .promo_tournament_ingest import tournament_format, FORMAT_ROOKIE_ARENA
+    names_set: set[str] = set(collect_self_loadout_names(session, tournament))
+    same_day_tournaments = session.exec(
+        select(PromoTournament).where(
+            PromoTournament.capture_date == tournament.capture_date,
+            PromoTournament.id != tournament.id,
+        )
+    ).all()
+    for t in same_day_tournaments:
+        try:
+            if tournament_format(Path(t.storage_root)) != FORMAT_ROOKIE_ARENA:
+                continue
+        except Exception:
+            continue
+        for n in collect_self_loadout_names(session, t):
+            names_set.add(n)
+    names = list(names_set)
     if not names:
         report.skipped_reason = "no-loadout-names"
         return report
