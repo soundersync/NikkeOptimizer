@@ -1993,6 +1993,81 @@ def create_app(
             },
         )
 
+    @app.get("/simulator/validation", response_class=HTMLResponse)
+    def simulator_validation(
+        request: Request,
+        mode: Optional[str] = None,
+    ) -> Response:
+        """Per-match predicted vs actual for snapshot=both ArenaMatch rows.
+
+        Shows the baseline accuracy headline + a per-match drill-down.
+        Per-snapshot freshness badges flag backfilled data so you can
+        weight predictions accordingly. Only Champion + Rookie matches
+        where BOTH sides have roster data appear; everything else is
+        filtered out at iter_snapshot_both_matches.
+        """
+        from ..simulator.baseline import (
+            freshness_for,
+            run_baseline,
+            snapshot_pair_for_match,
+        )
+
+        with get_session(engine) as session:
+            report = run_baseline(session)
+            rows: list[dict] = []
+            for pred in report.predictions:
+                if mode in ("rookie", "champion") and pred.mode != mode:
+                    continue
+                match = session.get(ArenaMatch, pred.match_id)
+                user_snap, opp_snap = snapshot_pair_for_match(session, match)
+                user_fr = freshness_for(
+                    user_snap.captured_at if user_snap else None,
+                    match.captured_at,
+                )
+                opp_fr = freshness_for(
+                    opp_snap.captured_at if opp_snap else None,
+                    match.captured_at,
+                )
+                rows.append({
+                    "p": pred,
+                    "match": match,
+                    "user_fr": user_fr,
+                    "opp_fr": opp_fr,
+                    "verdict_css": (
+                        "snap-both" if pred.correct is True
+                        else "snap-none" if pred.correct is False
+                        else "snap-partial"
+                    ),
+                })
+            # Sort newest first.
+            rows.sort(
+                key=lambda r: r["match"].captured_at or 0,
+                reverse=True,
+            )
+
+        # Filter by-mode counts for the headline (so the displayed
+        # numbers match the currently-filtered rows).
+        scoped = [
+            p for p in report.predictions
+            if (mode not in ("rookie", "champion")) or (p.mode == mode)
+        ]
+        n_scoped = sum(1 for p in scoped if p.correct is not None)
+        n_right_scoped = sum(1 for p in scoped if p.correct is True)
+        by_mode_full = report.by_mode()
+
+        return templates.TemplateResponse(
+            request,
+            "simulator_validation.html",
+            {
+                "mode": mode,
+                "rows": rows,
+                "n_total": n_scoped,
+                "n_correct": n_right_scoped,
+                "accuracy": (n_right_scoped / n_scoped) if n_scoped else None,
+                "by_mode": by_mode_full,
+            },
+        )
+
     @app.get("/optimize/ga", response_class=HTMLResponse)
     def optimize_ga(
         request: Request,

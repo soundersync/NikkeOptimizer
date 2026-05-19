@@ -27,6 +27,7 @@ Conventions:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlmodel import Session, select
@@ -439,3 +440,89 @@ def run_baseline(session: Session) -> BaselineReport:
         if p is not None:
             preds.append(p)
     return BaselineReport(predictions=preds)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot lookup + freshness helpers — used by the /simulator/validation
+# page to render a per-side freshness badge alongside each prediction.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SnapshotFreshness:
+    captured_at: Optional[datetime]
+    """When the snapshot itself was written (UTC, naive)."""
+    lag_days: Optional[int]
+    """Local-TZ-normalized days between snapshot.captured_at and
+    match.captured_at. ``None`` when one of those is missing."""
+
+    @property
+    def is_fresh(self) -> bool:
+        """True when the snapshot was captured the same local day as
+        the match (lag_days ≤ 0). ``False`` for a stale backfill."""
+        return self.lag_days is not None and self.lag_days <= 0
+
+    @property
+    def label(self) -> str:
+        """'fresh' or '+Nd stale' — for use in the UI badge text."""
+        if self.lag_days is None:
+            return "—"
+        if self.lag_days <= 0:
+            return "fresh"
+        return f"+{self.lag_days}d stale"
+
+
+def _as_local_date(dt: Optional[datetime]):
+    """Treat a naive UTC datetime as UTC, convert to local TZ, return
+    the date. ``None`` passthrough."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone().date()
+
+
+def freshness_for(
+    snapshot_captured_at: Optional[datetime],
+    match_captured_at: Optional[datetime],
+) -> SnapshotFreshness:
+    """Compute the staleness of a snapshot vs a match (local TZ days)."""
+    s_date = _as_local_date(snapshot_captured_at)
+    m_date = _as_local_date(match_captured_at)
+    if s_date is None or m_date is None:
+        return SnapshotFreshness(captured_at=snapshot_captured_at, lag_days=None)
+    return SnapshotFreshness(
+        captured_at=snapshot_captured_at,
+        lag_days=(s_date - m_date).days,
+    )
+
+
+def snapshot_pair_for_match(
+    session: Session, match: ArenaMatch,
+) -> tuple[Optional[RookieArenaSnapshot | RosterSnapshot],
+           Optional[RookieArenaSnapshot | RosterSnapshot]]:
+    """Return ``(user_snapshot, opp_snapshot)`` for a match, picking
+    the right snapshot system per mode.
+
+    Returns ``(None, None)`` for unsupported modes or missing
+    snapshots — caller uses this to render freshness badges next to
+    each prediction. Same lookup logic as
+    ``iter_snapshot_both_matches``.
+    """
+    if match.mode == "champion":
+        user_snap = (
+            session.get(RosterSnapshot, match.user_snapshot_id)
+            if match.user_snapshot_id else None
+        )
+        opp_snap = (
+            session.get(RosterSnapshot, match.opponent_snapshot_id)
+            if match.opponent_snapshot_id else None
+        )
+        return user_snap, opp_snap
+    if match.mode == "rookie":
+        from ..data.config import get_self_username
+        username = get_self_username() or ""
+        user_snap = _find_rookie_user_snapshot(session, match, username)
+        opp_snap = _find_rookie_opponent_snapshot(session, match)
+        return user_snap, opp_snap
+    return None, None

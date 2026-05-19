@@ -1,0 +1,296 @@
+{% extends "_base.html" %}
+{% block title %}Simulator validation — NikkeOptimizer{% endblock %}
+{% block body %}
+<style>
+/* Page-scoped: validation table + freshness pills. */
+.v-summary {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+}
+.v-stat {
+    background: #151a22;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    min-width: 180px;
+}
+.v-stat .big { font-size: 2.2rem; font-weight: 700; line-height: 1; }
+.v-stat .label { color: var(--muted); font-size: 0.85rem; margin-top: 0.3rem; }
+.v-stat.accent { border-left: 3px solid var(--accent); }
+
+.v-filters {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+.v-filters a {
+    padding: 0.25rem 0.75rem;
+    background: #1c2330;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.85rem;
+}
+.v-filters a:hover { color: var(--fg); }
+.v-filters a.active {
+    background: #1e3a5f;
+    border-color: #2a5a8a;
+    color: #c9e7ff;
+}
+
+.v-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.v-table th, .v-table td {
+    padding: 0.5rem 0.6rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+.v-table th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: #11151c;
+    position: sticky;
+    top: 0;
+}
+.v-table tr.verdict-good { background: rgba(28, 95, 48, 0.06); }
+.v-table tr.verdict-bad  { background: rgba(180, 30, 30, 0.06); }
+.v-table tr:hover { background: rgba(56, 189, 248, 0.04); }
+
+.v-verdict {
+    font-size: 1.1rem;
+    font-weight: 700;
+    text-align: center;
+    width: 28px;
+}
+.v-verdict.good { color: #86efac; }
+.v-verdict.bad  { color: #f87171; }
+
+.v-team {
+    color: var(--muted);
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    max-width: 22rem;
+    word-break: break-word;
+}
+.v-team strong { color: var(--fg); font-family: inherit; font-weight: 600; }
+
+.v-outcome {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 1px solid;
+    white-space: nowrap;
+}
+.v-outcome.win  { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.v-outcome.loss { background: #2a1919; color: #f87171; border-color: #5f1e1e; }
+.v-outcome.tie  { background: #1f2228; color: #6b7280; border-color: #2a2f3a; }
+
+.v-clear { font-family: "SF Mono", Menlo, monospace; text-align: right; }
+.v-clear .delta { color: var(--muted); font-size: 0.7rem; }
+
+.v-dps {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.75rem;
+    color: var(--muted);
+    text-align: right;
+    white-space: nowrap;
+}
+.v-dps .big { color: var(--fg); }
+
+.v-fresh {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid;
+    white-space: nowrap;
+}
+.v-fresh.fresh { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.v-fresh.stale { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.v-fresh.unknown { background: #1f2228; color: #6b7280; border-color: #2a2f3a; }
+
+.v-empty {
+    background: #151a22;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    color: var(--muted);
+}
+
+.v-modepill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid #2a2f3a;
+    background: #1f2228;
+    color: var(--muted);
+}
+.v-modepill.champion { color: #c4b5fd; border-color: #4c1d95; background: #1e1432; }
+.v-modepill.rookie   { color: #67e8f9; border-color: #155e75; background: #0e2935; }
+</style>
+
+<h1>Simulator validation</h1>
+<p class="muted">
+    Predicted vs actual outcome for every match where we have a roster
+    snapshot for <strong>both players</strong> (Nikke data + outpost
+    research). The simulator runs ``damage.resolve`` in both directions;
+    the side with the shorter <em>time-to-clear</em> wins. Use this page
+    to watch accuracy trend as we improve the simulator. The freshness
+    badges show how out-of-date each snapshot was vs the match date —
+    stale snapshots indicate the recorded roster may not reflect the
+    roster the player actually fielded.
+</p>
+
+<section class="v-summary">
+    <div class="v-stat accent">
+        <div class="big">
+            {% if accuracy is not none %}{{ "%.1f"|format(accuracy * 100) }}%{% else %}—{% endif %}
+        </div>
+        <div class="label">
+            {{ n_correct }} of {{ n_total }} predicted correctly
+            {% if mode %}<br><span style="color: var(--accent)">filtered: {{ mode }}</span>{% endif %}
+        </div>
+    </div>
+    {% for m, pair in by_mode.items() %}
+    <div class="v-stat">
+        <div class="big">{{ pair[0] }}/{{ pair[1] }}</div>
+        <div class="label">
+            {{ m }} ·
+            {% if pair[1] %}{{ "%.0f"|format(pair[0] / pair[1] * 100) }}%{% else %}—{% endif %}
+        </div>
+    </div>
+    {% endfor %}
+    <div class="v-stat">
+        <div class="big">{{ rows|length }}</div>
+        <div class="label">rows shown (snapshot=both)</div>
+    </div>
+</section>
+
+<div class="v-filters">
+    <span class="muted" style="font-size: 0.8rem; margin-right: 0.5rem">Filter:</span>
+    <a href="/simulator/validation" class="{% if not mode %}active{% endif %}">All</a>
+    <a href="/simulator/validation?mode=rookie" class="{% if mode == 'rookie' %}active{% endif %}">Rookie</a>
+    <a href="/simulator/validation?mode=champion" class="{% if mode == 'champion' %}active{% endif %}">Champion</a>
+</div>
+
+{% if not rows %}
+<div class="v-empty">
+    No snapshot=both matches yet for this filter. Snapshots are captured automatically
+    by the auto-import daemon for every rookie/champion run going forward.
+</div>
+{% else %}
+<table class="v-table">
+    <thead>
+        <tr>
+            <th></th>
+            <th>Match</th>
+            <th>When</th>
+            <th>Actual</th>
+            <th>Pred.</th>
+            <th>User clear / Opp clear</th>
+            <th>User DPS / Opp DPS</th>
+            <th>User team</th>
+            <th>Opp team</th>
+            <th>User snap</th>
+            <th>Opp snap</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in rows %}
+    {% set p = row.p %}
+    {% set m = row.match %}
+    <tr class="{% if p.correct is true %}verdict-good{% elif p.correct is false %}verdict-bad{% endif %}">
+        <td class="v-verdict {% if p.correct is true %}good{% elif p.correct is false %}bad{% endif %}">
+            {% if p.correct is true %}✓{% elif p.correct is false %}✗{% else %}—{% endif %}
+        </td>
+        <td>
+            <a href="/captures/{{ p.match_id }}" style="text-decoration: none">
+                <span class="v-modepill {{ p.mode }}">{{ p.mode }}</span>
+                #{{ p.match_id }}
+            </a>
+            {% if p.round_index %}
+            <div class="muted" style="font-size: 0.7rem">round {{ p.round_index }}</div>
+            {% endif %}
+        </td>
+        <td class="muted" style="font-size: 0.75rem; white-space: nowrap">
+            {{ m.captured_at.strftime("%Y-%m-%d") }}
+        </td>
+        <td>
+            {% if p.actual_outcome == 'win' %}
+                <span class="v-outcome win">WIN</span>
+            {% elif p.actual_outcome == 'loss' %}
+                <span class="v-outcome loss">LOSS</span>
+            {% else %}
+                <span class="v-outcome tie">—</span>
+            {% endif %}
+        </td>
+        <td>
+            {% if p.predicted_winner == 'user' %}
+                <span class="v-outcome win">WIN</span>
+            {% elif p.predicted_winner == 'opp' %}
+                <span class="v-outcome loss">LOSS</span>
+            {% else %}
+                <span class="v-outcome tie">tie</span>
+            {% endif %}
+        </td>
+        <td class="v-clear">
+            {{ "%.1f"|format(p.user_clear_sec) }}s / {{ "%.1f"|format(p.opp_clear_sec) }}s
+            <div class="delta">Δ {{ "%.1f"|format((p.user_clear_sec - p.opp_clear_sec)|abs) }}s</div>
+        </td>
+        <td class="v-dps">
+            <span class="big">{{ "{:,.0f}".format(p.user_team_dps) }}</span><br>
+            {{ "{:,.0f}".format(p.opp_team_dps) }}
+        </td>
+        <td class="v-team">
+            <strong>{{ p.user_username or '—' }}</strong><br>
+            {% for n in m.user_team %}{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </td>
+        <td class="v-team">
+            <strong>{{ p.opponent_username or '—' }}</strong><br>
+            {% for n in m.opponent_team %}{{ n }}{% if not loop.last %} · {% endif %}{% endfor %}
+        </td>
+        <td>
+            {% if row.user_fr.is_fresh %}
+                <span class="v-fresh fresh" title="captured same day as match">{{ row.user_fr.label }}</span>
+            {% elif row.user_fr.lag_days is not none %}
+                <span class="v-fresh stale" title="captured {{ row.user_fr.lag_days }} day(s) after match">{{ row.user_fr.label }}</span>
+            {% else %}
+                <span class="v-fresh unknown">—</span>
+            {% endif %}
+        </td>
+        <td>
+            {% if row.opp_fr.is_fresh %}
+                <span class="v-fresh fresh" title="captured same day as match">{{ row.opp_fr.label }}</span>
+            {% elif row.opp_fr.lag_days is not none %}
+                <span class="v-fresh stale" title="captured {{ row.opp_fr.lag_days }} day(s) after match">{{ row.opp_fr.label }}</span>
+            {% else %}
+                <span class="v-fresh unknown">—</span>
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
+{% endblock %}
