@@ -789,7 +789,12 @@ def _persist_tournament(
         session.commit()
         session.refresh(tournament)
         stats.tournaments += 1
-        stats.tournament_folders.append(storage_root.name)
+        # Include the parent dir so the audit reader can tell the
+        # capture type at a glance: "rookie_arena/2026-05-18_172219"
+        # vs "beta_season_29/champions_duel".
+        stats.tournament_folders.append(
+            f"{storage_root.parent.name}/{storage_root.name}"
+        )
     elif source_root is not None and tournament.source_root != str(source_root):
         # Update traceability if the user re-ingests after moving.
         tournament.source_root = str(source_root)

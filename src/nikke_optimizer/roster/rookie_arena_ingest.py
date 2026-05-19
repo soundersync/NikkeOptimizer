@@ -429,7 +429,11 @@ def _persist_run(
         session.commit()
         session.refresh(tournament)
         stats.tournaments += 1
-        stats.tournament_folders.append(storage_root.name)
+        # Include the parent dir so audit reads as
+        # "rookie_arena/2026-05-18_172219" not just the timestamp.
+        stats.tournament_folders.append(
+            f"{storage_root.parent.name}/{storage_root.name}"
+        )
     elif source_root is not None and tournament.source_root != str(source_root):
         tournament.source_root = str(source_root)
         session.add(tournament)
