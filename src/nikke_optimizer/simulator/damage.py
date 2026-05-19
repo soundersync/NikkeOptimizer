@@ -642,16 +642,33 @@ def resolve(
 
     # Estimated damage dealt per attacker over the match.
     # match_active = min(MATCH_LENGTH, seconds_to_clear) — once the
-    # defender is cleared the attacker stops dealing damage. Burst
-    # payload counted ``bursts_in_match`` times.
+    # defender is cleared the attacker stops dealing damage.
+    #
+    # T1 fix (2026-05-19): cap burst cycles by match_active too. The
+    # team-level ``bursts_in_match`` is still computed against the full
+    # 5-minute window (left alone so defender heal modeling stays as
+    # the current calibration — T5 reworks that), but per-attacker
+    # contribution must respect the actual clear time. Previously a
+    # Helm (Treasure) on a 12s clear got credit for 8 burst cycles,
+    # producing 140M sim vs 744K actual.
     match_active = min(MATCH_LENGTH_SEC, max(0.0, seconds_to_clear))
+    if cycle_period_sec > 0 and first_burst_sec <= match_active:
+        attacker_active_bursts = max(
+            1,
+            int((match_active - first_burst_sec) / cycle_period_sec) + 1,
+        )
+    elif first_burst_sec <= match_active:
+        attacker_active_bursts = 1
+    else:
+        # Defender clears in less than first_burst time — no bursts fire.
+        attacker_active_bursts = 0
     for c in out.attacker_per_member:
         sustained = (
             c.atk_damage_per_sec + c.true_damage_per_sec + c.other_damage_per_sec
         )
         c.estimated_damage_dealt = (
             sustained * match_active
-            + c.burst_payload_per_cycle * bursts_in_match
+            + c.burst_payload_per_cycle * attacker_active_bursts
         )
 
     # Defender per-member rows: HP / shield / heal contribution. The
