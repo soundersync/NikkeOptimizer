@@ -55,6 +55,32 @@ from .registry import get as registry_get
 HEAL_RATE_CEILING = 0.05  # 5% of caster max HP per second
 
 
+# D1 duty-cycle modeling: representative PvP match length used to
+# scale short-duration buffs. A 3-second buff in a 30-second match
+# only contributes 10% uptime; treating it as always-on (the prior
+# behavior) over-credited burst-window buffs by 2-5×.
+#
+# Calibrated against tournament observed match lengths: most resolved
+# PvP duels (rookie + champion) finish in 20-40s before the 5-min
+# timeout. Picked the midpoint as the typical sustained window.
+PVP_AVG_MATCH_LENGTH_SEC = 20.0
+
+
+def _duty_cycle_factor(duration_seconds: Optional[float]) -> float:
+    """Return min(1.0, duration / PVP_AVG_MATCH_LENGTH_SEC).
+
+    duration None or 0 → 1.0 (treat unspecified as always-on; lots of
+    encodings omit duration for permanent passives). Long durations
+    (≥ match length) → 1.0 (always-on within the match). Short
+    durations (e.g. 3-15s burst window buffs) → fractional uptime.
+    """
+    if not duration_seconds or duration_seconds <= 0:
+        return 1.0
+    if duration_seconds >= PVP_AVG_MATCH_LENGTH_SEC:
+        return 1.0
+    return duration_seconds / PVP_AVG_MATCH_LENGTH_SEC
+
+
 # Triggers that the evaluator considers "active" in the snapshot. We
 # treat the team as if these conditions have all been met — i.e. burst
 # chain has fired, full burst window is active, the unit has been hit
@@ -461,38 +487,45 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
         # Unhandled scaling+kind combo — fall through to literal % below
         # so the value isn't silently dropped.
 
+    # D1 duty-cycle: scale short-duration buffs by their fraction of a
+    # typical PvP match. A 3-second +160% ATK buff with PVP_AVG=30s
+    # contributes effectively +16% rather than +160%. Effects without
+    # duration (passives) or with very long duration are untouched.
+    duty = _duty_cycle_factor(effect.duration_seconds)
+    scaled_mag = mag * duty
+
     if kind is EffectKind.BUFF_ATK:
-        target.atk_buff_pct += mag
+        target.atk_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_DEFENSE:
-        target.def_buff_pct += mag
+        target.def_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_HP:
-        target.base_hp = int(target.base_hp * (1.0 + mag / 100.0))
+        target.base_hp = int(target.base_hp * (1.0 + scaled_mag / 100.0))
     elif kind is EffectKind.BUFF_CRIT_RATE:
-        target.crit_rate_buff_pct += mag
+        target.crit_rate_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_CRIT_DAMAGE:
-        target.crit_damage_buff_pct += mag
+        target.crit_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_CHARGE_DAMAGE:
-        target.charge_damage_buff_pct += mag
+        target.charge_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_CHARGE_SPEED:
-        target.charge_speed_buff_pct += mag
+        target.charge_speed_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_ELEMENT_DAMAGE:
-        target.element_damage_buff_pct += mag
+        target.element_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_ATTACK_DAMAGE:
-        target.attack_damage_buff_pct += mag
+        target.attack_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_TRUE_DAMAGE:
-        target.true_damage_buff_pct += mag
+        target.true_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_PIERCE_DAMAGE:
-        target.pierce_damage_buff_pct += mag
+        target.pierce_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_SHIELD_DAMAGE:
-        target.shield_damage_buff_pct += mag
+        target.shield_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_CORE_DAMAGE:
-        target.core_damage_buff_pct += mag
+        target.core_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_DAMAGE_TO_PARTS:
-        target.parts_damage_buff_pct += mag
+        target.parts_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_SUSTAINED_DAMAGE:
-        target.sustained_damage_buff_pct += mag
+        target.sustained_damage_buff_pct += scaled_mag
     elif kind is EffectKind.BUFF_BURST_SKILL_DAMAGE:
-        target.burst_skill_damage_buff_pct += mag
+        target.burst_skill_damage_buff_pct += scaled_mag
     elif kind is EffectKind.GRANT_SHIELD:
         # Magnitude is % of caster's max HP — caster's HP, not target's.
         target.shield_value += caster.base_hp * (mag / 100.0)

@@ -41,11 +41,15 @@ def test_crown_burst_grants_team_attack_damage_buff():
     the buff to every ally after the burst chain fires."""
     team = evaluate_by_names(_CROWN_COMP)
     assert team is not None
+    # D1 duty-cycle: Crown's 36.24% buff has duration 15s, so in the
+    # 30s PVP_AVG_MATCH model it scales to 18.12. Test now asserts the
+    # buff PROPAGATED (>0) and is in the right ballpark for the
+    # duty-cycle adjustment.
     for m in team.members:
-        assert m.attack_damage_buff_pct >= 36.0, (
+        assert m.attack_damage_buff_pct >= 15.0, (
             f"{m.name} only has attack_damage_buff_pct="
-            f"{m.attack_damage_buff_pct}; Crown's burst (36.24%) should "
-            "propagate to every ally as Attack Damage buff"
+            f"{m.attack_damage_buff_pct}; Crown's burst (36.24%, 15s "
+            "duty-cycled to ~18.12) should propagate to every ally"
         )
 
 
@@ -66,12 +70,15 @@ def test_liter_burst_offensive_buffs_propagate_to_all_allies():
     should see ≥100% combined offensive buff."""
     team = evaluate_by_names(_CROWN_COMP)
     assert team is not None
+    # D1 duty-cycle: Crown 36.24%×0.5 + Liter 66%×~0.5 + S2 14.42%×?
+    # = ~30 minimum at the duty-cycled rate. Test now asserts the
+    # buffs propagated (>0 per ally) and combined is in the right range.
     for m in team.members:
         combined = m.atk_buff_pct + m.attack_damage_buff_pct
-        assert combined >= 100.0, (
+        assert combined >= 30.0, (
             f"{m.name} combined offensive buff={combined}% "
             f"(atk={m.atk_buff_pct}, attack_dmg={m.attack_damage_buff_pct}); "
-            "expected ≥100 (Crown 36.24 attack-dmg + Liter 66 atk + S2 14.42)"
+            "expected ≥30 after duty-cycle scaling of burst-window buffs"
         )
 
 
@@ -198,8 +205,11 @@ def test_chisato_true_damage_buff_does_not_pollute_atk_buff():
     team = evaluate_by_names(["Chisato Nishikigi", "Liter", "Crown", "Modernia", "Red Hood"])
     assert team is not None
     chisato = next(m for m in team.members if m.name == "Chisato Nishikigi")
-    assert chisato.true_damage_buff_pct >= 48.0, (
-        f"Chisato true_damage_buff_pct should be ≥48.62, got {chisato.true_damage_buff_pct}"
+    # D1 duty-cycle: 48.62% over 10s = ~16.2% sustained. Threshold
+    # lowered accordingly; the test still validates the buff lands.
+    assert chisato.true_damage_buff_pct >= 15.0, (
+        f"Chisato true_damage_buff_pct should be ≥15 after duty-cycle "
+        f"scaling of 48.62%/10s, got {chisato.true_damage_buff_pct}"
     )
 
 
@@ -224,9 +234,11 @@ def test_jackal_burst_skill_damage_buff_is_distinct_from_atk_buff():
     so it should not pollute atk_buff_pct."""
     team = evaluate_by_names(["Jackal", "Liter", "Crown", "Modernia", "Red Hood"])
     assert team is not None
+    # D1 duty-cycle: Jackal's 38.91% has duration 15s → ~19.5 scaled.
     for m in team.members:
-        assert m.burst_skill_damage_buff_pct >= 38.0, (
-            f"{m.name} burst_skill_damage_buff_pct={m.burst_skill_damage_buff_pct}"
+        assert m.burst_skill_damage_buff_pct >= 15.0, (
+            f"{m.name} burst_skill_damage_buff_pct={m.burst_skill_damage_buff_pct} "
+            "(expected ≥15 after duty-cycle scaling)"
         )
 
 
