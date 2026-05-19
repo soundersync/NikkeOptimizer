@@ -551,7 +551,7 @@ def resolve(
     for m in defender.members:
         if m.shield_absorption_per_sec > 0:
             absorption = m.shield_absorption_per_sec * MATCH_LENGTH_SEC
-            cap = m.shield_value * 20 if m.shield_value > 0 else absorption
+            cap = m.shield_value * 5 if m.shield_value > 0 else absorption
             continuous_shield_total += min(absorption, cap)
     defender_shield_total += continuous_shield_total
     # T5 heals: sum per-caster heal_emit_per_second (each caster's
