@@ -258,9 +258,15 @@
 
 <div class="v-filters">
     <span class="muted" style="font-size: 0.8rem; margin-right: 0.5rem">Filter:</span>
-    <a href="/simulator/validation" class="{% if not mode %}active{% endif %}">All</a>
-    <a href="/simulator/validation?mode=rookie" class="{% if mode == 'rookie' %}active{% endif %}">Rookie</a>
-    <a href="/simulator/validation?mode=champion" class="{% if mode == 'champion' %}active{% endif %}">Champion</a>
+    {% set qstr_mode = '&mode=' + mode if mode else '' %}
+    {% set qstr_res = '&resolver=' + resolver if resolver and resolver != 'damage' else '' %}
+    <a href="/simulator/validation?_=1{{ qstr_res }}" class="{% if not mode %}active{% endif %}">All</a>
+    <a href="/simulator/validation?mode=rookie{{ qstr_res }}" class="{% if mode == 'rookie' %}active{% endif %}">Rookie</a>
+    <a href="/simulator/validation?mode=champion{{ qstr_res }}" class="{% if mode == 'champion' %}active{% endif %}">Champion</a>
+    <span style="margin: 0 0.5rem; color: var(--border)">|</span>
+    <span class="muted" style="font-size: 0.8rem">Resolver:</span>
+    <a href="/simulator/validation?_=1{{ qstr_mode }}" class="{% if not resolver or resolver == 'damage' %}active{% endif %}">damage.resolve</a>
+    <a href="/simulator/validation?resolver=event-loop{{ qstr_mode }}" class="{% if resolver == 'event-loop' %}active{% endif %}">event_loop</a>
 </div>
 
 {% if not rows %}

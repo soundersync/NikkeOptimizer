@@ -1997,6 +1997,7 @@ def create_app(
     def simulator_validation(
         request: Request,
         mode: Optional[str] = None,
+        resolver: Optional[str] = None,
     ) -> Response:
         """Per-match predicted vs actual for snapshot=both ArenaMatch rows.
 
@@ -2005,15 +2006,32 @@ def create_app(
         weight predictions accordingly. Only Champion + Rookie matches
         where BOTH sides have roster data appear; everything else is
         filtered out at iter_snapshot_both_matches.
+
+        ?resolver=event-loop switches to the event-driven simulator
+        with state machines instead of damage.resolve.
         """
         from ..simulator.baseline import (
+            BaselineReport,
             freshness_for,
+            iter_snapshot_both_matches,
+            predict_match,
+            predict_match_event_loop,
             run_baseline,
             snapshot_pair_for_match,
         )
 
+        use_event_loop = (resolver == "event-loop")
+
         with get_session(engine) as session:
-            report = run_baseline(session)
+            if use_event_loop:
+                preds_all = []
+                for m in iter_snapshot_both_matches(session):
+                    p = predict_match_event_loop(session, m)
+                    if p is not None:
+                        preds_all.append(p)
+                report = BaselineReport(predictions=preds_all)
+            else:
+                report = run_baseline(session)
             rows: list[dict] = []
             for pred in report.predictions:
                 if mode in ("rookie", "champion") and pred.mode != mode:
@@ -2091,6 +2109,7 @@ def create_app(
                 "n_correct": n_right_scoped,
                 "accuracy": (n_right_scoped / n_scoped) if n_scoped else None,
                 "by_mode": by_mode_full,
+                "resolver": resolver or "damage",
             },
         )
 
