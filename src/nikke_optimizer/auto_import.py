@@ -232,6 +232,10 @@ def format_audit_entry(
         f"=== {ts} — trigger: {trigger} ===",
         f"Staging:  {staging}",
         f"Tournaments processed: {stats.tournaments}",
+    ]
+    if stats.tournament_folders:
+        lines.append("Folders:  " + ", ".join(stats.tournament_folders))
+    lines.extend([
         (
             f"DB:       {stats.tournaments} tournament(s), "
             f"{stats.groups} group(s), {stats.matches} match(es), "
@@ -242,7 +246,7 @@ def format_audit_entry(
             f"skipped={stats.files_skipped} "
             f"wrong_size={len(stats.files_wrong_size)}"
         ),
-    ]
+    ])
     if stats.files_wrong_size:
         lines.append("Wrong-dim PNGs (left in staging, not copied):")
         for path, size in stats.files_wrong_size[:20]:
@@ -358,6 +362,7 @@ def _merge_stats(into: IngestStats, other: IngestStats) -> None:
     into.groups += other.groups
     into.matches += other.matches
     into.screenshots += other.screenshots
+    into.tournament_folders.extend(other.tournament_folders)
     into.files_copied += other.files_copied
     into.files_skipped += other.files_skipped
     into.files_moved_deleted += other.files_moved_deleted
@@ -608,7 +613,8 @@ def daemon_status() -> DaemonStatus:
 @dataclass
 class AuditEntry:
     """One parsed stanza from the audit log."""
-    when_iso: str              # raw timestamp string from the header
+    when_iso: str              # raw timestamp string from the header ("… UTC")
+    when_local: str            # converted to system local time, e.g. "5:22 PM PDT"
     trigger: str               # "startup" / "FolderCompletion(folder=…)" / …
     body: str                  # full stanza minus the `=== … ===` header line
 
@@ -616,6 +622,27 @@ class AuditEntry:
 _AUDIT_HEADER_RE = re.compile(
     r"^=== (?P<when>.+?) — trigger: (?P<trigger>.+?) ===\s*$", re.MULTILINE,
 )
+_AUDIT_TS_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC$"
+)
+
+
+def _to_local(when_iso: str) -> str:
+    """Convert an audit-stanza UTC timestamp ('YYYY-MM-DD HH:MM:SS UTC')
+    to the system's local time. Falls back to the original string when
+    parsing fails so the UI still renders something."""
+    m = _AUDIT_TS_RE.match(when_iso.strip())
+    if m is None:
+        return when_iso
+    try:
+        dt = datetime.strptime(m.group("ts"), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return when_iso
+    local = dt.astimezone()
+    # "2026-05-18 5:22 PM PDT" — date + 12-hour clock + tz abbreviation.
+    return local.strftime("%Y-%m-%d %-I:%M:%S %p %Z")
 
 
 def parse_audit_log_entries(
@@ -638,8 +665,10 @@ def parse_audit_log_entries(
     for i, m in enumerate(headers):
         body_start = m.end()
         body_end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        when_iso = m.group("when").strip()
         entries.append(AuditEntry(
-            when_iso=m.group("when").strip(),
+            when_iso=when_iso,
+            when_local=_to_local(when_iso),
             trigger=m.group("trigger").strip(),
             body=text[body_start:body_end].strip("\n"),
         ))

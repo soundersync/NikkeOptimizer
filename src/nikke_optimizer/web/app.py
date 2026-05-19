@@ -4357,17 +4357,26 @@ def create_app(
 
     @app.get("/auto-import/stream")
     def auto_import_stream() -> Response:
-        """SSE endpoint: tails the audit log and emits each appended line
-        as a `data:` event. Handles file rotation (inode change) and
-        sends a `:keepalive` comment every poll cycle when idle so
-        proxies don't drop the connection.
+        """SSE endpoint: tails the daemon's **stderr** log and emits
+        each appended line as a ``data:`` event.
+
+        Why stderr instead of the audit log: the audit log only writes
+        one stanza per *completed* run, so a user staring at the UI
+        mid-ingest sees nothing for 5-10 minutes. Stderr has the
+        live progress (PaddleOCR throughput, scrape per-player ticks,
+        polling INFO logs, Python tracebacks). The completed audit
+        stanzas show up in the "Recent runs" panel below.
+
+        Handles file rotation (inode change) and sends a ``:keepalive``
+        comment every poll cycle when idle so proxies don't drop the
+        connection.
         """
         from .. import auto_import as ai
         from fastapi.responses import StreamingResponse
         import time as _time
 
         def _gen():
-            path = ai.DEFAULT_LOG_PATH
+            path = ai.DEFAULT_LOG_PATH.with_name("auto_import.stderr.log")
             last_size = path.stat().st_size if path.exists() else 0
             last_inode = path.stat().st_ino if path.exists() else None
             yield ":connected\n\n"

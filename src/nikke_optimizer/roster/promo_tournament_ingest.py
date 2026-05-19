@@ -128,6 +128,11 @@ class IngestStats:
     ocr_fields: int = 0
     ocr_skipped: int = 0
     player_data_sidecars: int = 0
+    # Storage-folder basenames of NEW tournaments persisted this run
+    # (e.g. "2026-05-18_172219" for rookie, "2026-05-17 - Champions"
+    # for champions). Surfaced in the audit stanza so a user reading
+    # the log knows which capture was ingested — counts alone hide that.
+    tournament_folders: list[str] = field(default_factory=list)
     # Scrape pass — populated only when ingest_root(scrape_player_data=True).
     scrape_attempted: int = 0          # tournaments where the scrape loop ran
     scrape_snapshots_written: int = 0  # new RosterSnapshot rows landed
@@ -784,6 +789,7 @@ def _persist_tournament(
         session.commit()
         session.refresh(tournament)
         stats.tournaments += 1
+        stats.tournament_folders.append(storage_root.name)
     elif source_root is not None and tournament.source_root != str(source_root):
         # Update traceability if the user re-ingests after moving.
         tournament.source_root = str(source_root)

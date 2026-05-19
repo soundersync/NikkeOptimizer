@@ -156,7 +156,7 @@
     {% for e in entries %}
     <div class="ai-entry">
         <div>
-            <span class="ai-when">{{ e.when_iso }}</span>
+            <span class="ai-when" title="{{ e.when_iso }}">{{ e.when_local }}</span>
             ·
             <span class="ai-trigger">{{ e.trigger }}</span>
         </div>
