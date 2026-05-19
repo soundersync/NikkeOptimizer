@@ -376,10 +376,10 @@ def predict_match(
         res_o.attacker_per_member, res_u.defender_per_member,
     )
 
-    # Champion-only ground truth from the duel result screen.
-    actuals = None
-    if match.mode == "champion":
-        actuals = champion_actuals_for_match(session, match)
+    # Per-Nikke ground truth from the duel result screen — works
+    # for both Champion and Rookie (same screen schema). Rookie just
+    # omits the HP% field.
+    actuals = actuals_for_match(session, match)
 
     return MatchPrediction(
         match_id=match.id,
@@ -603,40 +603,72 @@ class ChampionMatchActuals:
     screenshot_id: Optional[int] = None
 
 
-def champion_actuals_for_match(
+def actuals_for_match(
     session: Session, match: ArenaMatch,
 ) -> Optional[ChampionMatchActuals]:
-    """Fetch the captured per-Nikke results for a Champion ArenaMatch.
+    """Fetch captured per-Nikke results for an ArenaMatch.
 
-    Joins ArenaMatch → PromoMatch (via session_id ``champion-pm{id}``)
-    → ``PromoMatchScreenshot`` (kind=results_duel, matching round_no) →
-    ``PromoExtractedField`` rows. Returns sides aligned to user/opp
-    via ``is_user_lineup`` on the match.
+    Handles both modes — the results-duel screenshot format is
+    pixel-identical between Champion and Rookie Arena (see
+    rookie_arena_regions.py docstring), so the same extraction
+    schema applies. Differences:
 
-    Returns ``None`` if mode != champion, session_id missing, or no
-    duel screenshot was extracted for this round.
+      * Champion: session_id = ``"champion-pm{promo_match_id}"`` →
+        PromoMatch.id directly, with round_no = match.round_index
+      * Rookie: session_id = ``"rookie-run-{tournament_id}"`` →
+        PromoMatch via (tournament_id, match_no=round_index),
+        with results_duel.round_no = None (single screenshot per
+        rookie battle)
+      * Rookie ``hp`` field is empty (results screen omits HP%);
+        all other fields populated identically
+
+    Returns ``None`` if no duel screenshot was extracted for this
+    match.
     """
-    if match.mode != "champion" or not match.session_id:
-        return None
-    if not match.session_id.startswith("champion-pm"):
-        return None
-    try:
-        promo_match_id = int(match.session_id[len("champion-pm"):])
-    except ValueError:
+    if match.mode not in ("champion", "rookie") or not match.session_id:
         return None
 
     from ..data.models import (
         Character,
         PromoExtractedField,
+        PromoMatch,
         PromoMatchScreenshot,
     )
-    duel = session.exec(
-        select(PromoMatchScreenshot).where(
-            PromoMatchScreenshot.match_id == promo_match_id,
-            PromoMatchScreenshot.kind == "results_duel",
-            PromoMatchScreenshot.round_no == match.round_index,
-        )
-    ).first()
+
+    duel: Optional[PromoMatchScreenshot] = None
+    if match.session_id.startswith("champion-pm"):
+        try:
+            promo_match_id = int(match.session_id[len("champion-pm"):])
+        except ValueError:
+            return None
+        duel = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.match_id == promo_match_id,
+                PromoMatchScreenshot.kind == "results_duel",
+                PromoMatchScreenshot.round_no == match.round_index,
+            )
+        ).first()
+    elif match.session_id.startswith("rookie-run-"):
+        try:
+            tournament_id = int(match.session_id[len("rookie-run-"):])
+        except ValueError:
+            return None
+        if match.round_index is None:
+            return None
+        pm = session.exec(
+            select(PromoMatch).where(
+                PromoMatch.tournament_id == tournament_id,
+                PromoMatch.match_no == match.round_index,
+            )
+        ).first()
+        if pm is None:
+            return None
+        duel = session.exec(
+            select(PromoMatchScreenshot).where(
+                PromoMatchScreenshot.match_id == pm.id,
+                PromoMatchScreenshot.kind == "results_duel",
+            )
+        ).first()
     if duel is None:
         return None
 

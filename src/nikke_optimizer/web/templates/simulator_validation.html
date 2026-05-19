@@ -374,11 +374,12 @@
                         <thead>
                             <tr>
                                 <th class="name" style="text-align:left">Nikke</th>
-                                <th>sim dmg</th>
-                                {% if row.has_actuals %}<th>actual dmg</th><th>Δ</th>{% endif %}
+                                <th>sim dmg dealt</th>
+                                {% if row.has_actuals %}<th>actual dmg dealt</th><th>Δ</th>{% endif %}
+                                {% if row.has_actuals %}<th>actual dmg taken</th>{% endif %}
                                 <th>sim heal</th>
                                 {% if row.has_actuals %}<th>actual heal</th>{% endif %}
-                                {% if row.has_actuals %}<th>actual taken</th><th>HP %</th>{% endif %}
+                                {% if p.mode == 'champion' %}<th>HP %</th>{% endif %}
                             </tr>
                         </thead>
                         <tbody>
@@ -407,6 +408,9 @@
                                         {% if diff >= 0 %}+{% endif %}{{ "{:,.0f}".format(diff) }}
                                     {% else %}—{% endif %}
                                 </td>
+                                <td class="actual">
+                                    {% if cell.actual and cell.actual.damage_taken is not none %}{{ "{:,d}".format(cell.actual.damage_taken) }}{% else %}—{% endif %}
+                                </td>
                                 {% endif %}
                                 <td class="sim">
                                     {% if cell.sim %}{{ "{:,.0f}".format(cell.sim.estimated_heal_performed) }}{% else %}—{% endif %}
@@ -415,9 +419,8 @@
                                 <td class="actual">
                                     {% if cell.actual and cell.actual.heal_performed is not none %}{{ "{:,d}".format(cell.actual.heal_performed) }}{% else %}—{% endif %}
                                 </td>
-                                <td class="actual">
-                                    {% if cell.actual and cell.actual.damage_taken is not none %}{{ "{:,d}".format(cell.actual.damage_taken) }}{% else %}—{% endif %}
-                                </td>
+                                {% endif %}
+                                {% if p.mode == 'champion' %}
                                 <td class="hp {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{% if cell.actual.hp_remaining_pct > 0 %}alive{% else %}dead{% endif %}{% endif %}">
                                     {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{{ "%.0f"|format(cell.actual.hp_remaining_pct) }}%{% else %}—{% endif %}
                                 </td>
@@ -432,9 +435,9 @@
                 </div>
                 {% endfor %}
             </div>
-            {% if not row.has_actuals %}
+            {% if p.mode == 'rookie' %}
             <p class="muted" style="font-size: 0.75rem; margin: 0.5rem 0 0 0; text-align: center">
-                Rookie Arena results screen doesn't show per-Nikke stats — only sim estimates shown.
+                Rookie Arena results screen doesn't show HP remaining %; all other stats are real-captured.
             </p>
             {% endif %}
         </td>
