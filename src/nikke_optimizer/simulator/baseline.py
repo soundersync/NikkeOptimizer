@@ -213,7 +213,7 @@ def _predict_for_names(
         grade = data.get("limit_break")
         if grade is None:
             grade = 3 if core >= 1 else 0
-        p_atk, p_hp, p_def, _power = _predict_base_stats(
+        p_atk, p_hp, p_def, p_power = _predict_base_stats(
             char.name,
             level=level,
             grade=grade,
@@ -225,13 +225,26 @@ def _predict_for_names(
             char_class=_lookup_char_class(char.name),
             manufacturer=char.manufacturer.value if char.manufacturer else None,
         )
+        # D4 gear estimate from snapshot power. _predict_base_stats
+        # returns level/grade/core-only stats (no gear/cube/treasure
+        # bonuses since we lack that data for unowned chars). The
+        # snapshot's ``power`` field is the in-game combat power
+        # which DOES include gear. Use the ratio to scale up base
+        # stats — assumes ATK/HP/DEF scale roughly together with
+        # power. Falls back to no-scaling when power is missing.
+        snap_power = data.get("power") or data.get("arena_combat")
+        scale = 1.0
+        if snap_power and p_power and p_power > 0:
+            # Cap the scale at 4x as a sanity bound; tournament chars
+            # are typically 2-3x level-only power.
+            scale = max(1.0, min(4.0, snap_power / p_power))
         stats: dict[str, int] = {}
         if p_atk:
-            stats["base_atk"] = int(p_atk)
+            stats["base_atk"] = int(p_atk * scale)
         if p_hp:
-            stats["base_hp"] = int(p_hp)
+            stats["base_hp"] = int(p_hp * scale)
         if p_def:
-            stats["base_def"] = int(p_def)
+            stats["base_def"] = int(p_def * scale)
         if stats:
             out[name] = stats
     return out
