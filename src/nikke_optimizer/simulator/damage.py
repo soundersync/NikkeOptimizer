@@ -137,6 +137,32 @@ MATCH_LENGTH_SEC = 300.0
 # dramatically; the variation captures the per-class personality.
 DAMAGE_PER_SHOT_FRACTION = 0.10  # legacy fallback for None / unknown weapon class
 
+# D3 role-based DPS scaling. Pure attackers fire constantly; supporters
+# and defenders spend most of their time managing skills/shields/heals
+# rather than shooting. This scaling reflects observed behavior in
+# captured Champion/Rookie match data — Anis: Sparkling Summer (a
+# Supporter/Buffer) deals ~52 damage in a match where an Attacker
+# deals ~5M, despite similar ATK stats.
+ROLE_DPS_MULTIPLIER: dict[str, float] = {
+    "attacker": 1.0,
+    "buffer":   0.2,
+    "supporter":0.15,
+    "defender": 0.4,
+    "shielder": 0.3,
+    "taunter":  0.4,
+    "healer":   0.2,
+    "debuffer": 0.5,
+}
+DEFAULT_ROLE_DPS_MULT = 0.7  # for chars with no role tag (treat as semi-DPS)
+
+
+def _role_dps_multiplier(role: Optional[str]) -> float:
+    """Map a Nikke's first role tag to a damage-output scaling factor."""
+    if not role:
+        return DEFAULT_ROLE_DPS_MULT
+    return ROLE_DPS_MULTIPLIER.get(role.lower(), DEFAULT_ROLE_DPS_MULT)
+
+
 WEAPON_DAMAGE_PER_SECOND_FRACTION: dict[str, float] = {
     # Per-shot ATK fraction × fire rate per sec, calibrated against
     # nikke.gg published damage-formula numbers and West Games DPS
@@ -508,16 +534,26 @@ def resolve(
         )
     else:
         bursts_in_match = 1
-    # T5 shields: refresh up to 2× per match. Most NIKKE shields are
-    # bursty (one-shot per burst cycle) but second-cycle shields
-    # frequently overlap with first-cycle ones already in flight, so
-    # raw cycle multiplication over-credits. Cap=2 is a conservative
-    # "initial + one refresh" model that materially improves over the
-    # current cap=1 without ballooning defender EHP.
+    # T5 + D3 shields: combine two models.
+    # One-shot shields (cap=2 burst-cycle refresh): bursty shields from
+    # ON_BURST_USE / ON_FULL_BURST_START fire once per burst cycle.
+    # Continuous shields (Centi-style, < 30s duration ALWAYS triggers):
+    # use per-second absorption rate × match_active (with a cap so a
+    # single small shield doesn't soak unlimited damage).
     shield_refresh_cap = min(2, bursts_in_match)
     defender_shield_total = sum(
         m.shield_value * shield_refresh_cap for m in defender.members
     )
+    # D3 continuous shield absorption: rate × match_active, capped at
+    # 10× per-cycle value per character to prevent runaway in very long
+    # matches.
+    continuous_shield_total = 0.0
+    for m in defender.members:
+        if m.shield_absorption_per_sec > 0:
+            absorption = m.shield_absorption_per_sec * MATCH_LENGTH_SEC
+            cap = m.shield_value * 20 if m.shield_value > 0 else absorption
+            continuous_shield_total += min(absorption, cap)
+    defender_shield_total += continuous_shield_total
     # T5 heals: sum per-caster heal_emit_per_second (each caster's
     # OWN output rate) instead of max per-target heal_per_second
     # (which only credits a single source — multi-healer comps were
@@ -577,12 +613,17 @@ def resolve(
             else fallback_per_shot
         )
 
+        # D3 role-based DPS scaling — supporters / buffers fire less
+        # often than attackers in real PvP because their cycle is
+        # dominated by skill activation (buffing) rather than shooting.
+        role_mult = _role_dps_multiplier(m.role)
+
         # ATK-channel damage per second (mitigated by defender DEF).
         atk_mult = _per_member_atk_damage_multiplier(
             m, defender_elements=[d.element for d in defender.members]
         )
         def_factor = max(def_floor, _def_reduction_factor(eff_atk, defender_avg_def))
-        atk_per_sec = eff_atk * atk_mult * def_factor * weapon_factor
+        atk_per_sec = eff_atk * atk_mult * def_factor * weapon_factor * role_mult
         atk_dps += atk_per_sec
         contrib.atk_damage_per_sec = atk_per_sec
 
@@ -590,7 +631,7 @@ def resolve(
         # Full Burst / charge / range / element-advantage / crit
         # layers per nikke.gg/damage-formula. Only scales with ATK ×
         # td% × element-damage % × shot rate.
-        true_per_sec = _true_damage_dps(m, weapon_factor)
+        true_per_sec = _true_damage_dps(m, weapon_factor) * role_mult
         true_dps += true_per_sec
         contrib.true_damage_per_sec = true_per_sec
 
@@ -603,7 +644,7 @@ def resolve(
             + shield_credit / 100.0 * 0.3
             + (m.sustained_damage_buff_pct / 100.0) * 0.2
         )
-        other_per_sec = eff_atk * other_mult * weapon_factor
+        other_per_sec = eff_atk * other_mult * weapon_factor * role_mult
         other_dps += other_per_sec
         contrib.other_damage_per_sec = other_per_sec
 
@@ -735,16 +776,46 @@ def resolve(
     )
 
     damage_absorbed: list[float] = []
+    death_times: list[float] = []
     remaining_focused = focused_pool
+    cumulative_focused_dealt = 0.0
+    # Attacker damage rate (per-sec) — used to convert cumulative
+    # absorption to death-time. Total attacker damage spreads evenly
+    # across match_active.
+    attacker_rate_per_sec = attacker_total_damage / max(0.1, match_active)
+    leak_rate_per_sec = (
+        attacker_total_damage * BACKROW_LEAK_FRACTION
+        / n_defenders / max(0.1, match_active)
+    )
     for d in defender.members:
         max_hp = d.base_hp + d.flat_hp_bonus
         effective_hp = max_hp + d.shield_value + per_defender_heal_share
-        # This slot eats up to its effective_hp from the focused pool.
+        # Sequential focus-fire: this slot eats up to its effective_hp
+        # from the focused pool. The slot dies at the moment cumulative
+        # focused damage delivered reaches their effective_hp + leaks
+        # they've also been taking.
         from_focused = min(remaining_focused, effective_hp)
         remaining_focused -= from_focused
-        damage_absorbed.append(from_focused + leak_per_member)
+        absorbed = from_focused + leak_per_member
+        damage_absorbed.append(absorbed)
+        # Death time: if this slot was killed by the focused pool, they
+        # die when the focused-damage rate has delivered cumulative_dealt
+        # + their effective_hp. Otherwise (slot survived) → match_active.
+        if from_focused >= effective_hp - leak_per_member:
+            # Focused pool covers their HP. They die at the point that
+            # accumulated focused damage reaches the boundary.
+            cumulative_focused_dealt += from_focused
+            # Effective focus rate = focused_pool / match_active.
+            focus_rate = (focused_pool / max(0.1, match_active)) if focused_pool > 0 else 0
+            if focus_rate > 0:
+                death_time = cumulative_focused_dealt / focus_rate
+                death_times.append(min(match_active, death_time))
+            else:
+                death_times.append(match_active)
+        else:
+            death_times.append(match_active)
 
-    for d, absorbed in zip(defender.members, damage_absorbed):
+    for d, absorbed, time_alive in zip(defender.members, damage_absorbed, death_times):
         max_hp = d.base_hp + d.flat_hp_bonus
         per_defender_damage_in = absorbed
         net_damage_taken = max(
@@ -755,15 +826,6 @@ def resolve(
             max(0.0, min(100.0, (max_hp - net_damage_taken) / max_hp * 100.0))
             if max_hp > 0 else 0.0
         )
-        # T4 — time alive in seconds. Damage arrives at a constant rate
-        # over match_active; when net_damage_taken exceeds the defender's
-        # effective_hp, they die at that fraction of the match.
-        effective_hp = max_hp + d.shield_value + per_defender_heal_share
-        if net_damage_taken > 0 and per_defender_damage_in > effective_hp:
-            damage_rate = per_defender_damage_in / max(0.1, match_active)
-            time_alive = effective_hp / damage_rate
-        else:
-            time_alive = match_active
         contrib = MemberContribution(
             name=d.name,
             weapon_class=d.weapon_class,

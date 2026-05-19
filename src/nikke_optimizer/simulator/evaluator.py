@@ -156,6 +156,15 @@ class NikkeSnapshot:
     shield_value: float = 0.0
     heal_per_second: float = 0.0
     heal_duration: float = 0.0
+    # D3 — continuous shield absorption rate for shields that REFRESH
+    # within the match. A 7%-HP shield with duration=5s refreshes every
+    # 5s in-game (60 cycles in a 5min match); its effective absorption
+    # rate is shield_value / duration. This is summed alongside the
+    # one-shot ``shield_value`` so refreshing-shield characters like
+    # Centi (Treasure) get proper credit for continuous damage soak.
+    # Only set when duration_seconds is short (< 30s); long-duration
+    # shields are treated as one-shot.
+    shield_absorption_per_sec: float = 0.0
 
     # Source-attribution fields. ``heal_per_second`` is the rate the
     # snapshot RECEIVES (max across all incoming heal effects, since
@@ -528,7 +537,15 @@ def _apply_to_one(effect: Effect, target: NikkeSnapshot, caster: NikkeSnapshot) 
         target.burst_skill_damage_buff_pct += scaled_mag
     elif kind is EffectKind.GRANT_SHIELD:
         # Magnitude is % of caster's max HP — caster's HP, not target's.
-        target.shield_value += caster.base_hp * (mag / 100.0)
+        shield_amount = caster.base_hp * (mag / 100.0)
+        target.shield_value += shield_amount
+        # D3 — if this shield has a short duration (< 30s) it's most
+        # likely a refreshing shield (Centi Treasure's 7%/5s pattern).
+        # Track continuous absorption rate so damage.resolve can credit
+        # the full refresh cycle, not just one-shot value.
+        dur = effect.duration_seconds or 0.0
+        if 0 < dur < 30.0:
+            target.shield_absorption_per_sec += shield_amount / dur
     elif kind is EffectKind.HEAL_PER_SECOND:
         # Most NIKKE heals are %-of-caster-HP per second. The DSL
         # encoders didn't always set scaling_source, but the magnitude

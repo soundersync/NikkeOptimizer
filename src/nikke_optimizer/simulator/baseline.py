@@ -462,18 +462,18 @@ def _merge_member_views(
             c.atk_damage_per_sec + c.true_damage_per_sec + c.other_damage_per_sec
         )
         # Damping: each attacker stops at min(actual_match_end, their_death).
-        # Re-derive death time using the actual match end as the budget so
-        # we don't carry over the per-resolve match_active stale value.
+        # Use the sequential-focus-fire death time stored on the defender
+        # contribution (T4 + D2). The per-defender estimated_time_alive_sec
+        # is derived from cumulative focused damage; slot 1 dies first,
+        # slot 5 last.
         d_info = defense_by_name.get(c.name)
         time_alive = actual_match_end
-        if d_info is not None and d_info.damage_in_per_sec > 0:
-            effective_hp = d_info.base_hp + d_info.flat_hp_bonus + d_info.shield_value + d_info.heal_share_per_match
-            damage_dealt_to_them = d_info.damage_in_per_sec * actual_match_end
-            if damage_dealt_to_them > effective_hp:
-                time_alive = min(
-                    actual_match_end,
-                    effective_hp / d_info.damage_in_per_sec,
-                )
+        if d_info is not None:
+            # Scale the death time by actual_match_end / defense_res match
+            # length to handle the case where defense_res's match_active
+            # was longer than actual_match_end.
+            ratio = actual_match_end / max(0.1, defense_res.match_active_sec)
+            time_alive = min(actual_match_end, d_info.estimated_time_alive_sec * ratio)
         if cycle_period > 0 and first_burst <= time_alive:
             bursts_fired = max(
                 1,
