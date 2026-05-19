@@ -205,6 +205,35 @@ class _RoundPayload:
     capture_quality: dict
 
 
+def _read_overview(
+    session: Session, shots: list[PromoMatchScreenshot],
+) -> dict:
+    """Read the per-match aggregate fields off a results_overview
+    screenshot. Returns a dict with optional ``left_name``,
+    ``right_name``, ``winner_name``, and per-round
+    ``round_N_winner`` ("left"/"right"). Empty dict when no overview
+    was captured / no OCR.
+    """
+    overview = next(
+        (s for s in shots if s.kind == "results_overview"), None,
+    )
+    if overview is None:
+        return {}
+    out: dict = {}
+    for f in session.exec(
+        select(PromoExtractedField).where(
+            PromoExtractedField.screenshot_id == overview.id,
+        )
+    ).all():
+        if f.region_slug in ("left_name", "right_name", "winner_name"):
+            if f.text and f.text.strip():
+                out[f.region_slug] = f.text.strip()
+        elif f.region_slug.endswith("_winner") and f.region_slug.startswith("round"):
+            if f.normalized in ("left", "right"):
+                out[f.region_slug] = f.normalized
+    return out
+
+
 def _build_round_payloads(
     session: Session, match: PromoMatch, char_name_by_id: dict[int, str],
 ) -> list[_RoundPayload]:
@@ -236,13 +265,29 @@ def _build_round_payloads(
     if not duel_by_round:
         return []
 
-    # Identify players from any available loadout per side.
+    # Overview screen — fallback source for player names (works for
+    # results-only matches where no loadouts were captured) AND
+    # cross-check signal for per-round outcomes.
+    overview = _read_overview(session, list(shots))
+
+    # Identify players from any available loadout per side, falling
+    # back to the overview's left_name/right_name when loadouts didn't
+    # populate them.
     top_name = _player_name_from_loadouts(
         session, sorted(loadouts_by_pos["top"].values(), key=lambda s: s.id),
     )
     bottom_name = _player_name_from_loadouts(
         session, sorted(loadouts_by_pos["bottom"].values(), key=lambda s: s.id),
     )
+    # When loadout-side names are missing, derive from overview's
+    # left_name/right_name. Mapping (top↔left vs top↔right) gets
+    # resolved below from team-name overlap; for the no-loadout case
+    # there's no team to compare against, so we default top=left
+    # (matches the disk convention `player_top` = left-side player).
+    if top_name is None and overview.get("left_name"):
+        top_name = overview["left_name"]
+    if bottom_name is None and overview.get("right_name"):
+        bottom_name = overview["right_name"]
 
     self_name = (get_self_username() or "").strip()
     self_upper = self_name.upper() if self_name else ""
@@ -318,16 +363,23 @@ def _build_round_payloads(
             (d or lo) for d, lo in zip(opp_names_duel, opp_names_lo)
         ]
 
-        # Outcome via the existing disconnect detector.
+        # Outcome — prefer the overview's round_N_winner signal when
+        # available (it's the in-game UI's own classification), fall
+        # back to disconnect detection on the duel screen.
         user_dc = _disconnect_flags_from_results(by_slug, user_duel_side)
         opp_dc = _disconnect_flags_from_results(by_slug, opp_duel_side)
         outcome = _outcome_from_disconnects(user_dc, opp_dc)
+        overview_winner = overview.get(f"round{round_no}_winner")
+        if overview_winner in ("left", "right") and outcome is None:
+            outcome = "win" if overview_winner == user_duel_side else "loss"
 
         capture_quality = {
             "user_team_disconnect": user_dc,
             "opponent_team_disconnect": opp_dc,
             "user_position": user_pos,         # "top"/"bottom" on disk
             "user_duel_side": user_duel_side,  # "left"/"right" in duel
+            "overview_round_winner": overview_winner,
+            "overview_match_winner": overview.get("winner_name"),
         }
 
         payloads.append(_RoundPayload(
