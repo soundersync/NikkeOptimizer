@@ -497,6 +497,57 @@ def create_app(
     # Arena captures
     # ------------------------------------------------------------------
 
+    def _arena_match_snapshot_status(row: ArenaMatch, session) -> str:
+        """Return 'both' / 'user' / 'opp' / 'none' for the row's
+        snapshot completeness, **dispatched by mode** because Champions
+        and Rookie use different snapshot systems:
+
+          * Champion: ``user_snapshot_id`` + ``opponent_snapshot_id``
+            FKs point at ``RosterSnapshot`` rows (with character data
+            verified at build time by ``_find_snapshot_id``).
+          * Rookie: user side is the live ``OwnedCharacter`` table
+            (always present; refreshed daily by the post-rookie
+            self-refresh hook). Opponent side is
+            ``RookieArenaSnapshot`` keyed on
+            ``(run_date, player_username)`` with ≥1 char row.
+        """
+        if row.mode == "rookie":
+            from ..data.models import (
+                RookieArenaSnapshot, RookieArenaSnapshotCharacter,
+            )
+            user_ok = True  # OwnedCharacter is always present for the user
+            opp_ok = False
+            opp_name = (row.opponent_username or "").strip().upper()
+            if opp_name and row.captured_at is not None:
+                ras = session.exec(
+                    select(RookieArenaSnapshot).where(
+                        RookieArenaSnapshot.run_date == row.captured_at.date(),
+                    )
+                ).all()
+                for r in ras:
+                    if (r.player_username or "").strip().upper() != opp_name:
+                        continue
+                    has_chars = session.exec(
+                        select(RookieArenaSnapshotCharacter).where(
+                            RookieArenaSnapshotCharacter.snapshot_id == r.id
+                        ).limit(1)
+                    ).first() is not None
+                    if has_chars:
+                        opp_ok = True
+                        break
+        else:
+            # Champion (or any future mode that uses the FK columns).
+            user_ok = row.user_snapshot_id is not None
+            opp_ok = row.opponent_snapshot_id is not None
+
+        if user_ok and opp_ok:
+            return "both"
+        if user_ok:
+            return "user"
+        if opp_ok:
+            return "opp"
+        return "none"
+
     @app.get("/captures", response_class=HTMLResponse)
     def captures_list(
         request: Request,
@@ -551,32 +602,14 @@ def create_app(
                 rows = [r for r in rows if not r.outcome]
             elif outcome in ("win", "loss", "timeout"):
                 rows = [r for r in rows if r.outcome == outcome]
-            # Snapshot-completeness filter (Champions builder slice).
-            # Rookie matches don't use snapshot FKs today, so the
-            # `both`/`user`/`opp` buckets are effectively Champion-only.
-            if snapshots == "both":
+            # Snapshot-completeness filter — dispatched by mode via the
+            # _arena_match_snapshot_status helper so rookie rows (which
+            # use RookieArenaSnapshot + live OwnedCharacter instead of
+            # the RosterSnapshot FKs Champions uses) also surface.
+            if snapshots in ("both", "user", "opp", "none"):
                 rows = [
                     r for r in rows
-                    if r.user_snapshot_id is not None
-                    and r.opponent_snapshot_id is not None
-                ]
-            elif snapshots == "user":
-                rows = [
-                    r for r in rows
-                    if r.user_snapshot_id is not None
-                    and r.opponent_snapshot_id is None
-                ]
-            elif snapshots == "opp":
-                rows = [
-                    r for r in rows
-                    if r.opponent_snapshot_id is not None
-                    and r.user_snapshot_id is None
-                ]
-            elif snapshots == "none":
-                rows = [
-                    r for r in rows
-                    if r.user_snapshot_id is None
-                    and r.opponent_snapshot_id is None
+                    if _arena_match_snapshot_status(r, session) == snapshots
                 ]
             # Time-window filter for the "Awaiting results" workflow.
             if since in ("7d", "30d"):
@@ -590,6 +623,10 @@ def create_app(
                 rows = [r for r in rows if _aware(r.captured_at) >= cutoff]
             rows.sort(key=lambda r: r.id or 0, reverse=True)
             row_warnings = {r.id: per_row_warnings(r) for r in rows if r.id is not None}
+            row_snap_status = {
+                r.id: _arena_match_snapshot_status(r, session)
+                for r in rows if r.id is not None
+            }
 
             # Session-grouped view: when filtering by session_kind, surface
             # the unique sessions (one row per session_id, with summary
@@ -686,6 +723,7 @@ def create_app(
                 "since": since,
                 "snapshots": snapshots,
                 "row_warnings": row_warnings,
+                "row_snap_status": row_snap_status,
                 "set_warnings": set_warnings,
                 "session_summaries": session_summaries,
                 "review_groups": review_groups,

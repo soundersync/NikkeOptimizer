@@ -258,14 +258,15 @@ button.danger:hover { background: #7a1010; }
                 {% else %}—{% endif %}
             </td>
             <td>
-                {% if c.user_snapshot_id and c.opponent_snapshot_id %}
-                    <span class="snap-pill snap-both" title="both player rosters captured at the time of this match">✓ both</span>
-                {% elif c.user_snapshot_id %}
-                    <span class="snap-pill snap-partial" title="only the user's roster is snapshotted; opponent missing">user</span>
-                {% elif c.opponent_snapshot_id %}
-                    <span class="snap-pill snap-partial" title="only the opponent's roster is snapshotted; user missing">opp</span>
+                {% set ss = row_snap_status.get(c.id, 'none') %}
+                {% if ss == 'both' %}
+                    <span class="snap-pill snap-both" title="both rosters captured: champion → RosterSnapshot FKs; rookie → OwnedCharacter + RookieArenaSnapshot">✓ both</span>
+                {% elif ss == 'user' %}
+                    <span class="snap-pill snap-partial" title="only user-side roster captured; opponent missing">user</span>
+                {% elif ss == 'opp' %}
+                    <span class="snap-pill snap-partial" title="only opponent-side roster captured; user missing">opp</span>
                 {% else %}
-                    <span class="snap-pill snap-none" title="neither player has a RosterSnapshot for this season">—</span>
+                    <span class="snap-pill snap-none" title="no roster snapshot for either side">—</span>
                 {% endif %}
             </td>
             <td>{{ "yes" if c.needs_review else "no" }}</td>
