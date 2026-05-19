@@ -704,47 +704,49 @@ def resolve(
     out.cycle_period_sec = cycle_period_sec
     out.attacker_active_bursts = attacker_active_bursts
 
-    # Defender per-member rows: HP / shield / heal contribution. The
-    # validation page joins these with the captured per-Nikke heal
-    # ground truth from the Champion duel screen.
+    # D2 (2026-05-19): position-based focus-fire model.
+    # Real NIKKE PvP targets the front position (slot 1) until that
+    # unit dies, then shifts focus to slot 2, etc. (per
+    # nikke-pvp-mechanics memory). This replaces T3's inverse-DEF
+    # heuristic with the actual game mechanic.
     #
-    # T3 (2026-05-19): focus-fire weighted distribution. Real NIKKE
-    # uses position-based targeting (per nikke-pvp-mechanics memory),
-    # which concentrates damage on the front-row units. We approximate
-    # by weighting incoming-damage share by ``1/effective_def`` —
-    # glass cannons absorb more, high-DEF tanks absorb less. Still a
-    # heuristic but materially closer to real focus-fire than the
-    # even-split it replaces. Heal share stays even (Centi/Soda
-    # type all-allies heals don't pick favorites).
+    # Algorithm:
+    #   * Distribute team incoming damage sequentially to defenders
+    #     in slot order (members[0] is front-most)
+    #   * Each defender absorbs (effective_hp + heal_share) before
+    #     damage spills to the next
+    #   * Track per-defender damage_taken + hp_remaining_pct based
+    #     on what their slot absorbed
+    #
+    # Soft bleed: 15% of damage "leaks" past the front to back-row
+    # units even before they're targeted (modeling AoE bursts +
+    # stray hits + chip damage). This prevents the absurd case
+    # where slot 5 takes 0 damage in a 5-min match.
+    BACKROW_LEAK_FRACTION = 0.15
     attacker_total_damage = sum(
         c.estimated_damage_dealt for c in out.attacker_per_member
     )
     n_defenders = max(1, len(defender.members))
-    # Inverse-DEF weights, normalized to sum to 1. Floor each weight at
-    # a small positive value so a 0-DEF defender doesn't divide by zero
-    # and a single tank doesn't soak literally all damage.
-    inv_def_weights = []
-    for d in defender.members:
-        eff_def = max(1.0, d.effective_def)
-        inv_def_weights.append(1.0 / eff_def)
-    weight_sum = sum(inv_def_weights) or 1.0
-    # Clamp each weight to [0.5/n, 3.0/n] of the even share — keeps the
-    # heuristic honest when one tank has 100× the DEF of teammates
-    # (real focus-fire doesn't completely ignore tanks).
-    even_share = 1.0 / n_defenders
-    min_share = 0.5 * even_share
-    max_share = 3.0 * even_share
-    damage_shares = [
-        max(min_share, min(max_share, w / weight_sum))
-        for w in inv_def_weights
-    ]
-    # Re-normalize after clamping so total still equals 100% of incoming.
-    share_total = sum(damage_shares) or 1.0
-    damage_shares = [s / share_total for s in damage_shares]
     per_defender_heal_share = defender_heal_total / n_defenders
-    for d, share in zip(defender.members, damage_shares):
+    # Split: 85% sequential focus-fire, 15% spread equally as leak.
+    focused_pool = attacker_total_damage * (1.0 - BACKROW_LEAK_FRACTION)
+    leak_per_member = (
+        attacker_total_damage * BACKROW_LEAK_FRACTION / n_defenders
+    )
+
+    damage_absorbed: list[float] = []
+    remaining_focused = focused_pool
+    for d in defender.members:
         max_hp = d.base_hp + d.flat_hp_bonus
-        per_defender_damage_in = attacker_total_damage * share
+        effective_hp = max_hp + d.shield_value + per_defender_heal_share
+        # This slot eats up to its effective_hp from the focused pool.
+        from_focused = min(remaining_focused, effective_hp)
+        remaining_focused -= from_focused
+        damage_absorbed.append(from_focused + leak_per_member)
+
+    for d, absorbed in zip(defender.members, damage_absorbed):
+        max_hp = d.base_hp + d.flat_hp_bonus
+        per_defender_damage_in = absorbed
         net_damage_taken = max(
             0.0,
             per_defender_damage_in - d.shield_value - per_defender_heal_share,
