@@ -742,6 +742,20 @@ def simulate_event_loop(
         for i, (m, dps) in enumerate(zip(defender.members, d_member_dps))
     ]
 
+    # F1 — per-character state machines for complex mechanics
+    # (Centi shield refresh, Scarlet HP-low procs, SW:HA Lock-On).
+    # Registered handlers expose lifecycle hooks; the event loop
+    # calls them at appropriate points.
+    from .state_machines import state_machine_for
+    a_machines: list = [state_machine_for(m.name) for m in a_team]
+    d_machines: list = [state_machine_for(m.name) for m in d_team]
+    for member, sm in zip(a_team, a_machines):
+        if sm:
+            sm.on_battle_start(member, a_team, d_team, 0.0)
+    for member, sm in zip(d_team, d_machines):
+        if sm:
+            sm.on_battle_start(member, d_team, a_team, 0.0)
+
     a_gauge = 0.0
     d_gauge = 0.0
     a_first_burst_at = 0.0
@@ -776,11 +790,31 @@ def simulate_event_loop(
         a_def_debuff_mult = _current_debuff_multiplier(a_active_debuffs, t)
         d_def_debuff_mult = _current_debuff_multiplier(d_active_debuffs, t)
 
+        # F1 — call per-character state-machine on_tick. Centi shield
+        # refresh, Scarlet HP-state checks, etc. happen here.
+        for member, sm in zip(a_team, a_machines):
+            if sm and member.alive:
+                bonus = sm.on_tick(member, a_team, d_team, t, tick_dt)
+                if bonus and bonus > 0:
+                    applied = _apply_damage(d_team, bonus)
+                    a_total += applied
+                    member.damage_dealt += applied
+        for member, sm in zip(d_team, d_machines):
+            if sm and member.alive:
+                bonus = sm.on_tick(member, d_team, a_team, t, tick_dt)
+                if bonus and bonus > 0:
+                    applied = _apply_damage(a_team, bonus)
+                    d_total += applied
+                    member.damage_dealt += applied
+
         # Each living Nikke fires shots whose timer has elapsed.
         # Damage = base_per_shot × team_buff_mult × enemy_def_debuff_mult.
         # Per-shot: also process ON_HIT + CONDITIONAL triggers (state
         # machines like Liberalio Raging Current, Drake periodic damage).
-        for m in a_living:
+        for i, m in enumerate(a_team):
+            if not m.alive:
+                continue
+            sm = a_machines[i]
             while m.next_shot_at <= t and m.alive:
                 # Recompute buff mult inside loop since state-machine
                 # effects may have just been added.
@@ -797,10 +831,20 @@ def simulate_event_loop(
                     bonus_applied = _apply_damage(d_team, bonus)
                     a_total += bonus_applied
                     m.damage_dealt += bonus_applied
+                # F1 — per-character on_shot_fired hook.
+                if sm:
+                    sm_bonus = sm.on_shot_fired(m, a_team, d_team, t)
+                    if sm_bonus and sm_bonus > 0:
+                        applied2 = _apply_damage(d_team, sm_bonus)
+                        a_total += applied2
+                        m.damage_dealt += applied2
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
                 if not [x for x in d_team if x.alive]:
                     break
-        for m in d_living:
+        for i, m in enumerate(d_team):
+            if not m.alive:
+                continue
+            sm = d_machines[i]
             while m.next_shot_at <= t and m.alive:
                 cur_buff_mult = _current_buff_multiplier(d_active_buffs, t)
                 shot_dmg = m.base_atk * cur_buff_mult * d_def_debuff_mult
@@ -814,6 +858,12 @@ def simulate_event_loop(
                     bonus_applied = _apply_damage(a_team, bonus)
                     d_total += bonus_applied
                     m.damage_dealt += bonus_applied
+                if sm:
+                    sm_bonus = sm.on_shot_fired(m, d_team, a_team, t)
+                    if sm_bonus and sm_bonus > 0:
+                        applied2 = _apply_damage(a_team, sm_bonus)
+                        d_total += applied2
+                        m.damage_dealt += applied2
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
                 if not [x for x in a_team if x.alive]:
                     break
