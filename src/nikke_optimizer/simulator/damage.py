@@ -114,7 +114,7 @@ def element_advantage_factor(
 # Crit baseline: PvP teams typically run ~25% crit rate, ~150% crit
 # damage multiplier (1.5×). Expected damage multiplier: 1 + 0.25 × 0.5 = 1.125.
 DEFAULT_CRIT_RATE_PCT = 25.0
-DEFAULT_CRIT_DAMAGE_PCT = 50.0  # 50% bonus → 1.5× total
+DEFAULT_CRIT_DAMAGE_PCT = 25.0  # 50% bonus → 1.5× total
 
 # DEF reduction in NIKKE follows a published formula:
 #   damage_taken = max(0.05, 1 - defender_DEF / (defender_DEF + attacker_ATK))
