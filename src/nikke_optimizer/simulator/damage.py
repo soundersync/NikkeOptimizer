@@ -147,7 +147,7 @@ ROLE_DPS_MULTIPLIER: dict[str, float] = {
     "attacker": 1.0,
     "buffer":   0.2,
     "supporter":0.15,
-    "defender": 0.4,
+    "defender": 0.65,
     "shielder": 0.3,
     "taunter":  0.4,
     "healer":   0.2,
