@@ -4379,22 +4379,38 @@ def baseline_sim_cmd(
         False, "--misses",
         help="Only print the mispredicted matches (for triage).",
     ),
+    event_loop: bool = typer.Option(
+        False, "--event-loop",
+        help="Use event_loop.simulate_event_loop instead of damage.resolve.",
+    ),
     db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
 ) -> None:
     """Predicted vs actual winner across snapshot=both ArenaMatch rows.
 
-    Runs ``damage.resolve`` over every match where we have snapshot
-    data for both sides (Champions: ``RosterSnapshot`` FK; Rookie:
-    opponent ``RookieArenaSnapshot`` + live ``OwnedCharacter`` for
-    user). The shorter ``seconds_to_clear_defender`` side is the
-    predicted winner; verdict is compared to the recorded outcome.
+    Default uses ``damage.resolve`` (deterministic team-aggregate
+    formula). ``--event-loop`` uses event-driven shot-by-shot
+    simulation with state machines (Liberalio Raging Current,
+    ON_HIT periodic damage, etc.). Compare both to see which is
+    better calibrated for your roster.
     """
-    from ..simulator.baseline import run_baseline
+    from ..simulator.baseline import (
+        BaselineReport, iter_snapshot_both_matches, predict_match,
+        predict_match_event_loop,
+    )
 
     engine = make_engine(db)
     init_db(engine)
     with get_session(engine) as session:
-        report = run_baseline(session)
+        if event_loop:
+            preds_all = []
+            for m in iter_snapshot_both_matches(session):
+                p = predict_match_event_loop(session, m)
+                if p is not None:
+                    preds_all.append(p)
+            report = BaselineReport(predictions=preds_all)
+        else:
+            from ..simulator.baseline import run_baseline
+            report = run_baseline(session)
 
     preds = report.predictions
     if mode in ("rookie", "champion"):

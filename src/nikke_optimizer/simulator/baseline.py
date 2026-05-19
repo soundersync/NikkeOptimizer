@@ -453,6 +453,92 @@ def _build_team_feed(
 # ---------------------------------------------------------------------------
 
 
+def predict_match_event_loop(
+    session: Session, match: ArenaMatch,
+) -> Optional[MatchPrediction]:
+    """Alternative resolver using event_loop.simulate_event_loop.
+
+    Same MatchPrediction shape as ``predict_match`` so the validation
+    page can show both side-by-side or sweep between them.
+    """
+    from .event_loop import simulate_event_loop
+
+    user_feed = _build_team_feed(session, match, "user")
+    opp_feed = _build_team_feed(session, match, "opp")
+    if user_feed is None or opp_feed is None:
+        return None
+
+    user_eval = evaluate_by_names(user_feed.names, **user_feed.as_kwargs())
+    opp_eval = evaluate_by_names(opp_feed.names, **opp_feed.as_kwargs())
+    if user_eval is None or opp_eval is None:
+        return None
+
+    ev_uo = simulate_event_loop(user_eval, opp_eval)
+    ev_ou = simulate_event_loop(opp_eval, user_eval)
+
+    if ev_uo.attacker_wins and not ev_ou.attacker_wins:
+        predicted = "user"
+    elif ev_ou.attacker_wins and not ev_uo.attacker_wins:
+        predicted = "opp"
+    elif ev_uo.match_ended_at_sec < ev_ou.match_ended_at_sec:
+        predicted = "user"
+    elif ev_ou.match_ended_at_sec < ev_uo.match_ended_at_sec:
+        predicted = "opp"
+    else:
+        predicted = None
+
+    def _merge_ev(attacker_stats, defender_stats, names):
+        by_name = {s.name: s for s in attacker_stats}
+        defender_by_name = {s.name: s for s in defender_stats}
+        rows: list[PerMemberView] = []
+        for name in names:
+            a = by_name.get(name)
+            d = defender_by_name.get(name)
+            row = PerMemberView(name=name)
+            if a:
+                row.estimated_damage_dealt = a.damage_dealt
+            if d:
+                row.estimated_damage_taken = d.damage_taken
+                row.estimated_hp_remaining_pct = d.hp_remaining_pct
+                row.estimated_heal_performed = d.healing_done
+            rows.append(row)
+        return rows
+
+    user_members = _merge_ev(
+        ev_uo.attacker_per_member, ev_ou.defender_per_member, user_feed.names,
+    )
+    opp_members = _merge_ev(
+        ev_ou.attacker_per_member, ev_uo.defender_per_member, opp_feed.names,
+    )
+
+    actuals = actuals_for_match(session, match)
+
+    return MatchPrediction(
+        match_id=match.id,
+        mode=match.mode,
+        user_username=match.user_username,
+        opponent_username=match.opponent_username,
+        round_index=match.round_index,
+        actual_outcome=match.outcome,
+        predicted_winner=predicted,
+        user_clear_sec=ev_uo.match_ended_at_sec,
+        opp_clear_sec=ev_ou.match_ended_at_sec,
+        user_team_dps=(
+            ev_uo.attacker_total_damage / max(0.1, ev_uo.match_ended_at_sec)
+        ),
+        opp_team_dps=(
+            ev_ou.attacker_total_damage / max(0.1, ev_ou.match_ended_at_sec)
+        ),
+        user_def_ehp=0.0,
+        opp_def_ehp=0.0,
+        notes=list(ev_uo.notes) + [f"opp→user: {n}" for n in ev_ou.notes],
+        user_members=user_members,
+        opp_members=opp_members,
+        user_actuals=actuals.user if actuals else None,
+        opp_actuals=actuals.opp if actuals else None,
+    )
+
+
 def predict_match(
     session: Session, match: ArenaMatch
 ) -> Optional[MatchPrediction]:
