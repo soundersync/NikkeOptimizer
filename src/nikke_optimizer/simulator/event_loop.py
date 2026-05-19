@@ -618,15 +618,21 @@ def _on_shot_fired(
                         bonus += (
                             eff.magnitude * shooter.base_atk * n_targets
                         )
-                # Buff effects = scheduled with duration.
+                # Buff effects = scheduled with duration. Cap magnitude
+                # at 50% per-effect to prevent the +231% Raging Current
+                # type buffs from blowing up team DPS — they apply
+                # only to the SELF caster in real game, but we model
+                # team-wide here.
                 elif (eff.kind in _DAMAGE_BUFF_KINDS
                         and eff.target.kind in _ALLY_TARGET_KINDS
                         and eff.duration_seconds > 0):
+                    cap = 50.0 if eff.target.kind == TargetKind.SELF else 100.0
+                    mag = min(eff.magnitude * 0.5, cap)
                     active_buffs.append(_ActiveBuff(
                         expires_at=current_time + max(
-                            eff.duration_seconds, 30.0  # min duration for state-machine effects
+                            eff.duration_seconds, 30.0
                         ),
-                        magnitude_pct=eff.magnitude * 0.5,  # 0.5 factor: state isn't always active
+                        magnitude_pct=mag,
                         kind=eff.kind,
                     ))
                 elif (eff.kind == EffectKind.GRANT_SHIELD
