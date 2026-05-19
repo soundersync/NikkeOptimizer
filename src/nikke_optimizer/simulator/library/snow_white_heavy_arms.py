@@ -298,10 +298,11 @@ _SKILL = CharacterSkillSet(
                 Effect(
                     kind=EffectKind.DEAL_DAMAGE,
                     target=Target(kind=TargetKind.ALL_ENEMIES),
-                    magnitude=0.419,
+                    magnitude=0.0,
                     notes=(
-                        "destructible projectiles only; PvP rarely has "
-                        "these so this is mostly a PvE clause"
+                        "destructible projectiles only — zero in PvP "
+                        "(no destructibles in arena); kept as DSL row "
+                        "for documentation."
                     ),
                 ),
                 # Seven Dwarves Fully Active mode toggling — captured in
