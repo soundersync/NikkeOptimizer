@@ -64,6 +64,8 @@ class SyncthingConfig:
     address: str           # "127.0.0.1:8384"
     folder_id: str         # the folder ID whose path contains our staging dir
     folder_path: Path
+    folder_label: str      # human-readable label from config.xml; falls
+                           # back to folder_id when the user hasn't set one
 
 
 def load_syncthing_config(
@@ -92,10 +94,11 @@ def load_syncthing_config(
         raise RuntimeError(f"empty <apikey> in {config_path}")
 
     staging_resolved = staging.resolve()
-    best: Optional[tuple[str, Path]] = None
+    best: Optional[tuple[str, Path, str]] = None  # (id, path, label)
     for folder in root.findall("folder"):
         fid = folder.get("id")
         fpath = folder.get("path")
+        flabel = (folder.get("label") or "").strip()
         if not fid or not fpath:
             continue
         folder_path = Path(fpath).resolve()
@@ -104,7 +107,7 @@ def load_syncthing_config(
         except ValueError:
             continue
         if best is None or len(str(folder_path)) > len(str(best[1])):
-            best = (fid, folder_path)
+            best = (fid, folder_path, flabel)
     if best is None:
         raise RuntimeError(
             f"no Syncthing folder contains staging path {staging_resolved}"
@@ -114,6 +117,7 @@ def load_syncthing_config(
         address=address,
         folder_id=best[0],
         folder_path=best[1],
+        folder_label=best[2] or best[0],
     )
 
 
@@ -529,7 +533,7 @@ def run_daemon(
                 pending_since = time.time()
                 log.info(
                     "FolderCompletion(folder=%s): %d event(s), debouncing %ds",
-                    config.folder_id, len(matching), DEBOUNCE_SECONDS,
+                    config.folder_label, len(matching), DEBOUNCE_SECONDS,
                 )
 
             if pending_since is not None:
@@ -537,7 +541,7 @@ def run_daemon(
                 if elapsed >= DEBOUNCE_SECONDS:
                     run_ingest_and_log(
                         staging,
-                        trigger=f"FolderCompletion(folder={config.folder_id})",
+                        trigger=f"FolderCompletion(folder={config.folder_label})",
                         log_path=log_path,
                     )
                     pending_since = None
