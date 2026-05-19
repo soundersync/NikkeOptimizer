@@ -608,8 +608,14 @@ def resolve(
         contrib.other_damage_per_sec = other_per_sec
 
         # Burst payload — DEAL_DAMAGE in burst skills, accumulated on each
-        # member's burst_damage_magnitude (one-shot, so multiply by ATK once).
-        member_burst = m.burst_damage_magnitude * eff_atk * def_factor
+        # member's burst_damage_magnitude (per-target). Multiply by the
+        # AoE target count so ALL_ENEMIES bursts get credited for hitting
+        # all 5 defenders (was a 5× under-count for AoE carries like
+        # Scarlet / Drake — m1 Scarlet sim 96K vs actual 70M was this).
+        member_burst = (
+            m.burst_damage_magnitude * m.burst_aoe_target_count
+            * eff_atk * def_factor
+        )
         burst_total += member_burst
         contrib.burst_payload_per_cycle = member_burst
 
