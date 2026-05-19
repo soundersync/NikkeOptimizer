@@ -508,6 +508,9 @@ def create_app(
         # since: '7d' | '30d' | 'all' — bound on captured_at for filtering
         session_kind: Optional[str] = None,
         since: Optional[str] = None,
+        # Snapshot-completeness filter (Champions builder slice).
+        # snapshots: 'both' | 'user' | 'opp' | 'none'
+        snapshots: Optional[str] = None,
         uploaded: Optional[int] = None,
         rookie: Optional[int] = None,
         special: Optional[int] = None,
@@ -548,6 +551,33 @@ def create_app(
                 rows = [r for r in rows if not r.outcome]
             elif outcome in ("win", "loss", "timeout"):
                 rows = [r for r in rows if r.outcome == outcome]
+            # Snapshot-completeness filter (Champions builder slice).
+            # Rookie matches don't use snapshot FKs today, so the
+            # `both`/`user`/`opp` buckets are effectively Champion-only.
+            if snapshots == "both":
+                rows = [
+                    r for r in rows
+                    if r.user_snapshot_id is not None
+                    and r.opponent_snapshot_id is not None
+                ]
+            elif snapshots == "user":
+                rows = [
+                    r for r in rows
+                    if r.user_snapshot_id is not None
+                    and r.opponent_snapshot_id is None
+                ]
+            elif snapshots == "opp":
+                rows = [
+                    r for r in rows
+                    if r.opponent_snapshot_id is not None
+                    and r.user_snapshot_id is None
+                ]
+            elif snapshots == "none":
+                rows = [
+                    r for r in rows
+                    if r.user_snapshot_id is None
+                    and r.opponent_snapshot_id is None
+                ]
             # Time-window filter for the "Awaiting results" workflow.
             if since in ("7d", "30d"):
                 days = 7 if since == "7d" else 30
@@ -654,6 +684,7 @@ def create_app(
                 "outcome": outcome,
                 "session_kind": session_kind,
                 "since": since,
+                "snapshots": snapshots,
                 "row_warnings": row_warnings,
                 "set_warnings": set_warnings,
                 "session_summaries": session_summaries,

@@ -169,6 +169,15 @@
             <option value="untagged" {% if outcome == 'untagged' %}selected{% endif %}>untagged</option>
         </select>
     </label>
+    <label>Snapshots
+        <select name="snapshots" onchange="this.form.submit()">
+            <option value="" {% if not snapshots %}selected{% endif %}>any</option>
+            <option value="both" {% if snapshots == 'both' %}selected{% endif %}>✓ both players</option>
+            <option value="user" {% if snapshots == 'user' %}selected{% endif %}>user only</option>
+            <option value="opp" {% if snapshots == 'opp' %}selected{% endif %}>opp only</option>
+            <option value="none" {% if snapshots == 'none' %}selected{% endif %}>none</option>
+        </select>
+    </label>
 </form>
 
 {% if review_only and review_groups %}
@@ -344,6 +353,7 @@ button.danger:hover { background: #7a1010; }
             <th>User team</th>
             <th>Opp team</th>
             <th title="Tagged win/loss/timeout via the capture detail page; empty until you tag it.">Outcome</th>
+            <th title="Roster snapshot linkage. ✓both = both players' rosters are captured in RosterSnapshot for the season of this match.">Snap</th>
             <th>Review?</th>
             <th>Gaps</th>
             <th></th>
@@ -375,6 +385,17 @@ button.danger:hover { background: #7a1010; }
                     <span class="outcome outcome-{{ c.outcome }}">{{ c.outcome }}</span>
                     {% if c.user_role %}<span class="muted small">({{ c.user_role }})</span>{% endif %}
                 {% else %}—{% endif %}
+            </td>
+            <td>
+                {% if c.user_snapshot_id and c.opponent_snapshot_id %}
+                    <span class="snap-pill snap-both" title="both player rosters captured at the time of this match">✓ both</span>
+                {% elif c.user_snapshot_id %}
+                    <span class="snap-pill snap-partial" title="only the user's roster is snapshotted; opponent missing">user</span>
+                {% elif c.opponent_snapshot_id %}
+                    <span class="snap-pill snap-partial" title="only the opponent's roster is snapshotted; user missing">opp</span>
+                {% else %}
+                    <span class="snap-pill snap-none" title="neither player has a RosterSnapshot for this season">—</span>
+                {% endif %}
             </td>
             <td>{{ "yes" if c.needs_review else "no" }}</td>
             <td class="muted small">

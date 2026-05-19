@@ -71,6 +71,21 @@ th {
 
 .warning-row { background: var(--warning-bg); }
 
+/* Snapshot-completeness pill on /captures rows. ✓both is the "both
+   players have full RosterSnapshot for this match's season" signal —
+   the canonical "we can train on this row" badge. */
+.snap-pill {
+    font-size: 0.75rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid;
+    white-space: nowrap;
+}
+.snap-both    { background: #1c2419; color: #86efac; border-color: #1e5f30; font-weight: 600; }
+.snap-partial { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.snap-none    { background: #1f2228; color: #6b7280; border-color: #2a2f3a; }
+
 .cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
