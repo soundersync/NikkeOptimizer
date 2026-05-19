@@ -146,7 +146,7 @@ DAMAGE_PER_SHOT_FRACTION = 0.10  # legacy fallback for None / unknown weapon cla
 ROLE_DPS_MULTIPLIER: dict[str, float] = {
     "attacker": 1.0,
     "buffer":   0.2,
-    "supporter":0.15,
+    "supporter":0.4,
     "defender": 0.65,
     "shielder": 0.3,
     "taunter":  0.4,
