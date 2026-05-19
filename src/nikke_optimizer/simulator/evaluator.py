@@ -101,6 +101,53 @@ _SNAPSHOT_TRIGGERS = {
 }
 
 
+# D4 — CONDITIONAL triggers whose condition is essentially always-true
+# in PvP. Liberalio's +231% Raging Current (full-charge hit) fires
+# within the first 1-2 seconds for any SR with charge-speed. Treating
+# these as fire-once at battle start materially improves
+# burst-DPS-attacker prediction accuracy. Conditions matched by
+# substring (case-insensitive).
+_HIGH_CONFIDENCE_CONDITIONS: tuple[str, ...] = (
+    "full charge attack",
+    "full charge hit",
+    "full charge release",
+    "full charge held",
+    "full charge",
+    "first hit lands",
+    "1st target appearance",
+    "battle start",
+    "first ally burst",
+    "1st activation",
+)
+
+
+def _condition_always_fires(condition: Optional[str]) -> bool:
+    """True when the condition is reliably met in a PvP arena match.
+
+    Used by the static evaluator to fire CONDITIONAL triggers whose
+    real-world activation probability is near 1 (Liberalio's
+    Raging Current, full-charge hit triggers on charging weapons, etc.)
+    without needing a full event-loop simulator.
+    """
+    if not condition:
+        return False
+    c = condition.lower()
+    return any(pat in c for pat in _HIGH_CONFIDENCE_CONDITIONS)
+
+
+# D4 — effect kinds we'll fire from high-confidence CONDITIONAL
+# triggers. Restricted to defensive effects because offensive
+# CONDITIONAL effects (Scarlet HP<60% crit damage, Liberalio Raging
+# Current +231%) over-predict damage when treated as always-on.
+_DEFENSIVE_EFFECT_KINDS: frozenset = frozenset({
+    EffectKind.HEAL_PER_SECOND,
+    EffectKind.HEAL_HP_FLAT,
+    EffectKind.GRANT_SHIELD,
+    EffectKind.BUFF_DEFENSE,
+    EffectKind.BUFF_HP,
+})
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -596,9 +643,34 @@ def _walk_skill_effects(
     include_triggers: set[TriggerKind] = _SNAPSHOT_TRIGGERS,
 ) -> None:
     for se in skills:
-        if se.trigger.kind not in include_triggers:
+        fire = se.trigger.kind in include_triggers
+        # D4 — fire CONDITIONAL triggers whose condition is reliably
+        # met in PvP (e.g. "full charge release", "battle start") but
+        # ONLY for DEFENSIVE effects (HEAL/SHIELD/BUFF_DEF). Offensive
+        # CONDITIONAL effects (Liberalio's +231% Raging Current,
+        # Scarlet's HP<60% crit) over-predict damage even when they
+        # technically fire — they rely on stacking/duration that the
+        # static evaluator can't model.
+        if (
+            not fire
+            and se.trigger.kind is TriggerKind.CONDITIONAL
+            and TriggerKind.ALWAYS in include_triggers
+            and _condition_always_fires(se.trigger.condition)
+        ):
+            # Only fire if at least one effect is defensive.
+            if any(e.kind in _DEFENSIVE_EFFECT_KINDS for e in se.effects):
+                fire = True
+        if not fire:
             continue
         for eff in se.effects:
+            # When firing a CONDITIONAL on a partial-defensive skill,
+            # skip the non-defensive effects (don't credit the +231%
+            # attack-damage portion).
+            if (
+                se.trigger.kind is TriggerKind.CONDITIONAL
+                and eff.kind not in _DEFENSIVE_EFFECT_KINDS
+            ):
+                continue
             _apply_effect_to_snapshot(eff, caster, team, burst_user)
 
 
