@@ -118,6 +118,25 @@ def create_app(
         "champion": "Champion_Arena",
     }
 
+    def _serve_resized_png(path: Path, w: int) -> Response:
+        """Downscale a PNG to ``w`` pixels wide (preserve aspect ratio)
+        and serve as image/png. Used by /matches for inline thumbnails
+        on session cards so we don't ship 1MB PNGs per cell.
+        """
+        from io import BytesIO
+        from PIL import Image as _PILImage
+        try:
+            img = _PILImage.open(path).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"open failed: {exc}")
+        if img.width > w:
+            h = round(img.height * (w / img.width))
+            img = img.resize((w, h), _PILImage.Resampling.LANCZOS)
+        buf = BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        buf.seek(0)
+        return Response(content=buf.getvalue(), media_type="image/png")
+
     def _resolve_screenshot_path(stored: str, mode: Optional[str]) -> Optional[Path]:
         candidates: list[Path] = []
         # 1. The path as stored — direct match if file is there.
@@ -497,6 +516,121 @@ def create_app(
     # Arena captures
     # ------------------------------------------------------------------
 
+    def _build_session_card(
+        rows: list[ArenaMatch], snap_by_id: dict[int, str],
+    ) -> dict:
+        """Build the per-session view-model for the /matches page card.
+
+        Sorts rows by round_index (1..5). Derives the session-level
+        score (W-L) from per-round outcomes, the canonical user/opp
+        names, and a header subtitle that varies by mode.
+        """
+        rows = sorted(rows, key=lambda r: r.round_index or 0)
+        first = rows[0]
+        mode = first.mode
+        wins = sum(1 for r in rows if r.outcome == "win")
+        losses = sum(1 for r in rows if r.outcome == "loss")
+
+        # Session-level snap status: champion has a fixed opponent so
+        # all rows share the same status; rookie has 5 different opps
+        # so we aggregate as "all" / "some" / "none".
+        sess_snap_summary: str
+        if mode == "champion":
+            sess_snap_summary = snap_by_id.get(first.id, "none")
+        else:
+            statuses = [snap_by_id.get(r.id, "none") for r in rows]
+            if all(s == "both" for s in statuses):
+                sess_snap_summary = "both"
+            elif any(s == "both" for s in statuses):
+                sess_snap_summary = "partial"
+            else:
+                sess_snap_summary = "none"
+
+        # Champion sessions have a fixed (user, opp) pair; rookie
+        # sessions face 5 different opponents.
+        opp_label = first.opponent_username if mode == "champion" else None
+
+        # Header subtitle.
+        if mode == "champion":
+            # session_label looks like "Champions g1-finals M1 R1 2026-05-14"
+            # — strip the "R{n}" so the session-level header reads cleanly.
+            import re as _re
+            base = (first.session_label or "").strip()
+            base = _re.sub(r" R\d+", "", base)
+            subtitle = base or first.session_id
+        else:
+            # Rookie session_label: "Rookie Arena 2026-05-18 17:22 UTC"
+            subtitle = first.session_label or first.session_id
+
+        captured_local = None
+        if first.captured_at is not None:
+            from datetime import timezone as _tz
+            dt = first.captured_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_tz.utc)
+            captured_local = dt.astimezone().strftime("%Y-%m-%d %-I:%M %p %Z")
+
+        cells: list[dict] = []
+        for r in rows:
+            cells.append(_build_round_cell(r, snap_by_id.get(r.id, "none")))
+
+        return {
+            "session_id": first.session_id or "",
+            "mode": mode,
+            "subtitle": subtitle,
+            "captured_local": captured_local,
+            "user_label": first.user_username,
+            "opp_label": opp_label,
+            "wins": wins,
+            "losses": losses,
+            "snap_summary": sess_snap_summary,
+            "cells": cells,
+        }
+
+    def _build_round_cell(
+        r: ArenaMatch, snap_status: str,
+    ) -> dict:
+        """One round/battle cell within a session card."""
+        thumb_w = 240
+        cell = {
+            "capture_id": r.id,
+            "round_index": r.round_index,
+            "outcome": r.outcome,
+            "opp_username": r.opponent_username,
+            "user_team": [n for n in (r.user_team or []) if n],
+            "opp_team": [n for n in (r.opponent_team or []) if n],
+            "snap": snap_status,
+            "detail_url": f"/captures/{r.id}",
+            "loadout_thumb_url": None,
+            "loadout_full_url": None,
+            "opp_loadout_thumb_url": None,
+            "opp_loadout_full_url": None,
+            "result_thumb_url": None,
+            "result_full_url": None,
+            "opp_level": None,
+        }
+        if r.pre_battle_screenshot:
+            cell["loadout_thumb_url"] = (
+                f"/captures/{r.id}/screenshot/pre?w={thumb_w}"
+            )
+            cell["loadout_full_url"] = f"/captures/{r.id}/screenshot/pre"
+        if r.battle_record_screenshot:
+            cell["result_thumb_url"] = (
+                f"/captures/{r.id}/screenshot/record?w={thumb_w}"
+            )
+            cell["result_full_url"] = f"/captures/{r.id}/screenshot/record"
+        # Champion: second-player loadout served by the new endpoint.
+        if r.mode == "champion" and r.session_id and r.round_index:
+            base = f"/sessions/{r.session_id}/round/{r.round_index}/opp-loadout"
+            cell["opp_loadout_thumb_url"] = f"{base}?w={thumb_w}"
+            cell["opp_loadout_full_url"] = base
+        # Rookie opponent level — pulled out of capture_quality.
+        if r.mode == "rookie" and r.capture_quality:
+            lvl = r.capture_quality.get("opponent_level")
+            if isinstance(lvl, int):
+                cell["opp_level"] = lvl
+        return cell
+
     def _arena_match_snapshot_status(row: ArenaMatch, session) -> str:
         """Return 'both' / 'user' / 'opp' / 'none' for the row's
         snapshot completeness, **dispatched by mode** because Champions
@@ -549,188 +683,129 @@ def create_app(
         return "none"
 
     @app.get("/captures", response_class=HTMLResponse)
+    @app.get("/matches", response_class=HTMLResponse)
     def captures_list(
         request: Request,
-        review_only: bool = False,
         mode: Optional[str] = None,
         outcome: Optional[str] = None,
-        # Session filtering (slice #135).
-        # session_kind: 'predictions' | 'partial' | 'complete'
-        # since: '7d' | '30d' | 'all' — bound on captured_at for filtering
-        session_kind: Optional[str] = None,
-        since: Optional[str] = None,
-        # Snapshot-completeness filter (Champions builder slice).
-        # snapshots: 'both' | 'user' | 'opp' | 'none'
         snapshots: Optional[str] = None,
-        uploaded: Optional[int] = None,
-        rookie: Optional[int] = None,
-        special: Optional[int] = None,
-        champion: Optional[int] = None,
-        skipped: Optional[int] = None,
-        review: Optional[int] = None,
-        upload_error: Optional[str] = None,
+        since: Optional[str] = None,
+        page: int = 1,
     ) -> Response:
+        """Match history grouped by session (rookie run / champion duel).
+
+        Each session card surfaces:
+          * Header: mode, captured-at (local time), W-L score, snap status
+          * 5 round/battle cells: inline loadout + result thumbnails,
+            outcome pill, per-cell snap status, link to /captures/{id}
+            detail page
+        """
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-        from .capture_warnings import (
-            per_row_warnings,
-            session_completeness_warnings,
-            set_completeness_warnings,
-        )
+
+        SESSIONS_PER_PAGE = 10
+        page = max(1, page)
 
         with get_session(engine) as session:
-            # Set completeness needs the FULL capture set (not the filter
-            # subset) so rounds present in unfiltered captures still
-            # contribute to set membership.
-            all_caps = list(session.exec(select(ArenaMatch)).all())
-            set_warnings = set_completeness_warnings(all_caps)
-            session_matrices = session_completeness_warnings(all_caps)
-
-            query = select(ArenaMatch)
-            if review_only:
-                query = query.where(ArenaMatch.needs_review == True)  # noqa: E712
-            if mode:
+            # Pull the union we'll show (after filters), then group + paginate.
+            query = select(ArenaMatch).where(ArenaMatch.mode.in_(("rookie", "champion")))
+            if mode in ("rookie", "champion"):
                 query = query.where(ArenaMatch.mode == mode)
-            if session_kind in ("predictions", "partial", "complete"):
-                query = query.where(ArenaMatch.session_kind == session_kind)
             rows = list(session.exec(query).all())
-            # Outcome filter (slice #105). The model has no index on
-            # ``outcome``, but the result set is small (~tens of captures),
-            # so an in-Python filter is fine. ``"untagged"`` matches rows
-            # with NULL outcome — useful for finding which captures still
-            # need a manual win/loss tag for damage-formula validation.
+
             if outcome == "untagged":
                 rows = [r for r in rows if not r.outcome]
-            elif outcome in ("win", "loss", "timeout"):
+            elif outcome in ("win", "loss"):
                 rows = [r for r in rows if r.outcome == outcome]
-            # Snapshot-completeness filter — dispatched by mode via the
-            # _arena_match_snapshot_status helper so rookie rows (which
-            # use RookieArenaSnapshot + live OwnedCharacter instead of
-            # the RosterSnapshot FKs Champions uses) also surface.
+
+            row_snap_status = {
+                r.id: _arena_match_snapshot_status(r, session)
+                for r in rows if r.id is not None
+            }
             if snapshots in ("both", "user", "opp", "none"):
-                rows = [
-                    r for r in rows
-                    if _arena_match_snapshot_status(r, session) == snapshots
-                ]
-            # Time-window filter for the "Awaiting results" workflow.
+                rows = [r for r in rows if row_snap_status.get(r.id) == snapshots]
+
             if since in ("7d", "30d"):
                 days = 7 if since == "7d" else 30
                 cutoff = _dt.now(_tz.utc) - _td(days=days)
-                # ``captured_at`` may be naive on legacy rows — normalize.
                 def _aware(d):
                     if d.tzinfo is None:
                         return d.replace(tzinfo=_tz.utc)
                     return d
                 rows = [r for r in rows if _aware(r.captured_at) >= cutoff]
-            rows.sort(key=lambda r: r.id or 0, reverse=True)
-            row_warnings = {r.id: per_row_warnings(r) for r in rows if r.id is not None}
-            row_snap_status = {
+
+            # Group rows by session_id; sort sessions by their newest
+            # captured_at descending so the just-ingested run is at top.
+            from collections import defaultdict as _dd
+            by_sid: dict[str, list[ArenaMatch]] = _dd(list)
+            for r in rows:
+                by_sid[r.session_id or f"_unsessioned_{r.id}"].append(r)
+            def _sid_sort_key(sid: str) -> _dt:
+                latest = max(
+                    (r.captured_at for r in by_sid[sid] if r.captured_at),
+                    default=_dt.min.replace(tzinfo=_tz.utc),
+                )
+                if latest.tzinfo is None:
+                    latest = latest.replace(tzinfo=_tz.utc)
+                return latest
+            session_ids = sorted(by_sid.keys(), key=_sid_sort_key, reverse=True)
+
+            n_sessions = len(session_ids)
+            total_pages = max(1, (n_sessions + SESSIONS_PER_PAGE - 1) // SESSIONS_PER_PAGE)
+            page = min(page, total_pages)
+            start = (page - 1) * SESSIONS_PER_PAGE
+            page_sids = session_ids[start:start + SESSIONS_PER_PAGE]
+
+            sessions = [
+                _build_session_card(by_sid[sid], row_snap_status)
+                for sid in page_sids
+            ]
+
+            # Dashboard counts use the unfiltered table so the user
+            # always sees totals, not the filtered subset.
+            all_rows = list(session.exec(select(ArenaMatch)).all())
+            rookie_rows = [r for r in all_rows if r.mode == "rookie"]
+            champion_rows = [r for r in all_rows if r.mode == "champion"]
+            all_snap = {
                 r.id: _arena_match_snapshot_status(r, session)
-                for r in rows if r.id is not None
+                for r in all_rows if r.id is not None
             }
+            n_complete_snap = sum(1 for s in all_snap.values() if s == "both")
+            n_rookie_sessions = len({
+                r.session_id for r in rookie_rows if r.session_id
+            })
+            n_champion_sessions = len({
+                r.session_id for r in champion_rows if r.session_id
+            })
 
-            # Session-grouped view: when filtering by session_kind, surface
-            # the unique sessions (one row per session_id, with summary
-            # counts) above the per-row table so users can act on whole
-            # sessions instead of scrolling through 11+ rows each.
-            session_summaries: list[dict] = []
-            if session_kind:
-                seen: set[str] = set()
-                for r in rows:
-                    sid = r.session_id or ""
-                    if not sid or sid in seen:
-                        continue
-                    seen.add(sid)
-                    sc = session_matrices.get(sid)
-                    if sc is None:
-                        continue
-                    session_summaries.append({
-                        "session_id": sid,
-                        "session_label": sc.session_label,
-                        "session_kind": sc.session_kind,
-                        "loadouts": sum(
-                            (1 if r.p1_loadout.captured else 0)
-                            + (1 if r.p2_loadout.captured else 0)
-                            for r in sc.rounds
-                        ),
-                        "results": sum(
-                            1 for r in sc.rounds if r.round_result.captured
-                        ),
-                        "duel_result": sc.duel_result.captured,
-                        "warnings": sc.warnings,
-                    })
+        # Last-ingest stanza from the daemon audit log.
+        try:
+            from .. import auto_import as ai
+            last_entries = ai.parse_audit_log_entries(ai.DEFAULT_LOG_PATH, n=1)
+            last_ingest = last_entries[0] if last_entries else None
+        except Exception:  # noqa: BLE001
+            last_ingest = None
 
-            # Slice #136: when review_only is set, group rows by session_id
-            # so the user can collapse / expand each Champions Duel as a
-            # unit rather than scrolling 11+ unrelated rows. Sessions
-            # without an ID get bucketed under the empty-string key
-            # ("Unsessioned captures") so legacy data still appears.
-            review_groups: list[dict] = []
-            if review_only:
-                from collections import defaultdict as _dd
-                by_session: dict[str, list[ArenaMatch]] = _dd(list)
-                for r in rows:
-                    by_session[r.session_id or ""].append(r)
-                # Sort: real sessions first by most-recent capture, then
-                # the unsessioned bucket at the bottom.
-                def _group_sort_key(item: tuple[str, list[ArenaMatch]]):
-                    sid, sess_rows = item
-                    most_recent = max(
-                        (r.id or 0 for r in sess_rows), default=0
-                    )
-                    return (sid == "", -most_recent)
-                for sid, sess_rows in sorted(by_session.items(), key=_group_sort_key):
-                    sc = session_matrices.get(sid) if sid else None
-                    review_groups.append({
-                        "session_id": sid,
-                        "session_label": (
-                            sc.session_label if sc else None
-                        ) or (
-                            "Unsessioned captures" if not sid
-                            else f"session {sid[:8]}…"
-                        ),
-                        "session_kind": sc.session_kind if sc else None,
-                        "rows": sorted(
-                            sess_rows, key=lambda r: r.id or 0,
-                        ),
-                        "review_count": sum(
-                            1 for r in sess_rows if r.needs_review
-                        ),
-                    })
-        upload_summary = None
-        if uploaded is not None:
-            upload_summary = {
-                "uploaded": uploaded or 0,
-                "rookie": rookie or 0,
-                "special": special or 0,
-                "champion": champion or 0,
-                "skipped": skipped or 0,
-                "review": review or 0,
-            }
-        # Counts for the in-page filter chips (predictions awaiting results).
-        n_pred_sessions = sum(
-            1 for sc in session_matrices.values()
-            if sc.session_kind == "predictions"
-        )
         return templates.TemplateResponse(
             request,
             "captures_list.html",
             {
-                "captures": rows,
-                "review_only": review_only,
+                "sessions": sessions,
+                "n_sessions_total": n_sessions,
+                "page": page,
+                "total_pages": total_pages,
                 "mode": mode,
                 "outcome": outcome,
-                "session_kind": session_kind,
-                "since": since,
                 "snapshots": snapshots,
-                "row_warnings": row_warnings,
-                "row_snap_status": row_snap_status,
-                "set_warnings": set_warnings,
-                "session_summaries": session_summaries,
-                "review_groups": review_groups,
-                "upload_summary": upload_summary,
-                "upload_error": upload_error,
-                "matcher_loaded": _matcher() is not None,
-                "n_predictions_awaiting": n_pred_sessions,
+                "since": since,
+                "dashboard": {
+                    "n_rookie_sessions": n_rookie_sessions,
+                    "n_rookie_rows": len(rookie_rows),
+                    "n_champion_sessions": n_champion_sessions,
+                    "n_champion_rows": len(champion_rows),
+                    "n_complete_snap": n_complete_snap,
+                    "n_total_rows": len(all_rows),
+                    "last_ingest": last_ingest,
+                },
             },
         )
 
@@ -832,12 +907,19 @@ def create_app(
         return Response(content=buf.getvalue(), media_type="image/png")
 
     @app.get("/captures/{capture_id}/screenshot/{which}")
-    def captures_screenshot(capture_id: int, which: str) -> Response:
+    def captures_screenshot(
+        capture_id: int, which: str, w: Optional[int] = None,
+    ) -> Response:
         """Serve the PNG referenced by an ArenaMatch row.
 
         ``which`` is one of ``pre`` or ``record``. Only screenshots
         actually referenced by a DB row can be served — no arbitrary
         filesystem access via this endpoint.
+
+        ``w`` (optional, capped at 1510) downscales the image to the
+        given width via PIL — used by /matches for inline thumbnails so
+        we don't ship 1MB PNGs per cell × 25 cells × N sessions on one
+        page. Aspect ratio preserved.
 
         Slice #121 — if the stored path doesn't resolve (test fixtures
         were trimmed, project moved, web server cwd differs from import
@@ -874,6 +956,66 @@ def create_app(
                     cap.battle_record_screenshot = new_str
                 session.add(cap)
                 session.commit()
+        if w is not None and 0 < w < 1510:
+            return _serve_resized_png(resolved, w)
+        return FileResponse(resolved, media_type="image/png")
+
+    @app.get("/sessions/{session_id}/round/{round_no}/opp-loadout")
+    def champion_opp_loadout(
+        session_id: str, round_no: int, w: Optional[int] = None,
+    ) -> Response:
+        """Serve the OPPONENT-side loadout PNG for a Champion duel round.
+
+        The user-side loadout lives on ``ArenaMatch.pre_battle_screenshot``,
+        but the opponent's per-round loadout isn't on the ArenaMatch row
+        (the per-round payload only stores one side). For the /matches
+        card view we need both, so this endpoint looks up the sibling
+        loadout from ``PromoMatchScreenshot`` via the
+        ``champion-pm{promo_match_id}`` session_id convention.
+        """
+        if not session_id.startswith("champion-pm"):
+            raise HTTPException(400, "only champion sessions have an opp loadout")
+        try:
+            pm_id = int(session_id[len("champion-pm"):])
+        except ValueError:
+            raise HTTPException(400, "malformed session_id") from None
+        if not 1 <= round_no <= 5:
+            raise HTTPException(400, "round_no must be 1..5")
+        with get_session(engine) as session:
+            # Find the ArenaMatch row to know which side is "user" (so
+            # we serve the OTHER side here).
+            am = session.exec(
+                select(ArenaMatch).where(
+                    ArenaMatch.session_id == session_id,
+                    ArenaMatch.round_index == round_no,
+                )
+            ).first()
+            if am is None:
+                raise HTTPException(404, "no ArenaMatch row for that round")
+            cq = am.capture_quality or {}
+            user_pos = cq.get("user_position", "top")
+            opp_pos = "bottom" if user_pos == "top" else "top"
+            opp_dir = f"player_{opp_pos}"
+
+            shots = session.exec(
+                select(PromoMatchScreenshot).where(
+                    PromoMatchScreenshot.match_id == pm_id,
+                    PromoMatchScreenshot.kind == "player_loadout",
+                )
+            ).all()
+            target = None
+            for s in shots:
+                p = Path(s.file_path)
+                if opp_dir in p.parts and p.name == f"round_{round_no}.png":
+                    target = s.file_path
+                    break
+        if target is None:
+            raise HTTPException(404, f"no {opp_dir}/round_{round_no}.png for pm{pm_id}")
+        resolved = _resolve_screenshot_path(target, "champion")
+        if resolved is None:
+            raise HTTPException(404, f"file missing on disk: {target}")
+        if w is not None and 0 < w < 1510:
+            return _serve_resized_png(resolved, w)
         return FileResponse(resolved, media_type="image/png")
 
     @app.post("/captures/{capture_id}/cell")

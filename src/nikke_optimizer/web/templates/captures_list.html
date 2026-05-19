@@ -1,293 +1,388 @@
 {% extends "_base.html" %}
-{% block title %}Captures — NikkeOptimizer{% endblock %}
+{% block title %}Matches — NikkeOptimizer{% endblock %}
 {% block body %}
-<h1>Arena captures ({{ captures | length }})</h1>
 
-<form method="get" class="filters">
+<style>
+/* Page-scoped — feel free to migrate to style.css once it stabilizes. */
+.m-page h1 { margin-bottom: 4px; }
+
+.m-dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 22px;
+}
+.m-stat {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 8px;
+    padding: 14px 16px;
+}
+.m-stat .label {
+    font-size: 11px; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 6px;
+}
+.m-stat .value {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 22px; color: #e5e7eb; font-weight: 600;
+}
+.m-stat .sub {
+    color: #6b7280; font-size: 11px; margin-top: 4px;
+}
+
+.m-filters {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 22px;
+    display: flex; gap: 24px; flex-wrap: wrap;
+    align-items: center;
+}
+.m-filters label { color: #6b7280; font-size: 12px; }
+.m-filters select {
+    background: #181b21; color: #e5e7eb;
+    border: 1px solid #2a2f3a; border-radius: 4px;
+    padding: 4px 8px; margin-left: 6px;
+    font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+}
+
+/* Session card */
+.m-session {
+    background: #14161b;
+    border: 1px solid #1f2228;
+    border-radius: 8px;
+    margin-bottom: 18px;
+    overflow: hidden;
+}
+.m-session-head {
+    padding: 12px 18px;
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    border-bottom: 1px solid #1f2228;
+}
+.m-session-head .mode-tag {
+    font-size: 10px; padding: 2px 8px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em;
+}
+.m-session-head .mode-tag.rookie  { background: #2a1f0f; color: #f87171; border: 1px solid #5f3e1e; }
+.m-session-head .mode-tag.champion{ background: #1a1f2e; color: #a78bfa; border: 1px solid #3e3e7a; }
+.m-session-head .when {
+    color: #e5e7eb; font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+}
+.m-session-head .vs {
+    color: #9ca3af; font-size: 14px;
+}
+.m-session-head .vs strong { color: #e5e7eb; }
+.m-session-head .score {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 14px; font-weight: 600;
+    padding: 3px 10px; border-radius: 4px;
+    background: #181b21; border: 1px solid #2a2f3a;
+    color: #e5e7eb;
+}
+.m-session-head .snap-summary {
+    font-size: 11px; padding: 2px 8px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid; font-weight: 600;
+}
+.m-session-head .snap-summary.both    { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.m-session-head .snap-summary.partial { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.m-session-head .snap-summary.none    { background: #1f2228; color: #6b7280; border-color: #2a2f3a; }
+.m-session-head .sub {
+    color: #6b7280; font-size: 11px;
+    font-family: "SF Mono", Menlo, monospace;
+    margin-left: auto;
+}
+
+.m-cells {
+    padding: 14px;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 12px;
+}
+.m-cell {
+    background: #181b21;
+    border: 1px solid #2a2f3a;
+    border-radius: 6px;
+    padding: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    min-width: 0;
+}
+.m-cell.outcome-win  { border-left: 3px solid #1e5f30; }
+.m-cell.outcome-loss { border-left: 3px solid #5f1e2e; }
+.m-cell.outcome-none { border-left: 3px solid #2a2f3a; }
+.m-cell .cell-head {
+    display: flex; align-items: baseline; gap: 8px;
+}
+.m-cell .cell-head .num {
+    color: #6b7280; font-family: "SF Mono", Menlo, monospace;
+    font-size: 12px; font-weight: 600;
+}
+.m-cell .cell-head .outcome-pill {
+    font-size: 11px; padding: 1px 6px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace; font-weight: 700;
+}
+.m-cell .cell-head .outcome-pill.win  { background: #1c2419; color: #86efac; }
+.m-cell .cell-head .outcome-pill.loss { background: #2a1a1f; color: #f87171; }
+.m-cell .cell-head .outcome-pill.none { background: #1f2228; color: #6b7280; }
+.m-cell .cell-opp {
+    color: #e5e7eb; font-size: 12px; font-weight: 600;
+}
+.m-cell .cell-opp .lvl { color: #6b7280; font-weight: 400; }
+
+.m-cell .thumbs {
+    display: flex; flex-direction: column; gap: 4px;
+}
+.m-cell .thumbs .row {
+    display: flex; gap: 4px;
+}
+.m-cell .thumbs a {
+    display: block; flex: 1; min-width: 0;
+    background: #0f1115; border: 1px solid #2a2f3a; border-radius: 3px;
+    overflow: hidden; line-height: 0;
+    transition: border-color 0.1s ease;
+}
+.m-cell .thumbs a:hover { border-color: #4ad; }
+.m-cell .thumbs img {
+    width: 100%; height: auto; display: block;
+}
+.m-cell .thumbs .empty {
+    color: #6b7280; font-size: 10px; padding: 8px;
+    text-align: center; font-style: italic;
+}
+
+.m-cell .teams {
+    font-size: 10px; color: #9ca3af; line-height: 1.4;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.m-cell .teams .team-label {
+    color: #6b7280; text-transform: uppercase; font-size: 9px;
+    letter-spacing: 0.06em;
+}
+
+.m-cell .cell-foot {
+    display: flex; align-items: center; gap: 6px;
+    margin-top: auto;
+    padding-top: 6px;
+    border-top: 1px solid #1f2228;
+}
+.m-cell .snap-pill {
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    font-family: "SF Mono", Menlo, monospace;
+    border: 1px solid;
+}
+.m-cell .snap-pill.both    { background: #1c2419; color: #86efac; border-color: #1e5f30; }
+.m-cell .snap-pill.partial { background: #2a2419; color: #fbbf24; border-color: #5f4a1e; }
+.m-cell .snap-pill.none    { background: #1f2228; color: #6b7280; border-color: #2a2f3a; }
+.m-cell .detail-link {
+    margin-left: auto;
+    font-size: 11px; color: #6da6ff; text-decoration: none;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.m-cell .detail-link:hover { text-decoration: underline; }
+
+.m-pagination {
+    display: flex; gap: 12px; align-items: center;
+    margin: 24px 0; justify-content: center;
+}
+.m-pagination a, .m-pagination span {
+    padding: 6px 14px; border-radius: 4px;
+    background: #181b21; border: 1px solid #2a2f3a;
+    color: #e5e7eb; text-decoration: none;
+    font-family: "SF Mono", Menlo, monospace; font-size: 13px;
+}
+.m-pagination a:hover { border-color: #4ad; }
+.m-pagination span { color: #6b7280; }
+
+.m-empty {
+    color: #6b7280; padding: 60px 0; text-align: center;
+    border: 1px dashed #1f2228; border-radius: 8px;
+    line-height: 1.6;
+}
+.m-empty a { color: #6da6ff; }
+</style>
+
+<div class="m-page">
+<h1>Matches</h1>
+
+<div class="m-dashboard">
+    <div class="m-stat">
+        <div class="label">Rookie</div>
+        <div class="value">{{ dashboard.n_rookie_sessions }} runs</div>
+        <div class="sub">{{ dashboard.n_rookie_rows }} battles</div>
+    </div>
+    <div class="m-stat">
+        <div class="label">Champion</div>
+        <div class="value">{{ dashboard.n_champion_sessions }} duels</div>
+        <div class="sub">{{ dashboard.n_champion_rows }} rounds</div>
+    </div>
+    <div class="m-stat" title="Rows with full roster context for both players">
+        <div class="label">Complete snapshots</div>
+        <div class="value">{{ dashboard.n_complete_snap }}</div>
+        <div class="sub">of {{ dashboard.n_total_rows }} total rows</div>
+    </div>
+    <div class="m-stat">
+        <div class="label">Last ingest</div>
+        {% if dashboard.last_ingest %}
+        <div class="value" style="font-size:14px;">{{ dashboard.last_ingest.when_local }}</div>
+        <div class="sub">{{ dashboard.last_ingest.trigger }}</div>
+        {% else %}
+        <div class="value" style="font-size:14px;color:#6b7280;">none yet</div>
+        <div class="sub">daemon hasn't fired</div>
+        {% endif %}
+    </div>
+</div>
+
+<form method="get" class="m-filters">
     <label>Mode
         <select name="mode" onchange="this.form.submit()">
-            <option value="" {% if not mode %}selected{% endif %}>any</option>
-            <option value="rookie" {% if mode == 'rookie' %}selected{% endif %}>rookie</option>
-            <option value="special" {% if mode == 'special' %}selected{% endif %}>special</option>
-            <option value="champion" {% if mode == 'champion' %}selected{% endif %}>champion (loadout)</option>
-            <option value="champion_battle_record" {% if mode == 'champion_battle_record' %}selected{% endif %}>champion result</option>
-            <option value="champion_duel_result" {% if mode == 'champion_duel_result' %}selected{% endif %}>duel result</option>
-        </select>
-    </label>
-    <label>Session
-        <select name="session_kind" onchange="this.form.submit()">
-            <option value="" {% if not session_kind %}selected{% endif %}>any</option>
-            <option value="predictions" {% if session_kind == 'predictions' %}selected{% endif %}>predictions (awaiting results)</option>
-            <option value="partial" {% if session_kind == 'partial' %}selected{% endif %}>partial</option>
-            <option value="complete" {% if session_kind == 'complete' %}selected{% endif %}>complete</option>
-        </select>
-    </label>
-    <label>Since
-        <select name="since" onchange="this.form.submit()">
-            <option value="" {% if not since %}selected{% endif %}>all time</option>
-            <option value="7d" {% if since == '7d' %}selected{% endif %}>7 days</option>
-            <option value="30d" {% if since == '30d' %}selected{% endif %}>30 days</option>
-        </select>
-    </label>
-    <label>
-        <input type="checkbox" name="review_only" value="true" onchange="this.form.submit()" {% if review_only %}checked{% endif %}>
-        Review only
-    </label>
-    <label>Outcome
-        <select name="outcome" onchange="this.form.submit()">
-            <option value="" {% if not outcome %}selected{% endif %}>any</option>
-            <option value="win" {% if outcome == 'win' %}selected{% endif %}>win</option>
-            <option value="loss" {% if outcome == 'loss' %}selected{% endif %}>loss</option>
-            <option value="timeout" {% if outcome == 'timeout' %}selected{% endif %}>timeout</option>
-            <option value="untagged" {% if outcome == 'untagged' %}selected{% endif %}>untagged</option>
+            <option value="" {% if not mode %}selected{% endif %}>All</option>
+            <option value="rookie" {% if mode == 'rookie' %}selected{% endif %}>Rookie</option>
+            <option value="champion" {% if mode == 'champion' %}selected{% endif %}>Champion</option>
         </select>
     </label>
     <label>Snapshots
         <select name="snapshots" onchange="this.form.submit()">
-            <option value="" {% if not snapshots %}selected{% endif %}>any</option>
-            <option value="both" {% if snapshots == 'both' %}selected{% endif %}>✓ both players</option>
-            <option value="user" {% if snapshots == 'user' %}selected{% endif %}>user only</option>
-            <option value="opp" {% if snapshots == 'opp' %}selected{% endif %}>opp only</option>
-            <option value="none" {% if snapshots == 'none' %}selected{% endif %}>none</option>
+            <option value="" {% if not snapshots %}selected{% endif %}>Any</option>
+            <option value="both" {% if snapshots == 'both' %}selected{% endif %}>✓ Both</option>
+            <option value="user" {% if snapshots == 'user' %}selected{% endif %}>User only</option>
+            <option value="opp" {% if snapshots == 'opp' %}selected{% endif %}>Opp only</option>
+            <option value="none" {% if snapshots == 'none' %}selected{% endif %}>None</option>
+        </select>
+    </label>
+    <label>Outcome
+        <select name="outcome" onchange="this.form.submit()">
+            <option value="" {% if not outcome %}selected{% endif %}>Any</option>
+            <option value="win" {% if outcome == 'win' %}selected{% endif %}>Win</option>
+            <option value="loss" {% if outcome == 'loss' %}selected{% endif %}>Loss</option>
+            <option value="untagged" {% if outcome == 'untagged' %}selected{% endif %}>Untagged</option>
+        </select>
+    </label>
+    <label>Date
+        <select name="since" onchange="this.form.submit()">
+            <option value="" {% if not since %}selected{% endif %}>All time</option>
+            <option value="7d" {% if since == '7d' %}selected{% endif %}>Last 7 days</option>
+            <option value="30d" {% if since == '30d' %}selected{% endif %}>Last 30 days</option>
         </select>
     </label>
 </form>
 
-{% if review_only and review_groups %}
-<h2>
-    Needs review &mdash; {{ review_groups | length }} session(s)
-    <form method="post" action="/captures/discard-needs-review"
-          style="display: inline; margin-left: 1em"
-          onsubmit="return confirm('Discard ALL needs-review captures? This deletes them and their screenshots permanently.');">
-        <input type="hidden" name="confirm" value="yes">
-        <button type="submit" class="danger">Discard ALL needs-review</button>
-    </form>
-</h2>
-{% for g in review_groups %}
-<details {% if g.review_count %}open{% endif %} class="session-group">
-    <summary>
-        <strong>{{ g.session_label }}</strong>
-        {% if g.session_kind %}
-            <span class="badge badge-{{ g.session_kind }}">{{ g.session_kind }}</span>
-        {% endif %}
-        <span class="muted small">
-            {{ g.rows | length }} captures &middot; {{ g.review_count }} need review
+{% if not sessions %}
+<div class="m-empty">
+    <div style="font-size:18px; margin-bottom: 8px;">No matches match these filters.</div>
+    Drop a rookie run or Champions duel into the Syncthing folder and the daemon
+    will pick it up — see <a href="/auto-import">Auto Importer</a> for a live tail.
+</div>
+{% endif %}
+
+{% for s in sessions %}
+<div class="m-session">
+    <div class="m-session-head">
+        <span class="mode-tag {{ s.mode }}">{{ s.mode }}</span>
+        <span class="when">{{ s.captured_local or '—' }}</span>
+        <span class="vs">
+            {% if s.mode == 'champion' %}
+                <strong>{{ s.user_label or '?' }}</strong> vs <strong>{{ s.opp_label or '?' }}</strong>
+            {% else %}
+                <strong>{{ s.user_label or '?' }}</strong> · {{ s.cells | length }} battles
+            {% endif %}
         </span>
-        {% if g.session_id %}
-        <form method="post" action="/sessions/{{ g.session_id }}/delete"
-              style="display: inline; margin-left: 1em"
-              onsubmit="return confirm('Discard the entire session {{ g.session_label }}? This deletes all {{ g.rows | length }} captures and their screenshots.');">
-            <button type="submit" class="danger small">Discard session</button>
-        </form>
-        <a href="/uploads/preview/{{ g.session_id }}" class="button-link"
-           style="margin-left: 0.5em">Open preview</a>
+        <span class="score">{{ s.wins }}W – {{ s.losses }}L</span>
+        {% if s.snap_summary == 'both' %}
+        <span class="snap-summary both" title="full roster context for every row">✓ Snapshots complete</span>
+        {% elif s.snap_summary == 'partial' %}
+        <span class="snap-summary partial" title="some battles have full snapshots, others don't">~ Partial snapshots</span>
+        {% else %}
+        <span class="snap-summary none" title="no roster context captured">— No snapshots</span>
         {% endif %}
-    </summary>
-    <table class="cells">
-        <thead>
-            <tr>
-                <th>ID</th>
-                <th>Mode</th>
-                <th>Round</th>
-                <th>Player</th>
-                <th>Team</th>
-                <th>Action</th>
-            </tr>
-        </thead>
-        <tbody>
-        {% for c in g.rows %}
-            <tr {% if c.needs_review %}class="warning-row"{% endif %}>
-                <td><a href="/captures/{{ c.id }}">{{ c.id }}</a></td>
-                <td>{{ c.mode }}</td>
-                <td>{{ c.round_index or "—" }}</td>
-                <td>{{ c.user_username or "—" }}</td>
-                <td class="muted small">
-                    {{ (c.user_team or []) | map("default", "?", true) | join(", ") }}
-                </td>
-                <td>
-                    <form method="post" action="/captures/{{ c.id }}/delete"
-                          style="display: inline"
-                          onsubmit="return confirm('Discard capture #{{ c.id }}?');">
-                        <button type="submit" class="danger small">Discard</button>
-                    </form>
-                </td>
-            </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-</details>
-{% endfor %}
-<style>
-.session-group {
-    border: 1px solid #2a2a2a;
-    border-radius: 6px;
-    margin: 0.6em 0;
-    padding: 0.5em 0.8em;
-    background: #141414;
-}
-.session-group summary {
-    cursor: pointer;
-    padding: 0.3em 0;
-}
-.session-group summary:hover { background: #1c1c1c; }
-button.danger {
-    background: #5a1010;
-    color: #f5b0b0;
-    border: 1px solid #7a2020;
-    padding: 0.3em 0.7em;
-    cursor: pointer;
-    border-radius: 3px;
-}
-button.danger.small { padding: 0.1em 0.4em; font-size: 0.85em; }
-button.danger:hover { background: #7a1010; }
-</style>
-{% endif %}
-
-{% if session_summaries %}
-<h2>Sessions ({{ session_summaries | length }})</h2>
-<table class="cells">
-    <thead>
-        <tr>
-            <th>Session</th>
-            <th>Kind</th>
-            <th>Loadouts</th>
-            <th>Results</th>
-            <th>Duel</th>
-            <th>Warnings</th>
-            <th>Action</th>
-        </tr>
-    </thead>
-    <tbody>
-    {% for s in session_summaries %}
-        <tr>
-            <td>
-                <a href="/uploads/preview/{{ s.session_id }}">
-                    {{ s.session_label or "session " ~ s.session_id[:8] }}
+        <span class="sub" title="{{ s.session_id }}">{{ s.subtitle }}</span>
+    </div>
+    <div class="m-cells">
+        {% for c in s.cells %}
+        <div class="m-cell outcome-{{ c.outcome or 'none' }}">
+            <div class="cell-head">
+                <span class="num">{% if s.mode == 'champion' %}R{{ c.round_index }}{% else %}#{{ c.round_index }}{% endif %}</span>
+                {% if c.outcome == 'win' %}
+                <span class="outcome-pill win">W</span>
+                {% elif c.outcome == 'loss' %}
+                <span class="outcome-pill loss">L</span>
+                {% else %}
+                <span class="outcome-pill none">?</span>
+                {% endif %}
+            </div>
+            {% if s.mode == 'rookie' %}
+            <div class="cell-opp">
+                vs {{ c.opp_username or '—' }}
+                {% if c.opp_level %}<span class="lvl">· lvl {{ c.opp_level }}</span>{% endif %}
+            </div>
+            {% endif %}
+            <div class="thumbs">
+                {% if s.mode == 'champion' %}
+                <div class="row">
+                    {% if c.loadout_thumb_url %}
+                    <a href="{{ c.loadout_full_url }}" target="_blank" title="User loadout (click for full size)">
+                        <img loading="lazy" src="{{ c.loadout_thumb_url }}" alt="user loadout">
+                    </a>
+                    {% else %}<span class="empty">no user loadout</span>{% endif %}
+                    {% if c.opp_loadout_thumb_url %}
+                    <a href="{{ c.opp_loadout_full_url }}" target="_blank" title="Opponent loadout (click for full size)">
+                        <img loading="lazy" src="{{ c.opp_loadout_thumb_url }}" alt="opp loadout">
+                    </a>
+                    {% else %}<span class="empty">no opp loadout</span>{% endif %}
+                </div>
+                {% else %}
+                {% if c.loadout_thumb_url %}
+                <a href="{{ c.loadout_full_url }}" target="_blank" title="Loadout (click for full size)">
+                    <img loading="lazy" src="{{ c.loadout_thumb_url }}" alt="loadout">
                 </a>
-            </td>
-            <td><span class="badge badge-{{ s.session_kind or 'unknown' }}">{{ s.session_kind or "?" }}</span></td>
-            <td>{{ s.loadouts }} / 10</td>
-            <td>{{ s.results }} / 5</td>
-            <td>{{ "✓" if s.duel_result else "—" }}</td>
-            <td class="muted small">
-                {% if s.warnings %}
-                    {% for w in s.warnings %}<div>⚠ {{ w }}</div>{% endfor %}
-                {% else %}—{% endif %}
-            </td>
-            <td>
-                {% if s.session_kind == "predictions" or s.session_kind == "partial" %}
-                <a href="/uploads/preview/{{ s.session_id }}" class="button-link">Add results</a>
+                {% else %}<span class="empty">no loadout captured</span>{% endif %}
                 {% endif %}
-                <form method="post" action="/sessions/{{ s.session_id }}/delete"
-                      style="display: inline; margin-left: 0.4em"
-                      onsubmit="return confirm('Discard session {{ s.session_label or s.session_id[:8] }}? This deletes all rows + screenshots.');">
-                    <button type="submit" class="danger small">Discard</button>
-                </form>
-            </td>
-        </tr>
-    {% endfor %}
-    </tbody>
-</table>
-<style>
-.badge { padding: 0.1em 0.5em; border-radius: 4px; font-size: 0.85em; }
-.badge-predictions { background: #4a3010; color: #f4b740; }
-.badge-partial { background: #2a3010; color: #c4d440; }
-.badge-complete { background: #103a18; color: #6fdf80; }
-.badge-unknown { background: #333; color: #aaa; }
-.button-link {
-    display: inline-block;
-    padding: 0.25em 0.6em;
-    background: #2a4a8a;
-    color: white;
-    text-decoration: none;
-    border-radius: 3px;
-    font-size: 0.9em;
-}
-.button-link:hover { background: #3a5a9a; }
-</style>
-{% elif n_predictions_awaiting %}
-<p class="muted">
-    {{ n_predictions_awaiting }} predictions session(s) awaiting results.
-    <a href="?session_kind=predictions&amp;since=7d">Show predictions (7d)</a>
-</p>
+                {% if c.result_thumb_url %}
+                <a href="{{ c.result_full_url }}" target="_blank" title="Result (click for full size)">
+                    <img loading="lazy" src="{{ c.result_thumb_url }}" alt="result">
+                </a>
+                {% else %}<span class="empty">no result</span>{% endif %}
+            </div>
+            <div class="teams">
+                {% if c.user_team %}
+                <div><span class="team-label">{{ s.user_label or 'me' }}:</span> {{ c.user_team[:3] | join(', ') }}{% if c.user_team | length > 3 %} +{{ c.user_team | length - 3 }}{% endif %}</div>
+                {% endif %}
+                {% if c.opp_team and s.mode == 'champion' %}
+                <div><span class="team-label">{{ s.opp_label or 'opp' }}:</span> {{ c.opp_team[:3] | join(', ') }}{% if c.opp_team | length > 3 %} +{{ c.opp_team | length - 3 }}{% endif %}</div>
+                {% endif %}
+            </div>
+            <div class="cell-foot">
+                {% if c.snap == 'both' %}
+                <span class="snap-pill both" title="both rosters captured">✓ both</span>
+                {% elif c.snap == 'user' %}
+                <span class="snap-pill partial" title="only user roster">user</span>
+                {% elif c.snap == 'opp' %}
+                <span class="snap-pill partial" title="only opponent roster">opp</span>
+                {% else %}
+                <span class="snap-pill none">—</span>
+                {% endif %}
+                <a class="detail-link" href="{{ c.detail_url }}">#{{ c.capture_id }} →</a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+
+{% if total_pages > 1 %}
+<div class="m-pagination">
+    {% if page > 1 %}
+    <a href="?{% if mode %}mode={{ mode }}&{% endif %}{% if snapshots %}snapshots={{ snapshots }}&{% endif %}{% if outcome %}outcome={{ outcome }}&{% endif %}{% if since %}since={{ since }}&{% endif %}page={{ page - 1 }}">← prev</a>
+    {% endif %}
+    <span>page {{ page }} of {{ total_pages }} · {{ n_sessions_total }} sessions</span>
+    {% if page < total_pages %}
+    <a href="?{% if mode %}mode={{ mode }}&{% endif %}{% if snapshots %}snapshots={{ snapshots }}&{% endif %}{% if outcome %}outcome={{ outcome }}&{% endif %}{% if since %}since={{ since }}&{% endif %}page={{ page + 1 }}">next →</a>
+    {% endif %}
+</div>
 {% endif %}
 
-{# When review_only is on the grouped-by-session UI above replaces the
-   per-row table; rendering the same data twice would just clutter. #}
-{% if not review_only %}
-<table>
-    <thead>
-        <tr>
-            <th>ID</th>
-            <th>Mode</th>
-            <th>Session</th>
-            <th>User</th>
-            <th>Opponent</th>
-            <th>User team</th>
-            <th>Opp team</th>
-            <th title="Tagged win/loss/timeout via the capture detail page; empty until you tag it.">Outcome</th>
-            <th title="Roster snapshot linkage. ✓both = both players' rosters are captured in RosterSnapshot for the season of this match.">Snap</th>
-            <th>Review?</th>
-            <th>Gaps</th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for c in captures %}
-        {% set rw = row_warnings.get(c.id, []) %}
-        {% set sw = set_warnings.get(c.id, []) %}
-        {% set has_gap = rw or sw %}
-        <tr {% if c.needs_review or has_gap %}class="warning-row"{% endif %}>
-            <td><a href="/captures/{{ c.id }}">{{ c.id }}</a></td>
-            <td>{{ c.mode }}{% if c.round_index %} (R{{ c.round_index }}){% endif %}</td>
-            <td>
-                {% if c.session_id %}
-                <span class="muted small" title="{{ c.session_id }}">
-                    {{ c.session_label or c.session_id[:18] ~ '…' }}
-                </span>
-                {% else %}—{% endif %}
-            </td>
-            <td>{{ c.user_username or "-" }}</td>
-            <td>{{ c.opponent_username or "-" }}</td>
-            <td>{{ (c.user_team or []) | map("default", "?", true) | join(", ") }}</td>
-            <td>{{ (c.opponent_team or []) | map("default", "?", true) | join(", ") }}</td>
-            <td>
-                {% if c.outcome %}
-                    <span class="outcome outcome-{{ c.outcome }}">{{ c.outcome }}</span>
-                    {% if c.user_role %}<span class="muted small">({{ c.user_role }})</span>{% endif %}
-                {% else %}—{% endif %}
-            </td>
-            <td>
-                {% set ss = row_snap_status.get(c.id, 'none') %}
-                {% if ss == 'both' %}
-                    <span class="snap-pill snap-both" title="both rosters captured: champion → RosterSnapshot FKs; rookie → OwnedCharacter + RookieArenaSnapshot">✓ both</span>
-                {% elif ss == 'user' %}
-                    <span class="snap-pill snap-partial" title="only user-side roster captured; opponent missing">user</span>
-                {% elif ss == 'opp' %}
-                    <span class="snap-pill snap-partial" title="only opponent-side roster captured; user missing">opp</span>
-                {% else %}
-                    <span class="snap-pill snap-none" title="no roster snapshot for either side">—</span>
-                {% endif %}
-            </td>
-            <td>{{ "yes" if c.needs_review else "no" }}</td>
-            <td class="muted small">
-                {% if has_gap %}
-                    {% for w in rw %}<div>· {{ w }}</div>{% endfor %}
-                    {% for w in sw %}<div>⚠ {{ w }}</div>{% endfor %}
-                {% else %}
-                    —
-                {% endif %}
-            </td>
-            <td>
-                <form method="post" action="/captures/{{ c.id }}/delete"
-                      style="display: inline"
-                      onsubmit="return confirm('Discard capture #{{ c.id }}?');">
-                    <button type="submit" class="danger small">Discard</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-{% endif %}
+</div>
 {% endblock %}
