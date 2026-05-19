@@ -3,133 +3,6 @@
 {% block body %}
 <h1>Arena captures ({{ captures | length }})</h1>
 
-{% if upload_summary %}
-<div class="warnings-block">
-    <p><strong>Upload result:</strong>
-        {{ upload_summary.uploaded }} screenshot(s) processed —
-        rookie: {{ upload_summary.rookie }},
-        SP: {{ upload_summary.special }},
-        Champions: {{ upload_summary.champion }},
-        skipped: {{ upload_summary.skipped }},
-        flagged for review: {{ upload_summary.review }}.
-    </p>
-</div>
-{% endif %}
-{% if upload_error %}
-<div class="warnings-block">
-    <p><strong>Upload error:</strong>
-        {% if upload_error == "no_matcher" %}
-            Portrait matcher not loaded — no portrait library found at
-            <code>~/Library/Application Support/NikkeOptimizer/portraits/</code>.
-            Either copy your <code>Portrait_library</code> there, or
-            restart the server with <code>nikkeoptimizer web --library &lt;path&gt;</code>.
-        {% elif upload_error == "no_files" %}
-            No files were attached. Drop image files into the upload zone.
-        {% else %}
-            {{ upload_error }}
-        {% endif %}
-    </p>
-</div>
-{% endif %}
-
-<form method="post" action="/captures/upload" enctype="multipart/form-data" id="upload-form">
-    <fieldset class="upload-options">
-        <legend class="muted small">Upload options</legend>
-        <div class="upload-row">
-            <span class="upload-label">PvP mode</span>
-            <label><input type="radio" name="mode_hint" value="" checked> Auto</label>
-            <label><input type="radio" name="mode_hint" value="rookie"> Rookie</label>
-            <label><input type="radio" name="mode_hint" value="sp"> SP</label>
-            <label><input type="radio" name="mode_hint" value="champions"> Champions</label>
-        </div>
-        <div class="upload-row">
-            <label class="grow">
-                Session label (optional)
-                <input type="text" name="session_label"
-                       placeholder="e.g. vs Aerin 2026-05-03"
-                       maxlength="100">
-            </label>
-            <span class="muted small">
-                All files in one upload share a session — used for
-                completeness checks &amp; the "Awaiting results" filter.
-            </span>
-        </div>
-    </fieldset>
-    <label for="upload-zone" class="dropzone" id="upload-zone">
-        <strong>Drop arena screenshots here</strong><br>
-        <span class="muted small">
-            Or click to choose files. Auto-detects mode unless you pick one above.
-            {% if not matcher_loaded %}
-                <span style="color: #f4b740">⚠ matcher not loaded — start server with <code>--library</code> to enable.</span>
-            {% endif %}
-        </span>
-        <input type="file" id="upload-zone-input" name="files" multiple accept="image/png,image/jpeg,image/webp" style="display:none">
-    </label>
-</form>
-<style>
-.upload-options {
-    border: 1px solid #333;
-    border-radius: 6px;
-    padding: 0.6em 0.8em;
-    margin-bottom: 0.6em;
-    background: #141414;
-}
-.upload-options legend { padding: 0 0.4em; }
-.upload-row {
-    display: flex;
-    align-items: center;
-    gap: 0.8em;
-    margin: 0.3em 0;
-    flex-wrap: wrap;
-}
-.upload-label { color: #aaa; min-width: 5em; }
-.upload-options label.grow { flex-grow: 1; min-width: 16em; }
-.upload-options input[type="text"] { width: 100%; padding: 0.3em 0.4em; }
-</style>
-<style>
-.dropzone {
-    display: block;
-    border: 2px dashed #555;
-    border-radius: 8px;
-    padding: 1.5em;
-    text-align: center;
-    margin-bottom: 1em;
-    cursor: pointer;
-    background: #1a1a1a;
-}
-.dropzone.dragover {
-    border-color: #4ad;
-    background: #1a2a3a;
-}
-</style>
-<script>
-(function() {
-    const zone = document.getElementById('upload-zone');
-    const input = document.getElementById('upload-zone-input');
-    const form = document.getElementById('upload-form');
-    if (!zone || !input || !form) return;
-    zone.addEventListener('click', () => input.click());
-    input.addEventListener('change', () => { if (input.files.length) form.submit(); });
-    ['dragover', 'dragenter'].forEach(ev => {
-        zone.addEventListener(ev, e => {
-            e.preventDefault();
-            zone.classList.add('dragover');
-        });
-    });
-    ['dragleave', 'drop'].forEach(ev => {
-        zone.addEventListener(ev, e => {
-            e.preventDefault();
-            zone.classList.remove('dragover');
-        });
-    });
-    zone.addEventListener('drop', e => {
-        if (e.dataTransfer && e.dataTransfer.files.length) {
-            input.files = e.dataTransfer.files;
-            form.submit();
-        }
-    });
-})();
-</script>
 <form method="get" class="filters">
     <label>Mode
         <select name="mode" onchange="this.form.submit()">
@@ -369,11 +242,9 @@ button.danger:hover { background: #7a1010; }
             <td>{{ c.mode }}{% if c.round_index %} (R{{ c.round_index }}){% endif %}</td>
             <td>
                 {% if c.session_id %}
-                <a href="/uploads/preview/{{ c.session_id }}"
-                   class="muted small"
-                   title="Open session preview">
-                    {{ c.session_label or c.session_id[:8] ~ '…' }}
-                </a>
+                <span class="muted small" title="{{ c.session_id }}">
+                    {{ c.session_label or c.session_id[:18] ~ '…' }}
+                </span>
                 {% else %}—{% endif %}
             </td>
             <td>{{ c.user_username or "-" }}</td>

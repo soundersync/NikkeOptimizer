@@ -719,141 +719,29 @@ def create_app(
             },
         )
 
-    @app.post("/captures/upload", response_class=HTMLResponse)
-    async def captures_upload(
-        request: Request,
-        files: list[UploadFile] = File(...),
-        mode_hint: str = Form(""),  # '', 'rookie', 'sp', 'champions'
-        session_label: str = Form(""),
-        # When supplied, the upload merges into an existing session
-        # (used by the "Add results" workflow to attach Battle Records to
-        # an earlier predictions-only session). Empty = create a new one.
-        existing_session_id: str = Form(""),
-    ) -> Response:
-        """Upload one or more arena screenshots.
+    # Legacy iOS-screenshot upload flow — removed 2026-05-18 per user
+    # direction ("entirely rewritten with how we listen to incoming
+    # captures now"). The Syncthing-driven auto-import daemon
+    # (auto_import.py + ingest_root + ingest_rookie_root) covers
+    # every capture mode end-to-end; drag-drop into the web UI is no
+    # longer needed.
+    #
+    # Routes kept as 303-redirects so any stale bookmark / button on
+    # an old tab lands somewhere useful instead of 404'ing. The
+    # `/uploads/preview/{session_id}` matrix view was built for the
+    # OLD per-row data model (3 rows per Champion round: P1 loadout
+    # / P2 loadout / round result) and renders the NEW per-round
+    # builder's single-row format incorrectly — see champion-pm130
+    # incident note in `champion_arena_match.py`.
 
-        Saves each file under ``<db_dir>/uploads/`` (persistent so
-        FileResponse can re-serve them), runs the arena import
-        pipeline, and redirects to ``/uploads/preview/{session_id}``
-        with the matrix view so the user can verify completeness
-        before navigating away.
+    @app.post("/captures/upload")
+    @app.get("/captures/upload")
+    def captures_upload_removed() -> Response:
+        return RedirectResponse(url="/captures", status_code=303)
 
-        Requires the server to have been started with ``--library``
-        — the portrait matcher needs an indexed library to identify
-        cells. Returns ``upload_error=no_matcher`` if missing.
-        """
-        from ..roster.arena_importer import import_arena_screenshots
-
-        matcher = _matcher()
-        if matcher is None:
-            return RedirectResponse(
-                url="/captures?upload_error=no_matcher",
-                status_code=303,
-            )
-
-        from pathlib import Path as _Path
-        from ..data.config import get_self_username
-        from ..data.db import default_db_path
-        import time
-
-        db_path = (
-            _Path(app.state.db_path)
-            if app.state.db_path is not None
-            else _Path(default_db_path())
-        )
-        uploads_dir = db_path.parent / "uploads"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-
-        saved_paths: list[_Path] = []
-        for upload in files:
-            if not upload.filename:
-                continue
-            stem = _Path(upload.filename).stem
-            suffix = _Path(upload.filename).suffix or ".png"
-            target = uploads_dir / f"{int(time.time() * 1000)}_{stem}{suffix}"
-            content = await upload.read()
-            target.write_bytes(content)
-            saved_paths.append(target)
-
-        if not saved_paths:
-            return RedirectResponse(url="/captures?upload_error=no_files", status_code=303)
-
-        # mode_hint: empty string from the form means "auto-detect"; convert
-        # to None so the importer doesn't try to match it as a literal hint.
-        hint = mode_hint.strip() or None
-        label = session_label.strip() or None
-        sid = existing_session_id.strip() or None
-
-        report = import_arena_screenshots(
-            saved_paths,
-            matcher,
-            db_path=db_path,
-            user_username=(get_self_username() or "NIKA"),
-            mode_hint=hint,
-            session_id=sid,
-            session_label=label,
-        )
-        log.info("upload report: %s", report.to_dict())
-        # Redirect to the preview matrix when a session_id is set; the page
-        # surfaces completeness gaps and cell-level confidence so the user
-        # can decide what to fix before navigating away. Falls back to the
-        # captures list if anything went wrong with session generation.
-        if report.session_id:
-            return RedirectResponse(
-                url=f"/uploads/preview/{report.session_id}",
-                status_code=303,
-            )
-        params = (
-            f"uploaded={report.files_seen}"
-            f"&rookie={report.rookie}"
-            f"&special={report.special}"
-            f"&champion={report.champion}"
-            f"&skipped={report.skipped}"
-            f"&review={report.needs_review}"
-        )
-        return RedirectResponse(url=f"/captures?{params}", status_code=303)
-
-    @app.get("/uploads/preview/{session_id}", response_class=HTMLResponse)
-    def upload_preview(request: Request, session_id: str) -> Response:
-        """Pre-save / post-upload completeness preview for one session.
-
-        Shows the 5-round × 3-screen-type matrix for Champions sessions,
-        plus the Duel Result row, plus per-cell match-confidence
-        summaries. Same view powers both:
-          - Immediate post-upload landing page (verify what just imported)
-          - Returning later from the "Awaiting results" filter to add
-            results to an existing predictions-only session
-        """
-        from ..data.config import get_self_username
-        from .capture_warnings import (
-            session_completeness,
-        )
-        with get_session(engine) as session:
-            captures = list(
-                session.exec(
-                    select(ArenaMatch).where(
-                        ArenaMatch.session_id == session_id
-                    )
-                ).all()
-            )
-            char_names = sorted(
-                c.name for c in session.exec(select(Character)).all()
-            )
-        if not captures:
-            raise HTTPException(404, f"session {session_id} has no captures")
-        username = get_self_username()
-        sc = session_completeness(captures, user_username=username)
-        return templates.TemplateResponse(
-            request,
-            "upload_preview.html",
-            {
-                "session_id": session_id,
-                "captures": captures,
-                "completeness": sc,
-                "captures_by_id": {c.id: c for c in captures},
-                "char_names": char_names,
-            },
-        )
+    @app.get("/uploads/preview/{session_id}")
+    def upload_preview_removed(session_id: str) -> Response:
+        return RedirectResponse(url="/captures", status_code=303)
 
     @app.get("/captures/{capture_id}/cell-crop/{team}/{slot}.png")
     def captures_cell_crop(capture_id: int, team: str, slot: int) -> Response:
@@ -1039,7 +927,8 @@ def create_app(
                 if row is not None:
                     sid = row.session_id
             if sid:
-                target = f"/uploads/preview/{sid}"
+                # Legacy preview removed; fall back to /captures.
+                target = "/captures"
                 if anchor:
                     safe = anchor.lstrip("#").strip()
                     if safe:
@@ -1258,10 +1147,7 @@ def create_app(
             session.commit()
         # Redirect target: prefer return_to=preview when set + we know
         # the session, otherwise fall back to /captures.
-        if return_to == "preview" and sid:
-            return RedirectResponse(
-                url=f"/uploads/preview/{sid}", status_code=303,
-            )
+        # Legacy session preview removed — always bounce to /captures.
         return RedirectResponse(url="/captures", status_code=303)
 
     @app.post("/sessions/{session_id}/delete")
