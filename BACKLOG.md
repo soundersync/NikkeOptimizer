@@ -8,9 +8,28 @@ Sorted by phase + rough priority within phase.
 
 ## Simulator improvement queue (2026-05-19 sweep)
 
-Coming out of the T1–T9 sim audit (T1–T9 mapped to the simulator
-improvement tasks). Baseline went 42.9% → 57.1% on snapshot=both
-ArenaMatch corpus (14 rows) by fixing T1, T3, T4, T5, T6, T7-AoE.
+Coming out of the T1–T9 + D1–D4 sim audit + calibration. Baseline
+went **42.9% → 85.7%** on snapshot=both ArenaMatch corpus (14 rows):
+- Rookie: 9/9 = 100%
+- Champion: 3/5 = 60%
+
+Per-Nikke damage estimates:
+- Within 2× of actual: ~50/136 (37%)
+- Within 5×: 93/136 (68%)
+- Median ratio: 1.40
+
+Slices that landed (most impactful first):
+- **D4 routing fix** — per_name_stats keys weren't getting routed to
+  Treasure-form names. Lifted 78.6% → 85.7%. (Commit 1b48e4d)
+- **T7 AoE bug** — burst payload was 5× under-counted. Lifted to
+  57.1%. (Commit fd4d7cd)
+- **D3 role-based DPS scaling** — supporters/defenders fire less
+  than attackers in real PvP. (Commit 202b786)
+- **T5 per-rotation heal/shield** — multi-healer summing + refresh
+  cap. (Commit 415982a)
+- **D1 buff duty-cycle modeling** — short-duration BUFF_* scaled by
+  uptime fraction. (Commit 4ecac01)
+
 Remaining structural gaps that need bigger investment:
 
 - **Static evaluator vs event loop** — every CONDITIONAL / ON_HIT /
