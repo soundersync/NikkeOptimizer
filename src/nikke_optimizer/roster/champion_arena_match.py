@@ -408,20 +408,40 @@ def _find_snapshot_id(
     session: Session, *, season_number: int, player_username: Optional[str],
 ) -> Optional[int]:
     """Find the RosterSnapshot.id for a given (season, player) pair.
-    Case-insensitive username match. Returns None when no snapshot
-    exists yet — the FK column stays NULL and the next builder run
-    backfills it after a `fetch-shiftyspad --snapshot` for that player.
+
+    Case-insensitive username match. **Requires the snapshot to have
+    actual character data** (≥1 RosterSnapshotCharacter row) — empty
+    profile-only stubs from privacy-blocked scrapes don't count, since
+    they don't give us the roster context that's the whole point of
+    linking. Returns None when no qualifying snapshot exists; the FK
+    column stays NULL and the next builder run backfills it after a
+    `fetch-shiftyspad --snapshot` lands real roster data.
+
+    Reason: when a player's "My Nikkes" is private on BlablaLink, the
+    scrape still creates a RosterSnapshot row (capturing the public
+    profile + outpost research) but no RosterSnapshotCharacter rows.
+    Linking those FKs would put the row in the "fully snapshotted"
+    bucket without us actually knowing the player's team — misleading
+    when filtering for training-quality data.
     """
     if not player_username:
         return None
+    from ..data.models import RosterSnapshotCharacter
+    target = player_username.strip().upper()
     rows = session.exec(
         select(RosterSnapshot).where(
             RosterSnapshot.season_number == season_number,
         )
     ).all()
-    target = player_username.strip().upper()
     for r in rows:
-        if (r.player_username or "").strip().upper() == target:
+        if (r.player_username or "").strip().upper() != target:
+            continue
+        has_chars = session.exec(
+            select(RosterSnapshotCharacter).where(
+                RosterSnapshotCharacter.snapshot_id == r.id
+            ).limit(1)
+        ).first() is not None
+        if has_chars:
             return r.id
     return None
 
