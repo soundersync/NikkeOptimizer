@@ -358,8 +358,28 @@ def predict_match(
     if user_eval is None or opp_eval is None:
         return None
 
-    res_u = damage_module.resolve(user_eval, opp_eval)
-    res_o = damage_module.resolve(opp_eval, user_eval)
+    # T6 — compute per-team first_burst_sec from weapon mix + skill
+    # gauge bonuses instead of using the legacy 10s default. SG/RL-heavy
+    # comps (Drake / RL-fast) burst earlier than SMG-heavy comps.
+    from .timeline import compute_burst_chain_offsets, _load_weapons
+
+    user_weapons = _load_weapons(user_feed.names)
+    opp_weapons = _load_weapons(opp_feed.names)
+    user_first_burst = (
+        compute_burst_chain_offsets(user_weapons, member_names=user_feed.names)[2]
+        if any(user_weapons) else damage_module.DEFAULT_FIRST_BURST_SEC
+    )
+    opp_first_burst = (
+        compute_burst_chain_offsets(opp_weapons, member_names=opp_feed.names)[2]
+        if any(opp_weapons) else damage_module.DEFAULT_FIRST_BURST_SEC
+    )
+
+    res_u = damage_module.resolve(
+        user_eval, opp_eval, first_burst_sec=user_first_burst,
+    )
+    res_o = damage_module.resolve(
+        opp_eval, user_eval, first_burst_sec=opp_first_burst,
+    )
 
     if res_u.seconds_to_clear_defender < res_o.seconds_to_clear_defender:
         predicted = "user"
