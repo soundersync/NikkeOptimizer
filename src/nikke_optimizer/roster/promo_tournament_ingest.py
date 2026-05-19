@@ -295,6 +295,16 @@ def ingest_root(
         # extracted fields into players_lookup.json.
         _run_player_data_sidecar_pass(engine, stats=stats, force=force_ocr)
 
+    # ArenaMatch builder for Champions — derivation over already-OCR'd
+    # fields, runs unconditionally (outside the `if ocr:` block) so a
+    # separate `backfill-extractions` pass that added new region slugs
+    # (e.g. the disconnect-detection slice) gets reflected in
+    # `arena_match` rows without a full re-OCR. Idempotent.
+    from .champion_arena_match import (
+        build_arena_matches_for_all_champion_tournaments,
+    )
+    build_arena_matches_for_all_champion_tournaments(engine)
+
     # Optional scrape pass — opt-in. Runs the BlablaLink lookup + writes
     # RosterSnapshot rows. Long-running (~20-45 min/tournament) and
     # network/cookie-dependent, so kept off by default; the auto-import

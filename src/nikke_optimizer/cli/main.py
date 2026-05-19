@@ -4244,6 +4244,132 @@ def fetch_rookie_opponents_cmd(
         console.print(f"  [bold]done[/] — {summary}")
 
 
+@app.command("build-champion-matches")
+def build_champion_matches_cmd(
+    only_tournament: Optional[int] = typer.Option(
+        None, "--only-tournament", "-t",
+        help="Build only for this tournament_id (skip others).",
+    ),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """Build ``ArenaMatch`` rows from Champions duel screenshots.
+
+    One row per duel round (so a Champion match contributes up to 5
+    rows, keyed by ``session_id = champion-pm{promo_match_id}``).
+    Idempotent — re-running upserts in place. Disconnect detection +
+    snapshot FK linkage happen automatically.
+
+    Use after a fresh ``backfill-extractions`` pass that populated
+    new region slugs, or after a ``fetch-shiftyspad --snapshot`` that
+    landed new ``RosterSnapshot`` rows you want backfilled into the
+    FK columns.
+    """
+    from ..roster.champion_arena_match import (
+        build_arena_matches_for_all_champion_tournaments,
+    )
+
+    engine = make_engine(db)
+    init_db(engine)
+    stats = build_arena_matches_for_all_champion_tournaments(
+        engine, only_tournament_id=only_tournament,
+    )
+    console.print(
+        f"[bold green]Build complete[/]\n"
+        f"  rows touched:               {stats.rows_touched}\n"
+        f"  rows with outcome:          {stats.rows_with_outcome}\n"
+        f"  rows fully snapshotted:     [bold]{stats.rows_fully_snapshotted}[/]"
+        f" [dim](both player snapshots linked)[/]\n"
+        f"  rows user_snapshot only:    {stats.rows_user_snapshot_only}\n"
+        f"  rows opp_snapshot only:     {stats.rows_opp_snapshot_only}"
+    )
+
+
+@app.command("arena-matches")
+def arena_matches_cmd(
+    mode: Optional[str] = typer.Option(
+        None, "--mode",
+        help="Filter to 'rookie' or 'champion'. Default: all modes.",
+    ),
+    complete_snapshots: bool = typer.Option(
+        False, "--complete-snapshots",
+        help="Only show matches where BOTH user_snapshot_id and "
+             "opponent_snapshot_id are set — i.e. full roster context "
+             "for both players at the time of the match.",
+    ),
+    with_outcome: bool = typer.Option(
+        False, "--with-outcome",
+        help="Only show matches with a populated outcome.",
+    ),
+    limit: int = typer.Option(50, "--limit", "-n", help="Cap output rows."),
+    db: Optional[Path] = typer.Option(None, "--db", help="Override DB path."),
+) -> None:
+    """List ``ArenaMatch`` rows with snapshot + outcome filters.
+
+    Match-level (Champion duel) scoring derived by grouping on
+    ``session_id`` — each session yields up to 5 round rows.
+    ``--complete-snapshots`` is the "we have accurate roster data for
+    both players at the time of this match" filter.
+    """
+    from ..data.models import ArenaMatch
+
+    engine = make_engine(db)
+    init_db(engine)
+    with get_session(engine) as session:
+        q = select(ArenaMatch)
+        if mode:
+            q = q.where(ArenaMatch.mode == mode)
+        if complete_snapshots:
+            q = q.where(
+                ArenaMatch.user_snapshot_id.is_not(None),
+                ArenaMatch.opponent_snapshot_id.is_not(None),
+            )
+        if with_outcome:
+            q = q.where(ArenaMatch.outcome.is_not(None))
+        rows = session.exec(q).all()
+
+    # Group Champion rows into sessions for human-readable summary.
+    from collections import defaultdict
+    by_session: dict = defaultdict(list)
+    for r in rows:
+        by_session[r.session_id or f"_solo_{r.id}"].append(r)
+
+    n_sessions = len(by_session)
+    n_rows = len(rows)
+    fully_snap = sum(
+        1 for r in rows
+        if r.user_snapshot_id is not None and r.opponent_snapshot_id is not None
+    )
+    console.print(
+        f"[bold]{n_rows}[/] rows in [bold]{n_sessions}[/] session(s)"
+        f"  ·  fully-snapshotted rows: [bold green]{fully_snap}[/]"
+    )
+
+    shown = 0
+    for sid, rs in sorted(by_session.items()):
+        if shown >= limit:
+            console.print(f"  [dim]… {n_sessions - shown} more session(s) (use --limit)[/]")
+            break
+        rs = sorted(rs, key=lambda r: r.round_index or 0)
+        first = rs[0]
+        w = sum(1 for r in rs if r.outcome == "win")
+        l = sum(1 for r in rs if r.outcome == "loss")
+        both = (
+            first.user_snapshot_id is not None
+            and first.opponent_snapshot_id is not None
+        )
+        snap_tag = "[green]✓ both[/]" if both else (
+            "[yellow]user only[/]" if first.user_snapshot_id is not None else (
+                "[yellow]opp only[/]" if first.opponent_snapshot_id is not None
+                else "[dim]none[/]"
+            )
+        )
+        console.print(
+            f"  {sid:30s} {first.user_username!r:18s} vs {first.opponent_username!r:18s} "
+            f"{w}W-{l}L  snap={snap_tag}"
+        )
+        shown += 1
+
+
 @app.command("refresh-self-from-rookie")
 def refresh_self_from_rookie_cmd(
     target: Optional[str] = typer.Argument(
