@@ -92,6 +92,12 @@ _SNAPSHOT_TRIGGERS = {
     TriggerKind.ON_BURST_USE,
     TriggerKind.ON_ALLY_BURST_USE,
     TriggerKind.ON_FULL_BURST_START,
+    # D4 — ON_FULL_BURST_END fires after every burst chain (typically
+    # ~10s post-burst). Used by stall-comp staples (Trina S1 = team
+    # heal 4.06%/s for 5s, Centi S1 = team shield, Blanc S2 = team
+    # heal, etc.). Previously this trigger was silently dropped which
+    # massively under-credited stall-comp heal/shield output.
+    TriggerKind.ON_FULL_BURST_END,
 }
 
 
@@ -808,6 +814,18 @@ def evaluate_team(
                 caster=snap_other, team=team, burst_user=burst_user,
                 include_triggers={TriggerKind.ON_ALLY_BURST_USE},
             )
+
+    # ----- Phase 4: ON_FULL_BURST_END (fires ONCE per team) -----
+    # After the burst window closes, post-burst effects fire. Trina's
+    # S1 (team heal 4.06%/s for 5s) and similar stall-comp staples land
+    # here. Treated as fire-once per match (the snapshot doesn't model
+    # multi-cycle bursts).
+    for cs, snap in zip(sets, team):
+        _walk_skill_effects(
+            list(cs.skill1) + list(cs.skill2) + list(cs.burst_skill),
+            caster=snap, team=team, burst_user=None,
+            include_triggers={TriggerKind.ON_FULL_BURST_END},
+        )
 
     return TeamEvaluation(members=team)
 
