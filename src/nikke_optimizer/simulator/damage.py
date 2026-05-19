@@ -500,17 +500,7 @@ def resolve(
     # applied healing — leading to ~3× under-prediction of defender
     # EHP on shield/heal-heavy tournament defenses.
     defender_base_hp = sum(m.base_hp + m.flat_hp_bonus for m in defender.members)
-    defender_shield_total = sum(m.shield_value for m in defender.members)
-    # Take MAX heal-per-sec across team rather than summing — when an
-    # "all-allies" heal lands, every member's heal_per_second slot
-    # captures the same source, so summing 5× over-counts. Max gives
-    # the dominant healer's contribution. Multi-healer comps undercount
-    # slightly but stay in the same order of magnitude.
-    defender_heal_per_sec = max(
-        (m.heal_per_second for m in defender.members), default=0.0
-    )
-    # Compute bursts_in_match here — used both for heal cycle count
-    # and shield refresh below.
+    # T5 — bursts_in_match drives both shield refresh + heal cycle count.
     if cycle_period_sec > 0 and first_burst_sec < MATCH_LENGTH_SEC:
         bursts_in_match = max(
             1,
@@ -518,17 +508,31 @@ def resolve(
         )
     else:
         bursts_in_match = 1
-    # Heal duration per cycle = the longest active heal-window across
-    # the team (typically 10-15s). Total heal active time = duration ×
-    # number of burst rotations.
-    defender_heal_duration_per_cycle = max(
-        (m.heal_duration for m in defender.members), default=0.0
+    # T5 shields: refresh up to 2× per match. Most NIKKE shields are
+    # bursty (one-shot per burst cycle) but second-cycle shields
+    # frequently overlap with first-cycle ones already in flight, so
+    # raw cycle multiplication over-credits. Cap=2 is a conservative
+    # "initial + one refresh" model that materially improves over the
+    # current cap=1 without ballooning defender EHP.
+    shield_refresh_cap = min(2, bursts_in_match)
+    defender_shield_total = sum(
+        m.shield_value * shield_refresh_cap for m in defender.members
     )
-    heal_active_seconds = min(
-        MATCH_LENGTH_SEC,
-        defender_heal_duration_per_cycle * bursts_in_match,
-    )
-    defender_heal_total = defender_heal_per_sec * heal_active_seconds
+    # T5 heals: sum per-caster heal_emit_per_second (each caster's
+    # OWN output rate) instead of max per-target heal_per_second
+    # (which only credits a single source — multi-healer comps were
+    # under-counted before). Each healer's window × refresh_cap
+    # gives total heal absorbed. Cap=2 mirrors the shield model.
+    heal_refresh_cap = min(2, bursts_in_match)
+    defender_heal_total = 0.0
+    for m in defender.members:
+        if m.heal_emit_per_second <= 0:
+            continue
+        active_seconds = min(
+            MATCH_LENGTH_SEC,
+            m.heal_emit_duration * heal_refresh_cap,
+        )
+        defender_heal_total += m.heal_emit_per_second * active_seconds
     defender_team_hp = defender_base_hp + defender_shield_total + defender_heal_total
 
     defender_avg_def = (
