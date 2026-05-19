@@ -6,6 +6,62 @@ Sorted by phase + rough priority within phase.
 
 ---
 
+## Simulator improvement queue (2026-05-19 sweep)
+
+Coming out of the T1–T9 sim audit (T1–T9 mapped to the simulator
+improvement tasks). Baseline went 42.9% → 57.1% on snapshot=both
+ArenaMatch corpus (14 rows) by fixing T1, T3, T4, T5, T6, T7-AoE.
+Remaining structural gaps that need bigger investment:
+
+- **Static evaluator vs event loop** — every CONDITIONAL / ON_HIT /
+  ON_FULL_CHARGE trigger is currently silently dropped (not in
+  ``_SNAPSHOT_TRIGGERS``). State-machine characters get only their
+  ALWAYS / ON_BURST_USE / ON_ALLY_BURST_USE / ON_FULL_BURST_START /
+  ON_BATTLE_START effects. To properly model:
+    * Liberalio's +231% Raging Current state (fires after first
+      full-charge hit, then persists)
+    * SW:HA's Lock-On / Auto Fire Ready / Seven Dwarves stages
+    * Crown's 20-stack Relax → invul + team ATK buff
+    * Drake's S2 every-10-hits / every-5-hits damage tickers
+    * Rosanna's evasion mechanic
+    * Noir's Hostile counter-damage
+  → ``event_loop.py`` needs to become the resolver (it exists but is
+  unused). Replace ``damage.resolve``'s flat sustained-DPS budget
+  with a time-stepped event simulator that fires triggers in order.
+
+- **Duty-cycle modeling for buffs** — A +160% ATK buff with
+  duration_seconds=3 in a 30s match contributes only 10% uptime,
+  but ``effective_atk`` treats it as always-on. Over-credits ATK in
+  short matches by 2-5×. Fix: in ``damage.resolve`` (or earlier),
+  weight each buff contribution by ``min(1.0, duration / match_active)``.
+  Requires source-attributed buff tracking on snapshots (currently
+  only the total is stored).
+
+- **Position-based focus-fire** — T3 added inverse-DEF weighting as
+  a heuristic. Real NIKKE PvP targets by position (per
+  nikke-pvp-mechanics memory): "the leftmost/centermost living Nikke
+  takes ~70% of incoming damage." Model: persistent target slot,
+  shift focus when target dies.
+
+- **MP / Hero Level / Memory Absorption / Anti A.T. Field / Highway
+  to Hell** — newer character mechanics not in DSL. Each is a state
+  machine with its own resource bar. Will need DSL EffectKind
+  extensions (e.g. ``GAIN_MP``, ``CONSUME_MP``, ``ENTER_HERO_FORM``)
+  + per-character ``event_loop`` handlers. Multi-slice work.
+
+- **Damage variance / RNG** (Tier 4 in the audit, deferred) — Monte
+  Carlo wrapper that runs resolve N times with sampled crit / target
+  selection / element advantage; reports win probability instead of
+  binary verdict. Right next step once W/L accuracy stabilizes.
+
+- **PvE-only damage kinds are stored but unused** — ``core_damage``,
+  ``parts_damage`` accumulate on snapshots (evaluator.py line
+  488-491) but ``damage.resolve`` never reads them. Harmless in PvP
+  (which we exclusively care about) but a code-smell for future
+  PvE-mode work; either drop the storage or wire the consumption.
+
+---
+
 ## Phase 1 leftovers
 
 - **Phase 1 regression fixtures (task #9)** — Add golden-output assertions on
