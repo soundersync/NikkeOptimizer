@@ -144,10 +144,10 @@ DAMAGE_PER_SHOT_FRACTION = 0.10  # legacy fallback for None / unknown weapon cla
 # Supporter/Buffer) deals ~52 damage in a match where an Attacker
 # deals ~5M, despite similar ATK stats.
 ROLE_DPS_MULTIPLIER: dict[str, float] = {
-    "attacker": 1.0,
+    "attacker": 0.85,
     "buffer":   0.2,
-    "supporter":0.4,
-    "defender": 0.65,
+    "supporter":0.5,
+    "defender": 0.6,
     "shielder": 0.3,
     "taunter":  0.4,
     "healer":   0.2,

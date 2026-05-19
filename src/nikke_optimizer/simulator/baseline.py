@@ -316,11 +316,10 @@ def _predict_for_names(
             char_class=_lookup_char_class(char.name),
             manufacturer=char.manufacturer.value if char.manufacturer else None,
         )
-        # D4 gear estimate from snapshot power. Snapshot's ``power`` is
-        # in-game combat power (includes gear) at the ACTUAL sync level
-        # in the data. To use it as gear ratio, compare to predicted at
-        # the ACTUAL sync level — not the clamped level. This way the
-        # scale captures gear contribution independent of the clamp.
+        # D4 gear estimate from snapshot power. Snapshot's ``power``
+        # is in-game combat power (includes gear) at the ACTUAL sync
+        # level. Compute scale = snap_power / predicted_power and
+        # apply to predicted base stats. Capped at 3.5× for sanity.
         snap_power = data.get("power") or data.get("arena_combat")
         scale = 1.0
         if snap_power and p_power and p_power > 0:
