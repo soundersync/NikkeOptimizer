@@ -147,6 +147,76 @@
 }
 .v-modepill.champion { color: #c4b5fd; border-color: #4c1d95; background: #1e1432; }
 .v-modepill.rookie   { color: #67e8f9; border-color: #155e75; background: #0e2935; }
+
+/* Click-to-expand affordance on main rows. */
+.v-row { cursor: pointer; }
+.v-row td:first-child::before {
+    content: "▸ ";
+    color: var(--muted);
+    font-size: 0.85em;
+    margin-right: 0.1em;
+}
+.v-row.is-open td:first-child::before { content: "▾ "; color: var(--accent); }
+
+/* Expanded detail row. */
+.v-expand { display: none; }
+.v-expand.is-open { display: table-row; }
+.v-expand > td {
+    background: #0c1015;
+    padding: 1rem 1.25rem;
+    border-bottom: 2px solid var(--accent);
+}
+.v-expand h3 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.9rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.v-expand .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+}
+.v-expand-side { background: #11151c; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; }
+.v-expand-side h4 {
+    margin: 0 0 0.5rem 0;
+    font-size: 0.85rem;
+    color: var(--fg);
+}
+.v-expand-side h4 .muted { font-weight: 400; font-size: 0.75rem; }
+
+.v-compare {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+    font-family: "SF Mono", Menlo, monospace;
+}
+.v-compare th, .v-compare td {
+    padding: 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+    text-align: right;
+    white-space: nowrap;
+}
+.v-compare th { color: var(--muted); font-size: 0.7rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+.v-compare td.name { text-align: left; color: var(--fg); font-family: -apple-system, system-ui, sans-serif; }
+.v-compare td.sim { color: #c9e7ff; }
+.v-compare td.actual { color: #d9f99d; }
+.v-compare td.err {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+.v-compare td.err.high { color: #f87171; }
+.v-compare td.err.ok   { color: #86efac; }
+.v-compare td.hp.dead  { color: #f87171; }
+.v-compare td.hp.alive { color: #86efac; }
+.v-no-actuals {
+    color: var(--muted);
+    font-style: italic;
+    padding: 0.5rem;
+    text-align: center;
+    font-size: 0.8rem;
+}
 </style>
 
 <h1>Simulator validation</h1>
@@ -219,7 +289,9 @@
     {% for row in rows %}
     {% set p = row.p %}
     {% set m = row.match %}
-    <tr class="{% if p.correct is true %}verdict-good{% elif p.correct is false %}verdict-bad{% endif %}">
+    <tr class="v-row {% if p.correct is true %}verdict-good{% elif p.correct is false %}verdict-bad{% endif %}"
+        data-row-id="m{{ p.match_id }}"
+        onclick="toggleExpand(this)">
         <td class="v-verdict {% if p.correct is true %}good{% elif p.correct is false %}bad{% endif %}">
             {% if p.correct is true %}✓{% elif p.correct is false %}✗{% else %}—{% endif %}
         </td>
@@ -288,9 +360,98 @@
             {% endif %}
         </td>
     </tr>
+    <tr class="v-expand" data-row-id="m{{ p.match_id }}">
+        <td colspan="11">
+            <div class="pair">
+                {% for side in [('user', p.user_username or 'You', row.user_rows), ('opp', p.opponent_username or 'Opponent', row.opp_rows)] %}
+                <div class="v-expand-side">
+                    <h4>
+                        {{ side[1] }}
+                        <span class="muted">· {{ side[0] }} side</span>
+                    </h4>
+                    {% if side[2] %}
+                    <table class="v-compare">
+                        <thead>
+                            <tr>
+                                <th class="name" style="text-align:left">Nikke</th>
+                                <th>sim dmg</th>
+                                {% if row.has_actuals %}<th>actual dmg</th><th>Δ</th>{% endif %}
+                                <th>sim heal</th>
+                                {% if row.has_actuals %}<th>actual heal</th>{% endif %}
+                                {% if row.has_actuals %}<th>actual taken</th><th>HP %</th>{% endif %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for cell in side[2] %}
+                            <tr>
+                                <td class="name">
+                                    {{ cell.name }}
+                                    {% if cell.actual and cell.actual.disconnected %}
+                                    <span class="muted" style="font-size: 0.65em">· wiped</span>
+                                    {% endif %}
+                                </td>
+                                <td class="sim">
+                                    {% if cell.sim %}{{ "{:,.0f}".format(cell.sim.estimated_damage_dealt) }}{% else %}—{% endif %}
+                                </td>
+                                {% if row.has_actuals %}
+                                <td class="actual">
+                                    {% if cell.actual and cell.actual.damage_dealt is not none %}{{ "{:,d}".format(cell.actual.damage_dealt) }}{% else %}—{% endif %}
+                                </td>
+                                <td class="err
+                                    {%- if cell.sim and cell.actual and cell.actual.damage_dealt %}
+                                        {%- set ratio = (cell.sim.estimated_damage_dealt - cell.actual.damage_dealt) / cell.actual.damage_dealt %}
+                                        {%- if ratio|abs > 0.5 %} high{% else %} ok{% endif %}
+                                    {%- endif %}">
+                                    {% if cell.sim and cell.actual and cell.actual.damage_dealt %}
+                                        {% set diff = cell.sim.estimated_damage_dealt - cell.actual.damage_dealt %}
+                                        {% if diff >= 0 %}+{% endif %}{{ "{:,.0f}".format(diff) }}
+                                    {% else %}—{% endif %}
+                                </td>
+                                {% endif %}
+                                <td class="sim">
+                                    {% if cell.sim %}{{ "{:,.0f}".format(cell.sim.estimated_heal_performed) }}{% else %}—{% endif %}
+                                </td>
+                                {% if row.has_actuals %}
+                                <td class="actual">
+                                    {% if cell.actual and cell.actual.heal_performed is not none %}{{ "{:,d}".format(cell.actual.heal_performed) }}{% else %}—{% endif %}
+                                </td>
+                                <td class="actual">
+                                    {% if cell.actual and cell.actual.damage_taken is not none %}{{ "{:,d}".format(cell.actual.damage_taken) }}{% else %}—{% endif %}
+                                </td>
+                                <td class="hp {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{% if cell.actual.hp_remaining_pct > 0 %}alive{% else %}dead{% endif %}{% endif %}">
+                                    {% if cell.actual and cell.actual.hp_remaining_pct is not none %}{{ "%.0f"|format(cell.actual.hp_remaining_pct) }}%{% else %}—{% endif %}
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    {% else %}
+                    <div class="v-no-actuals">No per-Nikke data.</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+            {% if not row.has_actuals %}
+            <p class="muted" style="font-size: 0.75rem; margin: 0.5rem 0 0 0; text-align: center">
+                Rookie Arena results screen doesn't show per-Nikke stats — only sim estimates shown.
+            </p>
+            {% endif %}
+        </td>
+    </tr>
     {% endfor %}
     </tbody>
 </table>
+
+<script>
+function toggleExpand(rowEl) {
+    rowEl.classList.toggle('is-open');
+    const id = rowEl.dataset.rowId;
+    document.querySelectorAll(`.v-expand[data-row-id="${id}"]`).forEach(r => {
+        r.classList.toggle('is-open');
+    });
+}
+</script>
 {% endif %}
 
 {% endblock %}

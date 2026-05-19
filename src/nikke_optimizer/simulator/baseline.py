@@ -76,6 +76,23 @@ class TeamFeed:
 
 
 @dataclass
+class PerMemberView:
+    """Side-merged per-Nikke estimates for the validation page.
+
+    One row per Nikke on the side. ``estimated_damage_dealt`` comes
+    from this side's attacker-role contribution; ``estimated_heal_performed``
+    + HP / shield come from this side's defender-role contribution.
+    """
+    name: str
+    weapon_class: Optional[str] = None
+    element: Optional[str] = None
+    estimated_damage_dealt: float = 0.0
+    estimated_heal_performed: float = 0.0
+    base_hp: float = 0.0
+    shield_value: float = 0.0
+
+
+@dataclass
 class MatchPrediction:
     match_id: int
     mode: str
@@ -91,6 +108,14 @@ class MatchPrediction:
     user_def_ehp: float
     opp_def_ehp: float
     notes: list[str] = field(default_factory=list)
+    # Per-Nikke breakdown — populated 2026-05-19 so /simulator/validation
+    # can render sim-vs-actual per-Nikke tables.
+    user_members: list[PerMemberView] = field(default_factory=list)
+    opp_members: list[PerMemberView] = field(default_factory=list)
+    # Per-Nikke captured ground truth — Champion only (Rookie results
+    # screen doesn't show per-Nikke stats).
+    user_actuals: Optional[list["MemberActual"]] = None
+    opp_actuals: Optional[list["MemberActual"]] = None
 
     @property
     def correct(self) -> Optional[bool]:
@@ -340,6 +365,22 @@ def predict_match(
     else:
         predicted = None
 
+    # Merge per-member views per side. The attacker-role contribution of
+    # res_u carries the user's damage estimates (vs opp defender); the
+    # defender-role contribution of res_o carries the user's heal/HP
+    # estimates (while being attacked by opp). Same swap for the opp side.
+    user_members = _merge_member_views(
+        res_u.attacker_per_member, res_o.defender_per_member,
+    )
+    opp_members = _merge_member_views(
+        res_o.attacker_per_member, res_u.defender_per_member,
+    )
+
+    # Champion-only ground truth from the duel result screen.
+    actuals = None
+    if match.mode == "champion":
+        actuals = champion_actuals_for_match(session, match)
+
     return MatchPrediction(
         match_id=match.id,
         mode=match.mode,
@@ -355,7 +396,35 @@ def predict_match(
         user_def_ehp=res_o.defender_effective_hp,
         opp_def_ehp=res_u.defender_effective_hp,
         notes=list(res_u.notes) + [f"opp→user: {n}" for n in res_o.notes],
+        user_members=user_members,
+        opp_members=opp_members,
+        user_actuals=actuals.user if actuals else None,
+        opp_actuals=actuals.opp if actuals else None,
     )
+
+
+def _merge_member_views(attacker_view, defender_view) -> list[PerMemberView]:
+    """Combine a side's attacker-role and defender-role contributions
+    into one row per Nikke for the validation UI."""
+    rows: dict[str, PerMemberView] = {}
+    for c in attacker_view:
+        rows[c.name] = PerMemberView(
+            name=c.name,
+            weapon_class=c.weapon_class,
+            element=c.element,
+            estimated_damage_dealt=c.estimated_damage_dealt,
+        )
+    for c in defender_view:
+        row = rows.get(c.name) or PerMemberView(
+            name=c.name,
+            weapon_class=c.weapon_class,
+            element=c.element,
+        )
+        row.estimated_heal_performed = c.estimated_heal_performed
+        row.base_hp = c.base_hp + c.flat_hp_bonus
+        row.shield_value = c.shield_value
+        rows[c.name] = row
+    return list(rows.values())
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +563,161 @@ def freshness_for(
     return SnapshotFreshness(
         captured_at=snapshot_captured_at,
         lag_days=(s_date - m_date).days,
+    )
+
+
+@dataclass
+class MemberActual:
+    """One row of captured per-Nikke ground truth from a Champion duel
+    results screen (``PromoExtractedField`` with region slugs like
+    ``left.char1.atk`` etc.).
+
+    Field meanings — these are post-match outcome stats shown to the
+    player, NOT the Nikke's static stat:
+      * damage_dealt  → total damage this Nikke dealt during the match
+      * damage_taken  → total damage this Nikke absorbed (the ``def`` cell)
+      * heal_performed → total healing this Nikke gave allies
+      * hp_remaining_pct → HP % at the end of the match (0..100)
+      * disconnected → True when the Nikke was wiped before timeout
+    """
+    name: str
+    slot: int
+    damage_dealt: Optional[int] = None
+    damage_taken: Optional[int] = None
+    heal_performed: Optional[int] = None
+    hp_remaining_pct: Optional[float] = None
+    disconnected: bool = False
+
+
+@dataclass
+class ChampionMatchActuals:
+    """Per-side captured per-Nikke results for one Champion duel.
+
+    Sides keyed as 'user' / 'opp' to match ``MatchPrediction``.
+    Returns ``None`` when no duel screenshot exists for the match
+    (results-only matches without per-Nikke extractions, or
+    extraction not yet run).
+    """
+    user: list[MemberActual]
+    opp: list[MemberActual]
+    screenshot_id: Optional[int] = None
+
+
+def champion_actuals_for_match(
+    session: Session, match: ArenaMatch,
+) -> Optional[ChampionMatchActuals]:
+    """Fetch the captured per-Nikke results for a Champion ArenaMatch.
+
+    Joins ArenaMatch → PromoMatch (via session_id ``champion-pm{id}``)
+    → ``PromoMatchScreenshot`` (kind=results_duel, matching round_no) →
+    ``PromoExtractedField`` rows. Returns sides aligned to user/opp
+    via ``is_user_lineup`` on the match.
+
+    Returns ``None`` if mode != champion, session_id missing, or no
+    duel screenshot was extracted for this round.
+    """
+    if match.mode != "champion" or not match.session_id:
+        return None
+    if not match.session_id.startswith("champion-pm"):
+        return None
+    try:
+        promo_match_id = int(match.session_id[len("champion-pm"):])
+    except ValueError:
+        return None
+
+    from ..data.models import (
+        Character,
+        PromoExtractedField,
+        PromoMatchScreenshot,
+    )
+    duel = session.exec(
+        select(PromoMatchScreenshot).where(
+            PromoMatchScreenshot.match_id == promo_match_id,
+            PromoMatchScreenshot.kind == "results_duel",
+            PromoMatchScreenshot.round_no == match.round_index,
+        )
+    ).first()
+    if duel is None:
+        return None
+
+    fields = session.exec(
+        select(PromoExtractedField).where(
+            PromoExtractedField.screenshot_id == duel.id,
+        )
+    ).all()
+    char_ids = {f.character_id for f in fields if f.character_id is not None}
+    char_names: dict[int, str] = {}
+    if char_ids:
+        rows = session.exec(
+            select(Character.id, Character.name).where(
+                Character.id.in_(char_ids)
+            )
+        ).all()
+        char_names = {int(cid): str(name) for cid, name in rows}
+
+    by_slug: dict[str, PromoExtractedField] = {f.region_slug: f for f in fields}
+
+    def _try_int(s: Optional[str]) -> Optional[int]:
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+
+    def _try_pct(s: Optional[str]) -> Optional[float]:
+        if not s:
+            return None
+        try:
+            return float(s.rstrip("%"))
+        except ValueError:
+            return None
+
+    def _side(prefix: str) -> list[MemberActual]:
+        out: list[MemberActual] = []
+        for slot in range(1, 6):
+            name_f = by_slug.get(f"{prefix}.char{slot}.name")
+            atk_f = by_slug.get(f"{prefix}.char{slot}.atk")
+            def_f = by_slug.get(f"{prefix}.char{slot}.def")
+            heal_f = by_slug.get(f"{prefix}.char{slot}.heal")
+            hp_f = by_slug.get(f"{prefix}.char{slot}.hp")
+            dc_f = by_slug.get(f"{prefix}.char{slot}.disconnect")
+            name = None
+            if name_f:
+                name = (
+                    char_names.get(name_f.character_id)
+                    if name_f.character_id else (name_f.text or "")
+                )
+            out.append(MemberActual(
+                name=name or f"(slot {slot})",
+                slot=slot,
+                damage_dealt=_try_int(atk_f.normalized) if atk_f else None,
+                damage_taken=_try_int(def_f.normalized) if def_f else None,
+                heal_performed=_try_int(heal_f.normalized) if heal_f else None,
+                hp_remaining_pct=_try_pct(hp_f.normalized) if hp_f else None,
+                disconnected=bool(dc_f and (dc_f.text or "").strip()),
+            ))
+        return out
+
+    left = _side("left")
+    right = _side("right")
+    # Which side is the user? Match by team composition — ArenaMatch's
+    # user_team is the canonical source, captured from the loadout
+    # screens. The duel-result extractions don't carry their own side
+    # label, so we ask: which of (left, right) overlaps more with
+    # match.user_team? ``is_user_lineup`` is NOT the right signal here
+    # — it refers to which LOADOUT screen is the user's, which can be
+    # the opposite of which duel-result-side has the user's team.
+    user_names = {(n or "").lower() for n in (match.user_team or [])}
+    left_overlap = sum(1 for m in left if (m.name or "").lower() in user_names)
+    right_overlap = sum(1 for m in right if (m.name or "").lower() in user_names)
+    if left_overlap >= right_overlap:
+        user_side, opp_side = left, right
+    else:
+        user_side, opp_side = right, left
+
+    return ChampionMatchActuals(
+        user=user_side, opp=opp_side, screenshot_id=duel.id,
     )
 
 

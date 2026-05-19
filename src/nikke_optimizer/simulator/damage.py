@@ -199,6 +199,39 @@ DEFAULT_FIRST_BURST_SEC = 10.0
 
 
 @dataclass
+class MemberContribution:
+    """Per-Nikke breakdown of one side's contribution to ``DamageResolution``.
+
+    The validation page uses this to compare the sim's per-Nikke estimates
+    against actual captured values (Champion duel screenshots give us
+    per-Nikke damage_dealt / damage_taken / healing / hp_remaining).
+    Aggregating these across members reproduces the team-level numbers on
+    ``DamageResolution`` (within rounding).
+    """
+
+    name: str
+
+    # Attacker-side contributions (what this Nikke deals to the defender)
+    atk_damage_per_sec: float = 0.0         # ATK-channel DPS
+    true_damage_per_sec: float = 0.0        # true-damage DPS (bypasses DEF)
+    other_damage_per_sec: float = 0.0       # pierce + shield + sustained
+    burst_payload_per_cycle: float = 0.0    # one-shot burst payload per cycle
+    estimated_damage_dealt: float = 0.0     # total over the match
+
+    # Defender-side contributions (what this Nikke is/can absorb)
+    base_hp: float = 0.0
+    flat_hp_bonus: float = 0.0
+    shield_value: float = 0.0
+    heal_per_second: float = 0.0
+    heal_duration: float = 0.0
+    estimated_heal_performed: float = 0.0   # heal_per_second × heal_active_seconds
+
+    # Identity (for joining against captured names)
+    weapon_class: Optional[str] = None
+    element: Optional[str] = None
+
+
+@dataclass
 class DamageResolution:
     """Result of the Team A vs Team B resolution."""
 
@@ -229,6 +262,15 @@ class DamageResolution:
 
     # Diagnostics
     notes: list[str] = field(default_factory=list)
+
+    # Per-member breakdown (slice — populated 2026-05-19 so the
+    # /simulator/validation page can show sim per-Nikke estimates next
+    # to captured per-Nikke ground truth for Champion duels)
+    attacker_per_member: list[MemberContribution] = field(default_factory=list)
+    defender_per_member: list[MemberContribution] = field(default_factory=list)
+    # Number of burst rotations modelled in this match — used to convert
+    # ``burst_payload_per_cycle`` × N to the over-match estimate.
+    bursts_in_match: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -489,7 +531,14 @@ def resolve(
     defender_has_shields = any(d.shield_value > 0 for d in defender.members)
     for m in attacker.members:
         eff_atk = m.effective_atk
+        contrib = MemberContribution(
+            name=m.name,
+            weapon_class=m.weapon_class,
+            element=m.element,
+        )
+
         if eff_atk <= 0:
+            out.attacker_per_member.append(contrib)
             continue
 
         # Slice #97 — per-WeaponClass fraction-of-ATK-per-second instead
@@ -512,6 +561,7 @@ def resolve(
         def_factor = max(def_floor, _def_reduction_factor(eff_atk, defender_avg_def))
         atk_per_sec = eff_atk * atk_mult * def_factor * weapon_factor
         atk_dps += atk_per_sec
+        contrib.atk_damage_per_sec = atk_per_sec
 
         # True damage — bypasses DEF entirely AND skips the
         # Full Burst / charge / range / element-advantage / crit
@@ -519,6 +569,7 @@ def resolve(
         # td% × element-damage % × shot rate.
         true_per_sec = _true_damage_dps(m, weapon_factor)
         true_dps += true_per_sec
+        contrib.true_damage_per_sec = true_per_sec
 
         # Other damage channels — pierce/shield/sustained. We give partial
         # credit for the pierce + sustained buffs, and shield-damage only
@@ -531,10 +582,15 @@ def resolve(
         )
         other_per_sec = eff_atk * other_mult * weapon_factor
         other_dps += other_per_sec
+        contrib.other_damage_per_sec = other_per_sec
 
         # Burst payload — DEAL_DAMAGE in burst skills, accumulated on each
         # member's burst_damage_magnitude (one-shot, so multiply by ATK once).
-        burst_total += m.burst_damage_magnitude * eff_atk * def_factor
+        member_burst = m.burst_damage_magnitude * eff_atk * def_factor
+        burst_total += member_burst
+        contrib.burst_payload_per_cycle = member_burst
+
+        out.attacker_per_member.append(contrib)
 
     out.attacker_atk_damage_per_sec = atk_dps
     out.attacker_true_damage_per_sec = true_dps
@@ -580,6 +636,41 @@ def resolve(
 
     out.attacker_wins_within_5min = seconds_to_clear < MATCH_LENGTH_SEC
     out.win_margin = MATCH_LENGTH_SEC - seconds_to_clear
+    out.bursts_in_match = bursts_in_match
+
+    # Estimated damage dealt per attacker over the match.
+    # match_active = min(MATCH_LENGTH, seconds_to_clear) — once the
+    # defender is cleared the attacker stops dealing damage. Burst
+    # payload counted ``bursts_in_match`` times.
+    match_active = min(MATCH_LENGTH_SEC, max(0.0, seconds_to_clear))
+    for c in out.attacker_per_member:
+        sustained = (
+            c.atk_damage_per_sec + c.true_damage_per_sec + c.other_damage_per_sec
+        )
+        c.estimated_damage_dealt = (
+            sustained * match_active
+            + c.burst_payload_per_cycle * bursts_in_match
+        )
+
+    # Defender per-member rows: HP / shield / heal contribution. The
+    # validation page joins these with the captured per-Nikke heal
+    # ground truth from the Champion duel screen.
+    for d in defender.members:
+        contrib = MemberContribution(
+            name=d.name,
+            weapon_class=d.weapon_class,
+            element=d.element,
+            base_hp=d.base_hp,
+            flat_hp_bonus=d.flat_hp_bonus,
+            shield_value=d.shield_value,
+            heal_per_second=d.heal_per_second,
+            heal_duration=d.heal_duration,
+            estimated_heal_performed=(
+                d.heal_per_second
+                * min(MATCH_LENGTH_SEC, d.heal_duration * bursts_in_match)
+            ),
+        )
+        out.defender_per_member.append(contrib)
 
     # Diagnostic notes — only the ones a human-reader would want to see.
     if burst_total >= defender_team_hp:

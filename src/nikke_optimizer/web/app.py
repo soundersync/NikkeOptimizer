@@ -2028,11 +2028,37 @@ def create_app(
                     opp_snap.captured_at if opp_snap else None,
                     match.captured_at,
                 )
+                # Build per-Nikke comparison view: sim estimates joined
+                # with actuals (where available) keyed by Nikke name.
+                # Strip parenthetical suffixes ('(Treasure)' etc.) so a
+                # Treasure-routed sim entry matches the base-name actual.
+                import re as _re
+                def _join_key(name: Optional[str]) -> str:
+                    return _re.sub(r"\s*\([^)]+\)\s*$", "", (name or "")).strip().lower()
+
+                def _join(members, actuals):
+                    by_name: dict[str, dict] = {}
+                    for m in members:
+                        by_name[_join_key(m.name)] = {"sim": m}
+                    if actuals:
+                        for a in actuals:
+                            cell = by_name.setdefault(_join_key(a.name), {})
+                            cell["actual"] = a
+                    return [{"name": (v.get("sim").name if v.get("sim") else v.get("actual").name),
+                             "sim": v.get("sim"), "actual": v.get("actual")}
+                            for v in by_name.values()]
+
                 rows.append({
                     "p": pred,
                     "match": match,
                     "user_fr": user_fr,
                     "opp_fr": opp_fr,
+                    "user_rows": _join(pred.user_members, pred.user_actuals),
+                    "opp_rows": _join(pred.opp_members, pred.opp_actuals),
+                    "has_actuals": (
+                        pred.user_actuals is not None
+                        or pred.opp_actuals is not None
+                    ),
                     "verdict_css": (
                         "snap-both" if pred.correct is True
                         else "snap-none" if pred.correct is False
