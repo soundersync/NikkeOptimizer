@@ -94,6 +94,7 @@ _BURST_TRIGGER_KINDS: frozenset[TriggerKind] = frozenset({
     TriggerKind.ON_BURST_USE,
     TriggerKind.ON_ALLY_BURST_USE,
     TriggerKind.ON_FULL_BURST_START,
+    TriggerKind.ON_FULL_BURST_END,
 })
 
 # Target kinds that count as buffing the team (i.e. boosting our DPS).
@@ -196,6 +197,15 @@ class EventLoopMember:
     alive: bool = True
     damage_dealt: float = 0.0
     damage_taken: float = 0.0
+    healing_done: float = 0.0
+    # E1 — slot index (0=front, 4=back) for position-based targeting.
+    slot: int = 0
+    # E2 — per-Nikke state for state-machine triggers
+    # (e.g. {'shots_fired': N, 'relax_stacks': N, 'in_raging_current': True}).
+    state: dict = field(default_factory=dict)
+    # E2 — own snapshot ATK (effective_atk including buffs that are
+    # baked in from the snapshot). Used for burst damage scaling.
+    effective_atk: float = 0.0
 
 
 @dataclass
@@ -214,6 +224,17 @@ class _ActiveDebuff:
 
 
 @dataclass
+class _MemberStats:
+    """Final per-Nikke output of an event_loop run."""
+    name: str
+    damage_dealt: float = 0.0
+    damage_taken: float = 0.0
+    healing_done: float = 0.0
+    hp_remaining_pct: float = 100.0
+    survived: bool = True
+
+
+@dataclass
 class EventLoopResult:
     """Output of an event-loop match simulation."""
 
@@ -227,6 +248,9 @@ class EventLoopResult:
     a_first_burst_at: float = 0.0
     d_first_burst_at: float = 0.0
     notes: list[str] = field(default_factory=list)
+    # E1 — per-Nikke breakdown for validation against actuals.
+    attacker_per_member: list["_MemberStats"] = field(default_factory=list)
+    defender_per_member: list["_MemberStats"] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -295,6 +319,7 @@ def _team_burst_uplift_total(team_skills: list[Optional[CharacterSkillSet]]) -> 
 def _build_member(
     snap, opponent_avg_def: float, total_burst_uplift_pct: float,
     member_peak_dps: float,
+    slot: int = 0,
 ) -> EventLoopMember:
     """Convert a NikkeSnapshot into runtime EventLoopMember state.
 
@@ -342,6 +367,8 @@ def _build_member(
         heal_window_until=0.0,
         skills=skills,
         alive=True,
+        slot=slot,
+        effective_atk=eff_atk,
     )
 
 
@@ -395,7 +422,8 @@ def _select_burst_chain_eventloop(
 
 def _apply_damage(team: list[EventLoopMember], damage: float) -> float:
     """Distribute incoming damage to living team — taunters first,
-    then lowest-HP focus fire.
+    then position-based focus-fire (front-most slot, like real NIKKE
+    PvP). 15% spills to the back row to model AoE bursts + stray hits.
     """
     if damage <= 0:
         return 0.0
@@ -403,11 +431,51 @@ def _apply_damage(team: list[EventLoopMember], damage: float) -> float:
     if not living:
         return 0.0
     taunters = [m for m in living if m.is_taunting]
-    targets = taunters if taunters else [min(living, key=lambda m: m.hp)]
-    per = damage / len(targets)
+    if taunters:
+        targets = taunters
+        per = damage / len(targets)
+        applied = 0.0
+        for tgt in targets:
+            rem = per
+            if tgt.shield > 0:
+                absorb = min(tgt.shield, rem)
+                tgt.shield -= absorb
+                rem -= absorb
+            if rem > 0:
+                absorb_hp = min(tgt.hp, rem)
+                tgt.hp -= absorb_hp
+                rem -= absorb_hp
+                tgt.damage_taken += absorb_hp
+                if tgt.hp <= 0:
+                    tgt.alive = False
+                    tgt.hp = 0.0
+            applied += per - rem
+        return applied
+    # Position-based focus-fire: 85% to front-most living slot, 15%
+    # spread to others.
+    LEAK = 0.15
+    front = min(living, key=lambda m: m.slot)
+    focused = damage * (1.0 - LEAK)
+    leak_per = damage * LEAK / max(1, len(living))
     applied = 0.0
-    for tgt in targets:
-        rem = per
+    # Front absorbs the focused chunk.
+    rem = focused
+    if front.shield > 0:
+        absorb = min(front.shield, rem)
+        front.shield -= absorb
+        rem -= absorb
+    if rem > 0:
+        absorb_hp = min(front.hp, rem)
+        front.hp -= absorb_hp
+        rem -= absorb_hp
+        front.damage_taken += absorb_hp
+        if front.hp <= 0:
+            front.alive = False
+            front.hp = 0.0
+    applied += focused - rem
+    # Each member takes a small leak share.
+    for tgt in living:
+        rem = leak_per
         if tgt.shield > 0:
             absorb = min(tgt.shield, rem)
             tgt.shield -= absorb
@@ -420,7 +488,7 @@ def _apply_damage(team: list[EventLoopMember], damage: float) -> float:
             if tgt.hp <= 0:
                 tgt.alive = False
                 tgt.hp = 0.0
-        applied += per - rem
+        applied += leak_per - rem
     return applied
 
 
@@ -475,6 +543,110 @@ def _schedule_chain_buffs(
                             expires_at=current_time + eff.duration_seconds,
                             magnitude_pct=eff.magnitude,
                         ))
+
+
+# E2 — charging weapons (SR/RL) full-charge each shot, so CONDITIONAL
+# "full charge attack/hit/release" effects fire on every shot for these
+# weapons. Non-charging weapons (AR/SMG/MG/SG) never trigger these.
+_CHARGING_WEAPONS = frozenset({"sr", "rl"})
+
+_FULL_CHARGE_CONDITION_SUBSTRINGS = (
+    "full charge attack", "full charge hit",
+    "full charge release", "full charge held", "full charge",
+)
+
+
+def _condition_fires_on_shot(condition: Optional[str], weapon_class: str) -> bool:
+    """True when a CONDITIONAL trigger condition fires on each shot."""
+    if not condition:
+        return False
+    c = condition.lower()
+    if any(s in c for s in _FULL_CHARGE_CONDITION_SUBSTRINGS):
+        return weapon_class in _CHARGING_WEAPONS
+    return False
+
+
+def _on_shot_fired(
+    shooter: EventLoopMember,
+    ally_team: list[EventLoopMember],
+    enemy_team: list[EventLoopMember],
+    current_time: float,
+    active_buffs: list[_ActiveBuff],
+    active_debuffs: list[_ActiveDebuff],
+) -> float:
+    """Process per-shot triggers: ON_HIT (count-based) + CONDITIONAL
+    (full-charge for charging weapons). Returns bonus damage to apply
+    immediately (DEAL_DAMAGE / DEAL_TRUE_DAMAGE effects).
+    """
+    if shooter.skills is None:
+        return 0.0
+    shooter.state["shots_fired"] = shooter.state.get("shots_fired", 0) + 1
+    n_hits = shooter.state["shots_fired"]
+    bonus = 0.0
+    for slot in (shooter.skills.skill1, shooter.skills.skill2,
+                 shooter.skills.burst_skill):
+        for se in slot:
+            trig = se.trigger
+            fires = False
+            if trig.kind == TriggerKind.ON_HIT:
+                # Fire every N hits.
+                n = max(1, trig.every_n_hits or 1)
+                if n_hits % n == 0:
+                    fires = True
+            elif trig.kind == TriggerKind.CONDITIONAL:
+                # Once-state-set: enter the state on first applicable
+                # shot, then leave its buffs active.
+                if _condition_fires_on_shot(trig.condition, shooter.weapon_class):
+                    state_key = f"_cond_{id(se)}_fired"
+                    if not shooter.state.get(state_key):
+                        shooter.state[state_key] = True
+                        fires = True
+            if not fires:
+                continue
+            for eff in se.effects:
+                # Damage effects = immediate damage.
+                if eff.kind in (EffectKind.DEAL_DAMAGE,
+                                EffectKind.DEAL_TRUE_DAMAGE):
+                    if eff.target.kind in _ENEMY_TARGET_KINDS:
+                        from .evaluator import _enemy_target_multiplicity
+                        n_targets = _enemy_target_multiplicity(eff.target)
+                        # Scale to shooter's per-shot baseline so bonus
+                        # is "extra fraction of normal shot damage."
+                        # Without this, large magnitudes (e.g. Helm S1
+                        # 179%) multiplied by full effective_atk
+                        # produce nonphysical per-shot damages.
+                        bonus += (
+                            eff.magnitude * shooter.base_atk * n_targets
+                        )
+                # Buff effects = scheduled with duration.
+                elif (eff.kind in _DAMAGE_BUFF_KINDS
+                        and eff.target.kind in _ALLY_TARGET_KINDS
+                        and eff.duration_seconds > 0):
+                    active_buffs.append(_ActiveBuff(
+                        expires_at=current_time + max(
+                            eff.duration_seconds, 30.0  # min duration for state-machine effects
+                        ),
+                        magnitude_pct=eff.magnitude * 0.5,  # 0.5 factor: state isn't always active
+                        kind=eff.kind,
+                    ))
+                elif (eff.kind == EffectKind.GRANT_SHIELD
+                        and eff.target.kind in _ALLY_TARGET_KINDS):
+                    # Add shield to all allies.
+                    shield_amt = shooter.max_hp * (eff.magnitude / 100.0)
+                    for ally in ally_team:
+                        if ally.alive:
+                            ally.shield += shield_amt
+                elif (eff.kind in (EffectKind.HEAL_HP_FLAT,
+                                    EffectKind.HEAL_PER_SECOND)
+                        and eff.target.kind in _ALLY_TARGET_KINDS):
+                    # Top off allies' HP a bit.
+                    heal_amt = shooter.max_hp * (eff.magnitude / 100.0)
+                    for ally in ally_team:
+                        if ally.alive:
+                            healed = min(ally.max_hp - ally.hp, heal_amt)
+                            ally.hp += healed
+                            shooter.healing_done += healed
+    return bonus
 
 
 def _current_buff_multiplier(
@@ -556,12 +728,12 @@ def simulate_event_loop(
     d_member_dps = _member_dps_alloc(defender)
 
     a_team = [
-        _build_member(m, d_avg_def, a_uplift_pct, dps)
-        for m, dps in zip(attacker.members, a_member_dps)
+        _build_member(m, d_avg_def, a_uplift_pct, dps, slot=i)
+        for i, (m, dps) in enumerate(zip(attacker.members, a_member_dps))
     ]
     d_team = [
-        _build_member(m, a_avg_def, d_uplift_pct, dps)
-        for m, dps in zip(defender.members, d_member_dps)
+        _build_member(m, a_avg_def, d_uplift_pct, dps, slot=i)
+        for i, (m, dps) in enumerate(zip(defender.members, d_member_dps))
     ]
 
     a_gauge = 0.0
@@ -600,21 +772,42 @@ def simulate_event_loop(
 
         # Each living Nikke fires shots whose timer has elapsed.
         # Damage = base_per_shot × team_buff_mult × enemy_def_debuff_mult.
+        # Per-shot: also process ON_HIT + CONDITIONAL triggers (state
+        # machines like Liberalio Raging Current, Drake periodic damage).
         for m in a_living:
-            shot_dmg = m.base_atk * a_buff_mult * a_def_debuff_mult
             while m.next_shot_at <= t and m.alive:
+                # Recompute buff mult inside loop since state-machine
+                # effects may have just been added.
+                cur_buff_mult = _current_buff_multiplier(a_active_buffs, t)
+                shot_dmg = m.base_atk * cur_buff_mult * a_def_debuff_mult
                 applied = _apply_damage(d_team, shot_dmg)
                 a_total += applied
                 m.damage_dealt += applied
+                # Trigger ON_HIT + CONDITIONAL state machines.
+                bonus = _on_shot_fired(
+                    m, a_team, d_team, t, a_active_buffs, a_active_debuffs,
+                )
+                if bonus > 0:
+                    bonus_applied = _apply_damage(d_team, bonus)
+                    a_total += bonus_applied
+                    m.damage_dealt += bonus_applied
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
                 if not [x for x in d_team if x.alive]:
                     break
         for m in d_living:
-            shot_dmg = m.base_atk * d_buff_mult * d_def_debuff_mult
             while m.next_shot_at <= t and m.alive:
+                cur_buff_mult = _current_buff_multiplier(d_active_buffs, t)
+                shot_dmg = m.base_atk * cur_buff_mult * d_def_debuff_mult
                 applied = _apply_damage(a_team, shot_dmg)
                 d_total += applied
                 m.damage_dealt += applied
+                bonus = _on_shot_fired(
+                    m, d_team, a_team, t, d_active_buffs, d_active_debuffs,
+                )
+                if bonus > 0:
+                    bonus_applied = _apply_damage(a_team, bonus)
+                    d_total += bonus_applied
+                    m.damage_dealt += bonus_applied
                 m.next_shot_at += 1.0 / max(m.shots_per_sec, 0.001)
                 if not [x for x in a_team if x.alive]:
                     break
@@ -671,6 +864,21 @@ def simulate_event_loop(
 
         t += tick_dt
 
+    def _per_member(team):
+        return [
+            _MemberStats(
+                name=m.name,
+                damage_dealt=m.damage_dealt,
+                damage_taken=m.damage_taken,
+                healing_done=m.healing_done,
+                hp_remaining_pct=(
+                    max(0.0, min(100.0, m.hp / m.max_hp * 100.0))
+                    if m.max_hp > 0 else 0.0
+                ),
+                survived=m.alive,
+            )
+            for m in team
+        ]
     return EventLoopResult(
         attacker_wins=(end_reason == "defender_cleared"),
         match_ended_at_sec=t,
@@ -682,4 +890,6 @@ def simulate_event_loop(
         a_first_burst_at=a_first_burst_at,
         d_first_burst_at=d_first_burst_at,
         notes=notes,
+        attacker_per_member=_per_member(a_team),
+        defender_per_member=_per_member(d_team),
     )
