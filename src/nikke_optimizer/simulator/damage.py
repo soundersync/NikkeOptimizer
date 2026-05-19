@@ -227,6 +227,15 @@ class MemberContribution:
     estimated_heal_performed: float = 0.0   # heal_per_second × heal_active_seconds
     estimated_damage_taken: float = 0.0     # share of team incoming, minus shield/heal
     estimated_hp_remaining_pct: float = 100.0  # 0-100 after damage_taken applied
+    # T4 — how long this Nikke survives in the match (≤ match_active).
+    # When less than match_active, the baseline merge layer damps this
+    # Nikke's attacker-role contribution (no burst credit after death).
+    estimated_time_alive_sec: float = 0.0
+    # Per-Nikke incoming damage rate (per second) — used by the merge
+    # layer to recompute hp% / damage_taken under the actual match end
+    # time, which is min(both sides' clear times), not just this side's.
+    damage_in_per_sec: float = 0.0
+    heal_share_per_match: float = 0.0  # heal_share applied at end of match
 
     # Identity (for joining against captured names)
     weapon_class: Optional[str] = None
@@ -273,6 +282,14 @@ class DamageResolution:
     # Number of burst rotations modelled in this match — used to convert
     # ``burst_payload_per_cycle`` × N to the over-match estimate.
     bursts_in_match: int = 1
+    # T4 — match parameters needed by the merge layer to damp attacker
+    # contributions by time-alive. The merge knows this side's defender
+    # contributions (with estimated_time_alive_sec) and needs to know how
+    # many bursts that attacker would have fired before death.
+    match_active_sec: float = 0.0
+    first_burst_sec: float = 10.0
+    cycle_period_sec: float = 40.0
+    attacker_active_bursts: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -670,6 +687,12 @@ def resolve(
             sustained * match_active
             + c.burst_payload_per_cycle * attacker_active_bursts
         )
+    # Stash match params so the baseline merge layer can damp by
+    # time-alive (T4).
+    out.match_active_sec = match_active
+    out.first_burst_sec = first_burst_sec
+    out.cycle_period_sec = cycle_period_sec
+    out.attacker_active_bursts = attacker_active_bursts
 
     # Defender per-member rows: HP / shield / heal contribution. The
     # validation page joins these with the captured per-Nikke heal
@@ -720,6 +743,15 @@ def resolve(
             max(0.0, min(100.0, (max_hp - net_damage_taken) / max_hp * 100.0))
             if max_hp > 0 else 0.0
         )
+        # T4 — time alive in seconds. Damage arrives at a constant rate
+        # over match_active; when net_damage_taken exceeds the defender's
+        # effective_hp, they die at that fraction of the match.
+        effective_hp = max_hp + d.shield_value + per_defender_heal_share
+        if net_damage_taken > 0 and per_defender_damage_in > effective_hp:
+            damage_rate = per_defender_damage_in / max(0.1, match_active)
+            time_alive = effective_hp / damage_rate
+        else:
+            time_alive = match_active
         contrib = MemberContribution(
             name=d.name,
             weapon_class=d.weapon_class,
@@ -735,6 +767,11 @@ def resolve(
             ),
             estimated_damage_taken=per_defender_damage_in,
             estimated_hp_remaining_pct=hp_remaining_pct,
+            estimated_time_alive_sec=time_alive,
+            damage_in_per_sec=(
+                per_defender_damage_in / max(0.1, match_active)
+            ),
+            heal_share_per_match=per_defender_heal_share,
         )
         out.defender_per_member.append(contrib)
 

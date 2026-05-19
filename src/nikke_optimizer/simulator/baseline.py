@@ -368,16 +368,18 @@ def predict_match(
     else:
         predicted = None
 
-    # Merge per-member views per side. The attacker-role contribution of
-    # res_u carries the user's damage estimates (vs opp defender); the
-    # defender-role contribution of res_o carries the user's heal/HP
-    # estimates (while being attacked by opp). Same swap for the opp side.
-    user_members = _merge_member_views(
-        res_u.attacker_per_member, res_o.defender_per_member,
+    # Merge per-member views per side. The merge layer treats the match
+    # as ending at min(both clear times) — both sides stop fighting when
+    # one team is wiped. Without this, each resolve's per-Nikke numbers
+    # use ITS OWN side's clear time as match length, which double-counts
+    # damage on the losing side.
+    actual_match_end = min(
+        res_u.seconds_to_clear_defender,
+        res_o.seconds_to_clear_defender,
+        damage_module.MATCH_LENGTH_SEC,
     )
-    opp_members = _merge_member_views(
-        res_o.attacker_per_member, res_u.defender_per_member,
-    )
+    user_members = _merge_member_views(res_u, res_o, actual_match_end)
+    opp_members = _merge_member_views(res_o, res_u, actual_match_end)
 
     # Per-Nikke ground truth from the duel result screen — works
     # for both Champion and Rookie (same screen schema). Rookie just
@@ -406,27 +408,96 @@ def predict_match(
     )
 
 
-def _merge_member_views(attacker_view, defender_view) -> list[PerMemberView]:
-    """Combine a side's attacker-role and defender-role contributions
-    into one row per Nikke for the validation UI."""
+def _merge_member_views(
+    attack_res, defense_res, actual_match_end: float,
+) -> list[PerMemberView]:
+    """Combine a side's attacker-role + defender-role contributions
+    into one row per Nikke for the validation UI.
+
+    ``attack_res`` is the DamageResolution where THIS side attacked
+    (so ``attack_res.attacker_per_member`` has this side's damage
+    output and ``attack_res.match_active_sec`` etc.). ``defense_res``
+    is the DamageResolution where the OPPOSITE side attacked (so
+    ``defense_res.defender_per_member`` has this side's heal/HP/
+    time-alive info).
+
+    ``actual_match_end`` is the real match length —
+    ``min(both sides' seconds_to_clear)``. Each Nikke's contributions
+    are recomputed against this cap so we don't double-count damage
+    on the losing side (whose own clear time may be much longer than
+    the actual match end).
+
+    T4: damps each Nikke's damage contribution by their
+    ``estimated_time_alive_sec`` from the defense_res — a Nikke
+    who's wiped at t=8s shouldn't get credit for an 8237% burst
+    that fires at t=10s.
+    """
     rows: dict[str, PerMemberView] = {}
-    for c in attacker_view:
+    defense_by_name = {c.name: c for c in defense_res.defender_per_member}
+    first_burst = attack_res.first_burst_sec
+    cycle_period = attack_res.cycle_period_sec
+
+    for c in attack_res.attacker_per_member:
+        sustained = (
+            c.atk_damage_per_sec + c.true_damage_per_sec + c.other_damage_per_sec
+        )
+        # Damping: each attacker stops at min(actual_match_end, their_death).
+        # Re-derive death time using the actual match end as the budget so
+        # we don't carry over the per-resolve match_active stale value.
+        d_info = defense_by_name.get(c.name)
+        time_alive = actual_match_end
+        if d_info is not None and d_info.damage_in_per_sec > 0:
+            effective_hp = d_info.base_hp + d_info.flat_hp_bonus + d_info.shield_value + d_info.heal_share_per_match
+            damage_dealt_to_them = d_info.damage_in_per_sec * actual_match_end
+            if damage_dealt_to_them > effective_hp:
+                time_alive = min(
+                    actual_match_end,
+                    effective_hp / d_info.damage_in_per_sec,
+                )
+        if cycle_period > 0 and first_burst <= time_alive:
+            bursts_fired = max(
+                1,
+                int((time_alive - first_burst) / cycle_period) + 1,
+            )
+        elif first_burst <= time_alive:
+            bursts_fired = 1
+        else:
+            bursts_fired = 0  # Nikke died before her first burst window
+        damped_damage = (
+            sustained * time_alive
+            + c.burst_payload_per_cycle * bursts_fired
+        )
         rows[c.name] = PerMemberView(
             name=c.name,
             weapon_class=c.weapon_class,
             element=c.element,
-            estimated_damage_dealt=c.estimated_damage_dealt,
+            estimated_damage_dealt=damped_damage,
         )
-    for c in defender_view:
+    for c in defense_res.defender_per_member:
+        # Recompute HP% / damage_taken / heal_performed against the
+        # actual match end, not the defense_res's match_active (which
+        # is the LOSING side's clear time and over-counts when the
+        # losing side actually wins faster in real time).
+        max_hp = c.base_hp + c.flat_hp_bonus
+        damage_taken_at_end = c.damage_in_per_sec * actual_match_end
+        net = max(0.0, damage_taken_at_end - c.shield_value - c.heal_share_per_match)
+        hp_pct = (
+            max(0.0, min(100.0, (max_hp - net) / max_hp * 100.0))
+            if max_hp > 0 else 0.0
+        )
+        heal_perf = (
+            c.heal_per_second
+            * min(actual_match_end, c.heal_duration * defense_res.bursts_in_match)
+        )
         row = rows.get(c.name) or PerMemberView(
             name=c.name,
             weapon_class=c.weapon_class,
             element=c.element,
         )
-        row.estimated_heal_performed = c.estimated_heal_performed
-        row.estimated_damage_taken = c.estimated_damage_taken
-        row.estimated_hp_remaining_pct = c.estimated_hp_remaining_pct
-        row.base_hp = c.base_hp + c.flat_hp_bonus
+        row.estimated_heal_performed = heal_perf
+        row.estimated_damage_taken = damage_taken_at_end
+        row.estimated_hp_remaining_pct = hp_pct
+        row.base_hp = max_hp
         row.shield_value = c.shield_value
         rows[c.name] = row
     return list(rows.values())
