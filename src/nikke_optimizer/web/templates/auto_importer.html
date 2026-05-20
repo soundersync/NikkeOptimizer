@@ -144,6 +144,38 @@
     </div>
 </div>
 
+{# Daemon code-version badge: surface when the running daemon is on
+   stale code vs. the on-disk HEAD. Prevents silent staleness like
+   the 2026-05-19 rookie-run-14 incident where the daemon was 5h
+   behind the user-snapshot writer commit. #}
+{% if daemon_meta and (daemon_meta.commit or daemon_meta.current_commit) %}
+<div class="ai-status" style="margin-top: 8px; padding: 8px 14px">
+    {% if daemon_meta.is_stale %}
+        <span class="dot missing" title="Daemon code is behind on-disk HEAD"></span>
+        <div>
+            <div class="label" style="color: #fbbf24">⚠ Stale daemon code</div>
+            <div class="meta">
+                Running <code>{{ (daemon_meta.commit or '?')[:12] }}</code>
+                · on disk <code>{{ (daemon_meta.current_commit or '?')[:12] }}</code>
+                · started <code>{{ (daemon_meta.started_at or '')[:19] }}</code>
+                — restart to pick up new code
+            </div>
+        </div>
+    {% else %}
+        <span class="dot running" title="Daemon code matches on-disk HEAD"></span>
+        <div>
+            <div class="label">Code version</div>
+            <div class="meta">
+                <code>{{ (daemon_meta.commit or '?')[:12] }}</code>
+                {% if daemon_meta.started_at %}
+                · started <code>{{ daemon_meta.started_at[:19] }}</code>
+                {% endif %}
+            </div>
+        </div>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="ai-section">
     <h2>Live log tail (SSE)</h2>
     <div id="ai-tail" class="ai-tail">

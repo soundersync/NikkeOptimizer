@@ -42,10 +42,58 @@ DEFAULT_LOCK_PATH = Path("/tmp/nikke-autoimport.lock")
 SYNCTHING_CONFIG = Path.home() / "Library/Application Support/Syncthing/config.xml"
 STATE_DIR = Path.home() / "Library/Application Support/NikkeOptimizer/state"
 LAST_EVENT_FILE = STATE_DIR / "syncthing_last_event_id.txt"
+DAEMON_STATUS_FILE = STATE_DIR / "daemon_status.json"
 
 LOG_ROTATE_BYTES = 5 * 1024 * 1024  # 5 MB
 DEBOUNCE_SECONDS = 5
 POLL_TIMEOUT_S = 60  # long-poll window held open by Syncthing
+
+
+# ---------------------------------------------------------------------------
+# Daemon version tracking — restart self when running code differs from
+# what's on disk (e.g., user committed + we're still running stale code).
+# Without this the daemon would silently use the old behavior until a
+# manual restart, which exact scenario hit us 2026-05-19 when t14's
+# self-refresh used pre-user-snapshot code.
+# ---------------------------------------------------------------------------
+
+
+def _git_head() -> Optional[str]:
+    """Return the current ``git rev-parse HEAD`` for the repo, or None
+    when not in a git checkout / git unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_REPO_ROOT, capture_output=True, text=True, timeout=5.0,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return None
+
+
+def _write_daemon_status(
+    *, started_at: datetime, commit: Optional[str], pid: int,
+) -> None:
+    """Write a JSON sidecar describing the running daemon. Read by
+    the web UI to surface staleness."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    DAEMON_STATUS_FILE.write_text(json.dumps({
+        "started_at": started_at.isoformat(),
+        "commit": commit,
+        "pid": pid,
+    }, indent=2))
+
+
+def read_daemon_status() -> Optional[dict]:
+    """Read the sidecar JSON. Returns None when missing/corrupt."""
+    if not DAEMON_STATUS_FILE.is_file():
+        return None
+    try:
+        return json.loads(DAEMON_STATUS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 # Per-tournament soft watchdog for the player_data scrape pass.
 # Mid-run snapshot writes persist to the status sidecar after each
@@ -497,6 +545,20 @@ def run_daemon(
         config.folder_id, config.folder_path, config.address,
     )
 
+    # Capture the commit at daemon start. Each poll-loop iteration
+    # checks whether on-disk HEAD has changed; if so we exit cleanly
+    # and let launchd auto-restart with the fresh code. Prevents
+    # silently running stale logic after deploys.
+    startup_commit = _git_head()
+    started_at = datetime.now(timezone.utc)
+    _write_daemon_status(
+        started_at=started_at, commit=startup_commit, pid=os.getpid(),
+    )
+    log.info(
+        "daemon version: commit=%s pid=%d started_at=%s",
+        (startup_commit or "?")[:12], os.getpid(), started_at.isoformat(),
+    )
+
     with single_instance_lock(lock_path):
         # 1. Startup ingest.
         run_ingest_and_log(
@@ -514,8 +576,22 @@ def run_daemon(
         log.info("starting event subscription from id=%d", last_id)
 
         pending_since: Optional[float] = None
+        last_version_check = time.time()
 
         while True:
+            # Code-version check — every 60s see if on-disk HEAD has
+            # advanced past what we started with. If so, exit cleanly
+            # and let launchd restart us with new code.
+            if startup_commit and (time.time() - last_version_check) > 60:
+                last_version_check = time.time()
+                current = _git_head()
+                if current and current != startup_commit:
+                    log.info(
+                        "code version changed: %s -> %s; exiting for restart",
+                        startup_commit[:12], current[:12],
+                    )
+                    return 0
+
             try:
                 matching, max_id = poll_for_completion(
                     config, since=last_id, timeout_s=poll_timeout_s,

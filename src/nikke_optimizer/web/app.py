@@ -4533,6 +4533,19 @@ def create_app(
 
         status = ai.daemon_status()
         entries = ai.parse_audit_log_entries(ai.DEFAULT_LOG_PATH, n=10)
+        # Daemon version sidecar: surface running commit + staleness vs
+        # the on-disk HEAD so the user can spot when the daemon needs a
+        # restart to pick up new code. Saved us from the 2026-05-19
+        # rookie-run-14 silent-stale-code incident.
+        daemon_meta = ai.read_daemon_status() or {}
+        current_commit = ai._git_head()
+        daemon_meta["current_commit"] = current_commit
+        if daemon_meta.get("commit") and current_commit:
+            daemon_meta["is_stale"] = (
+                daemon_meta["commit"] != current_commit
+            )
+        else:
+            daemon_meta["is_stale"] = None
         return templates.TemplateResponse(
             request, "auto_importer.html",
             {
@@ -4542,6 +4555,7 @@ def create_app(
                 "stderr_path": ai.DEFAULT_LOG_PATH.with_name("auto_import.stderr.log"),
                 "plist_path": ai.LAUNCHD_PLIST,
                 "action_result": action_result,
+                "daemon_meta": daemon_meta,
             },
         )
 

@@ -321,7 +321,7 @@ class ShiftyPadFetcher:
         if elapsed < target:
             time.sleep(target - elapsed)
 
-    def fetch_home(self, uid_b64: str, *, max_retries: int = 1) -> HomePayload:
+    def fetch_home(self, uid_b64: str, *, max_retries: int = 2) -> HomePayload:
         """Fetch the home page payload for a player.
 
         ``max_retries`` controls how many times we'll re-navigate when
@@ -331,9 +331,11 @@ class ShiftyPadFetcher:
         response DOES land in ``_captured`` and counts as "we have a
         signal", so genuine private accounts are not retried.
 
-        Default is one retry, which empirically catches the slow-XHR
-        race that mis-tagged 5 players as "Nikkes public" in the
-        season-29 scrape.
+        Default is two retries (3 attempts total) with exponential
+        backoff between them. Bumped from 1 retry after a 2026-05-19
+        observation where a manual ``refresh-self-from-rookie 14``
+        flaked twice in a row with "GetUserCharacters missing" while
+        a direct ``fetch-shiftyspad`` call 30s later worked fine.
         """
         url = HOME_URL_TEMPLATE.format(uid=uid_b64, openid=uid_b64)
         for attempt in range(max_retries + 1):
@@ -341,14 +343,20 @@ class ShiftyPadFetcher:
             if self._captured.get("Game/GetUserCharacters") is not None:
                 break
             if attempt < max_retries:
+                # Log what XHRs DID land — diagnostic for triaging
+                # whether the page even loaded vs. just one XHR missing.
+                captured_keys = list(self._captured.keys())
                 log.warning(
                     "fetch_home: GetUserCharacters missing for uid=%s; "
-                    "re-navigating (attempt %d/%d)",
+                    "re-navigating (attempt %d/%d). Captured XHRs: %s",
                     uid_b64, attempt + 2, max_retries + 1,
+                    captured_keys or "none",
                 )
-                # Small extra human-paced gap before the retry so the
-                # back-to-back navigation doesn't fingerprint as a bot.
-                time.sleep(self._rng.uniform(2.0, 3.5))
+                # Exponential backoff: 3-5s, then 6-10s, then 12-20s.
+                # Spreads us out from any soft rate-limit BlablaLink
+                # might apply on back-to-back navigations.
+                base = (2 ** attempt) * 3.0
+                time.sleep(self._rng.uniform(base, base * 1.7))
 
         payload = HomePayload(raw_responses=dict(self._captured))
 
